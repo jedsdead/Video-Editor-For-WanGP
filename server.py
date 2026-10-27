@@ -9,11 +9,13 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import luts as L
 from . import media as M
 from . import render as R
+from . import titles as TT
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
@@ -43,7 +45,8 @@ class EditorService:
         self.projects_dir = os.path.join(self.data_root, "projects")
         self.exports_dir = os.path.join(self.data_root, "exports")
         self.temp_dir = os.path.join(self.data_root, "temp")
-        for folder in (self.projects_dir, self.exports_dir, self.temp_dir):
+        self.luts_dir = os.path.join(self.data_root, "luts")
+        for folder in (self.projects_dir, self.exports_dir, self.temp_dir, self.luts_dir):
             os.makedirs(folder, exist_ok=True)
         self.registry = M.MediaRegistry(self.data_root)
         self.jobs = {}
@@ -78,7 +81,8 @@ def create_app(get_config):
         except Exception:
             pass
         return {"data_root": service.data_root, "exports_dir": service.exports_dir, "device": device, "rife": rife,
-                "codecs": [{"id": key, "label": value["label"]} for key, value in R.CODECS.items()],
+                "codecs": [{"id": key, "label": value["label"], "kind": value.get("kind", "video")} for key, value in R.CODECS.items()],
+                "fonts": TT.available_fonts(),
                 "roots": [{"label": "WanGP outputs", "path": service.save_path},
                           {"label": "WanGP image outputs", "path": service.image_save_path},
                           {"label": "Editor uploads", "path": service.registry.upload_dir},
@@ -175,6 +179,19 @@ def create_app(get_config):
             raise HTTPException(404, "File missing")
         return FileResponse(path)
 
+    @app.post("/api/media/{media_id}/reverse")
+    def media_reverse(media_id: str):
+        _item(media_id)
+        return service.registry.public(service.registry.make_reverse(media_id))
+
+    @app.get("/api/media/{media_id}/proxy_rev")
+    def media_proxy_rev(media_id: str):
+        _item(media_id)
+        path = service.registry.reverse_path(media_id)
+        if not path:
+            raise HTTPException(404, "Reversed preview not ready")
+        return FileResponse(path)
+
     @app.get("/api/media/{media_id}/original")
     def media_original(media_id: str):
         item = _item(media_id)
@@ -206,6 +223,44 @@ def create_app(get_config):
             return {}
         with open(path, "r", encoding="utf-8") as handle:
             return json.load(handle)
+
+    # ------------------------------------------------------------------ LUTs and fonts
+    @app.get("/api/luts")
+    def list_luts():
+        names = sorted(entry.name[:-5] for entry in os.scandir(service.luts_dir) if entry.name.lower().endswith(".cube"))
+        return names
+
+    @app.post("/api/luts")
+    async def upload_luts(files: list[UploadFile] = File(...)):
+        saved, errors = [], []
+        for upload_file in files:
+            raw = await upload_file.read()
+            name = L.safe_name(upload_file.filename)
+            try:
+                text = raw.decode("utf-8", "ignore")
+                L.parse_cube(text)
+            except Exception as error:
+                errors.append({"name": upload_file.filename, "error": str(error)})
+                continue
+            with open(os.path.join(service.luts_dir, name + ".cube"), "w", encoding="utf-8") as handle:
+                handle.write(text)
+            saved.append(name)
+        return {"saved": saved, "errors": errors}
+
+    @app.get("/api/luts/{name}")
+    def get_lut(name: str):
+        path = os.path.join(service.luts_dir, L.safe_name(name) + ".cube")
+        if not os.path.isfile(path):
+            raise HTTPException(404, "LUT not found")
+        with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+            return PlainTextResponse(handle.read())
+
+    @app.delete("/api/luts/{name}")
+    def delete_lut(name: str):
+        path = os.path.join(service.luts_dir, L.safe_name(name) + ".cube")
+        if os.path.isfile(path):
+            os.remove(path)
+        return {"ok": True}
 
     # ------------------------------------------------------------------ projects
     def _project_path(name):

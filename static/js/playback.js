@@ -1,9 +1,16 @@
-// Playback engine: master clock, pooled <video>/<audio> elements kept in sync with the timeline,
-// the Web Audio mixer graph (clip gain -> track strip -> master) and the per-frame render of the viewer.
+// Playback engine: master clock (with J/K/L shuttle), pooled <video>/<audio>/canvas sources kept in sync with the
+// timeline, the Web Audio mixer graph and the per-frame render of the viewer.
+//
+// Audio graph per track:  clips -> input -> EQ low/mid/high -> compressor -> makeup -> fader(+automation, mute) -> pan -> master in
+// Master:                 master in -> EQ -> compressor -> makeup -> master fader -> speakers (+ meters and LUFS)
+// render.py applies the same EQ/compressor (via ffmpeg) and the same fader, automation and pan maths on export.
 import { state, P, bus, clipsOn, videoTracks, audioTracks, clipDur, srcTime, speedAt, fadeFactor, isRamped, transitionInfo,
-         kindOf, mediaOf, timelineEnd, getClip, audioTransitionGains, fps, clipWindow, trackKind, prop } from "./model.js";
+         mediaOf, timelineEnd, getClip, audioTransitionGains, fps, clipWindow, prop, gradeAt, hasGradeKeys,
+         trackGainDb } from "./model.js";
 import { gradeUniforms } from "./grade.js";
 import { isAudioTransition } from "./transitions.js";
+import { drawTitle } from "./titles.js";
+import { ensureLut } from "./lut.js";
 import { dbToGain, clamp } from "./util.js";
 
 const LOOKAHEAD = 2.5;
@@ -13,8 +20,10 @@ export class Playback {
     this.renderer = renderer;
     this.stage = stage;
     this.playing = false;
+    this.rate = 1;
     this.time = 0;
     this.loop = false;
+    this.scrubAudio = true;
     this.pool = new Map();
     this.dirty = true;
     this.ctx = null;
@@ -22,8 +31,10 @@ export class Playback {
     this.gradeCache = new WeakMap();
     this.pending = false;
     this.lastEmit = -1;
+    this.onNeedReverse = null;
+    this.loud = { blocks: [], ring: [], integratedBlocks: [] };
     bus.on("change", () => { this.dirty = true; });
-    bus.on("project", () => { this.resetPool(); this.dirty = true; });
+    bus.on("project", () => { this.resetPool(); this.dirty = true; this.resetLoudness(); });
     bus.on("media-updated", (id) => this.dropMedia(id));
     new ResizeObserver(() => this.layout()).observe(stage);
     document.addEventListener("visibilitychange", () => { if (document.hidden) this.pause(); });
@@ -45,6 +56,7 @@ export class Playback {
     const pxW = Math.min(width, Math.round(cssW * dpr)), pxH = Math.min(height, Math.round(cssH * dpr));
     this.renderer.setSize(Math.max(2, pxW), Math.max(2, pxH));
     this.dirty = true;
+    bus.emit("viewer-layout");
   }
 
   // ---------------------------------------------------------------- transport
@@ -56,27 +68,37 @@ export class Playback {
     return [start, Math.max(start, end)];
   }
 
-  play() {
-    if (this.playing) return;
+  play(rate = 1) {
     this.ensureAudio();
     const [start, end] = this.playRange();
-    if (this.time >= end - 1e-3 || (this.loop && (this.time < start || this.time >= end))) this.time = start;
-    this.playing = true;
+    if (rate > 0 && (this.time >= end - 1e-3 || (this.loop && (this.time < start || this.time >= end)))) this.time = start;
+    if (rate < 0 && this.time <= 1e-3) return;
+    this.rate = rate;
     this.wallStart = performance.now();
     this.timeStart = this.time;
-    bus.emit("playstate", true);
+    if (!this.playing) { this.playing = true; bus.emit("playstate", true); }
+    bus.emit("rate", rate);
   }
   pause() {
     if (!this.playing) return;
     this.playing = false;
+    this.rate = 1;
     for (const entry of this.pool.values()) if (entry.el && entry.el.pause) entry.el.pause();
     this.time = Math.round(this.time * fps()) / fps();
     state.playhead = this.time;
     this.dirty = true;
     bus.emit("playstate", false);
+    bus.emit("rate", 1);
     bus.emit("time", this.time);
   }
-  toggle() { this.playing ? this.pause() : this.play(); }
+  toggle() { this.playing ? this.pause() : this.play(1); }
+  // J/K/L: repeated presses double the speed in that direction (up to 8x).
+  shuttle(direction) {
+    if (direction === 0) { this.pause(); return; }
+    let rate = direction;
+    if (this.playing && Math.sign(this.rate) === direction) rate = clamp(this.rate * 2, -8, 8);
+    this.play(rate);
+  }
 
   seek(t, { snap = true } = {}) {
     if (!Number.isFinite(t)) return;
@@ -87,19 +109,58 @@ export class Playback {
     this.dirty = true;
     bus.emit("time", t);
   }
-  step(frames) { this.pause(); this.seek(this.time + frames / fps()); }
+  step(frames) { this.pause(); this.seek(this.time + frames / fps()); this.scrub(this.time); }
 
   // ---------------------------------------------------------------- audio graph
   ensureAudio() {
     if (!this.ctx) {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       this.ctx = new Ctx({ latencyHint: "interactive", sampleRate: 48000 });
+      this.masterIn = this.ctx.createGain();
+      this.masterFx = this.makeFx(this.masterIn);
       this.master = this.ctx.createGain();
+      this.masterFx.out.connect(this.master);
       this.master.connect(this.ctx.destination);
       this.masterMeter = this.makeMeter(this.master);
+      this.makeLoudnessMeter(this.master);
       for (const entry of this.pool.values()) if (entry.kind === "audio") this.connectAudio(entry);
     }
     if (this.ctx.state === "suspended") this.ctx.resume();
+  }
+
+  // EQ (low shelf, peaking, high shelf) and compressor with makeup gain, fed by `input`.
+  makeFx(input) {
+    const low = this.ctx.createBiquadFilter(); low.type = "lowshelf";
+    const mid = this.ctx.createBiquadFilter(); mid.type = "peaking";
+    const high = this.ctx.createBiquadFilter(); high.type = "highshelf";
+    const comp = this.ctx.createDynamicsCompressor(); comp.knee.value = 6;
+    const makeup = this.ctx.createGain();
+    input.connect(low); low.connect(mid); mid.connect(high); high.connect(comp); comp.connect(makeup);
+    return { low, mid, high, comp, makeup, out: makeup };
+  }
+
+  applyFx(fx, settings) {
+    if (!fx || !settings) return;
+    const now = this.ctx.currentTime;
+    const eq = settings.eq || {}, comp = settings.comp || {};
+    const on = !!eq.on;
+    fx.low.frequency.setTargetAtTime(eq.low?.f || 120, now, 0.02);
+    fx.low.gain.setTargetAtTime(on ? (eq.low?.g || 0) : 0, now, 0.02);
+    fx.mid.frequency.setTargetAtTime(eq.mid?.f || 1000, now, 0.02);
+    fx.mid.Q.setTargetAtTime(Math.max(0.1, eq.mid?.q || 1), now, 0.02);
+    fx.mid.gain.setTargetAtTime(on ? (eq.mid?.g || 0) : 0, now, 0.02);
+    fx.high.frequency.setTargetAtTime(eq.high?.f || 8000, now, 0.02);
+    fx.high.gain.setTargetAtTime(on ? (eq.high?.g || 0) : 0, now, 0.02);
+    const c = !!comp.on;
+    fx.comp.threshold.setTargetAtTime(c ? clamp(comp.threshold ?? -18, -100, 0) : 0, now, 0.02);
+    fx.comp.ratio.setTargetAtTime(c ? clamp(comp.ratio ?? 3, 1, 20) : 1, now, 0.02);
+    fx.comp.attack.setTargetAtTime(clamp((comp.attack ?? 10) / 1000, 0, 1), now, 0.02);
+    fx.comp.release.setTargetAtTime(clamp((comp.release ?? 150) / 1000, 0, 1), now, 0.02);
+    // Web Audio's compressor adds its own makeup gain of 0.6 x the full-range gain reduction; cancel it so only the
+    // user's makeup applies, as with ffmpeg's acompressor on export.
+    const t = clamp(comp.threshold ?? -18, -100, 0), r = clamp(comp.ratio ?? 3, 1, 20);
+    const autoMakeup = -0.6 * t * (1 - 1 / r);
+    fx.makeup.gain.setTargetAtTime(c ? dbToGain((comp.makeup || 0) - autoMakeup) : 1, now, 0.02);
   }
 
   makeMeter(node) {
@@ -114,14 +175,69 @@ export class Playback {
     return { analysers, buf: new Float32Array(1024) };
   }
 
+  // ITU-R BS.1770 K-weighting (shelf + high-pass) feeding per-channel analysers.
+  makeLoudnessMeter(node) {
+    const shelf = this.ctx.createBiquadFilter(); shelf.type = "highshelf"; shelf.frequency.value = 1681.97; shelf.gain.value = 4.0;
+    const hp = this.ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 38.13; hp.Q.value = 0.5003;
+    node.connect(shelf); shelf.connect(hp);
+    const split = this.ctx.createChannelSplitter(2);
+    hp.connect(split);
+    this.loud.analysers = [0, 1].map(i => { const a = this.ctx.createAnalyser(); a.fftSize = 2048; split.connect(a, i); return a; });
+    this.loud.buf = new Float32Array(2048);
+  }
+
+  resetLoudness() { this.loud.ring = []; this.loud.integratedBlocks = []; this.loud.lastBlock = 0; }
+
+  measureLoudness(now) {
+    const L = this.loud;
+    if (!L.analysers || !this.playing || this.rate !== 1) return;
+    let ms = 0;
+    for (const a of L.analysers) {
+      a.getFloatTimeDomainData(L.buf);
+      let sum = 0;
+      for (let i = 0; i < L.buf.length; i++) sum += L.buf[i] * L.buf[i];
+      ms += sum / L.buf.length;
+    }
+    L.ring.push({ t: now, ms });
+    while (L.ring.length && now - L.ring[0].t > 3000) L.ring.shift();
+    if (now - (L.lastBlock || 0) >= 100) {   // a 400 ms gating block every 100 ms
+      L.lastBlock = now;
+      const block = this.meanLoudness(400, now);
+      if (block !== null && block > -70) L.integratedBlocks.push(block);
+    }
+  }
+  meanLoudness(windowMs, now) {
+    const items = this.loud.ring.filter(r => now - r.t <= windowMs);
+    if (!items.length) return null;
+    const ms = items.reduce((s, r) => s + r.ms, 0) / items.length;
+    return ms > 0 ? -0.691 + 10 * Math.log10(ms) : -Infinity;
+  }
+  // {m: momentary, s: short-term, i: integrated} in LUFS (null when unavailable)
+  loudness() {
+    const now = performance.now();
+    const blocks = this.loud.integratedBlocks;
+    let integrated = null;
+    if (blocks.length) {
+      const energy = (list) => list.reduce((s, l) => s + Math.pow(10, (l + 0.691) / 10), 0) / list.length;
+      const ungated = -0.691 + 10 * Math.log10(energy(blocks));
+      const gated = blocks.filter(l => l > ungated - 10);
+      if (gated.length) integrated = -0.691 + 10 * Math.log10(energy(gated));
+    }
+    const live = this.playing && this.rate === 1;
+    return { m: live ? this.meanLoudness(400, now) : null, s: live ? this.meanLoudness(3000, now) : null, i: integrated };
+  }
+
   strip(trackId) {
     let s = this.strips.get(trackId);
     if (!s && this.ctx) {
       const input = this.ctx.createGain();
+      const fx = this.makeFx(input);
+      const fader = this.ctx.createGain();
       const pan = this.ctx.createStereoPanner();
-      input.connect(pan);
-      pan.connect(this.master);
-      s = { input, pan, meter: this.makeMeter(pan) };
+      fx.out.connect(fader);
+      fader.connect(pan);
+      pan.connect(this.masterIn);
+      s = { input, fx, fader, pan, meter: this.makeMeter(pan) };
       this.strips.set(trackId, s);
     }
     return s;
@@ -158,6 +274,12 @@ export class Playback {
     });
     return { l: out[0], r: out[1] };
   }
+  // gain reduction of a track's (or the master's) compressor, in dB (negative)
+  reduction(trackId) {
+    const fx = trackId === "master" ? this.masterFx : this.strips.get(trackId)?.fx;
+    const r = fx?.comp?.reduction;
+    return typeof r === "number" ? r : (r?.value ?? 0);
+  }
 
   updateStrips() {
     if (!this.ctx) return;
@@ -166,27 +288,40 @@ export class Playback {
     const now = this.ctx.currentTime;
     for (const t of tracks) {
       const s = this.strip(t.id);
-      const g = t.mute || (soloed && !t.solo) ? 0 : dbToGain(t.volume || 0);
-      s.input.gain.setTargetAtTime(g, now, 0.015);
+      const g = t.mute || (soloed && !t.solo) ? 0 : dbToGain(t.volume || 0) * dbToGain(trackGainDb(t, this.time));
+      s.fader.gain.setTargetAtTime(g, now, 0.015);
       s.pan.pan.setTargetAtTime(clamp(t.pan || 0, -1, 1), now, 0.015);
+      this.applyFx(s.fx, t.fx);
     }
+    this.applyFx(this.masterFx, P().master?.fx);
     this.master.gain.setTargetAtTime(dbToGain(P().master?.volume || 0), now, 0.015);
   }
 
   // ---------------------------------------------------------------- element pool
-  url(item) {
+  url(item, reversed) {
     if (item.kind === "image") return `api/media/${item.id}/original`;
-    return `api/media/${item.id}/proxy`;
+    return reversed ? `api/media/${item.id}/proxy_rev` : `api/media/${item.id}/proxy`;
+  }
+
+  // Reversed clips play from a reversed proxy when it exists (smooth); until then the forward proxy is stepped.
+  reversedReady(clip) {
+    const item = mediaOf(clip);
+    if (!clip.reverse || !item) return false;
+    if (item.proxy_rev === "ready") return true;
+    if (this.onNeedReverse && item.proxy_rev !== "pending" && item.proxy_rev !== "error") this.onNeedReverse(item);
+    return false;
   }
 
   entryFor(clip, kind) {
     let entry = this.pool.get(clip.id);
     const item = mediaOf(clip);
     if (!item) return null;
-    if (entry && entry.mediaId !== clip.mediaId) { this.dispose(clip.id); entry = null; }
+    const rev = kind !== "image" && kind !== "title" && this.reversedReady(clip);
+    if (entry && (entry.mediaId !== clip.mediaId || entry.kind !== kind || entry.rev !== rev)) { this.dispose(clip.id); entry = null; }
     if (!entry) {
       let el;
-      if (kind === "image") { el = new Image(); el.decoding = "async"; el.onload = () => { this.dirty = true; }; }
+      if (kind === "title") el = document.createElement("canvas");
+      else if (kind === "image") { el = new Image(); el.decoding = "async"; el.onload = () => { this.dirty = true; }; }
       else {
         el = document.createElement(kind === "audio" ? "audio" : "video");
         el.preload = "auto";
@@ -195,8 +330,8 @@ export class Playback {
         el.addEventListener("seeked", () => { this.dirty = true; });
         el.addEventListener("loadeddata", () => { this.dirty = true; });
       }
-      el.src = this.url(item);
-      entry = { el, kind, mediaId: clip.mediaId, proxy: item.proxy, used: performance.now(), trackId: null };
+      if (kind !== "title") el.src = this.url(item, rev);
+      entry = { el, kind, rev, mediaId: clip.mediaId, used: performance.now(), trackId: null };
       this.pool.set(clip.id, entry);
       if (kind === "audio") this.connectAudio(entry);
     }
@@ -209,26 +344,37 @@ export class Playback {
     if (!entry) return;
     try { entry.el.pause && entry.el.pause(); } catch (_) { /* ignore */ }
     try { entry.gain && entry.gain.disconnect(); entry.node && entry.node.disconnect(); } catch (_) { /* ignore */ }
-    entry.el.removeAttribute("src");
-    if (entry.el.load) try { entry.el.load(); } catch (_) { /* ignore */ }
+    if (entry.kind !== "title") {
+      entry.el.removeAttribute("src");
+      if (entry.el.load) try { entry.el.load(); } catch (_) { /* ignore */ }
+    }
     this.pool.delete(clipId);
   }
   resetPool() { for (const id of [...this.pool.keys()]) this.dispose(id); }
   dropMedia(mediaId) { for (const [id, e] of [...this.pool]) if (e.mediaId === mediaId) this.dispose(id); this.dirty = true; }
 
+  // Element time for a clip time: forward proxies use source time; reversed proxies run backwards from the end.
+  elementTime(entry, clip, tau) {
+    const item = mediaOf(clip);
+    const src = srcTime(clip, tau);
+    return entry.rev ? (item.duration || 0) - src : src;
+  }
+
   syncElement(entry, clip, t, isAudio) {
     const el = entry.el;
     const item = mediaOf(clip);
     const tau = t - clip.start;
-    const raw = srcTime(clip, tau);
+    const raw = this.elementTime(entry, clip, tau);
     const maxT = Math.max(0, (item.duration || 0) - 0.03);
     const desired = clamp(raw, 0, maxT);
-    const speed = speedAt(clip, tau);
-    // Below the slowest rate a media element can play, step through frames by seeking (covers speed 0 = freeze).
-    const holding = raw < 0 || raw > maxT || speed < 0.07;
+    const speed = speedAt(clip, tau) * Math.abs(this.rate);
+    // Elements can't play backwards or slower than 1/16: step by seeking instead (reverse shuttle, freezes, unprepared reverse).
+    const stepping = this.rate < 0 || (clip.reverse && !entry.rev);
+    const holding = raw < 0 || raw > maxT || speed < 0.07 || stepping;
     if (!this.playing || holding) {
       if (!el.paused) el.pause();
-      if (!el.seeking && Math.abs(el.currentTime - desired) > (this.playing && speed >= 0.07 ? 0.2 : 0.015)) el.currentTime = desired;
+      const tolerance = this.playing && !stepping && speed >= 0.07 ? 0.2 : 0.015;
+      if (!el.seeking && Math.abs(el.currentTime - desired) > tolerance) el.currentTime = desired;
       return;
     }
     const rate = clamp(speed, 0.0625, 16);
@@ -238,34 +384,59 @@ export class Playback {
     if (el.paused) {
       if (Math.abs(el.currentTime - desired) > 0.03) el.currentTime = desired;
       el.play().catch(() => {});
-    } else if (Math.abs(el.currentTime - desired) > (isAudio ? 0.12 : 0.3)) {
+    } else if (Math.abs(el.currentTime - desired) > (isAudio ? 0.12 : 0.3) * Math.max(1, Math.abs(this.rate))) {
       el.currentTime = desired;
     }
   }
 
   // ---------------------------------------------------------------- per frame
+  // Geometry shared with render.py Compositor.place: crop fractions, rotation (clockwise degrees), centre offset.
+  geometry(clip, kt, srcW, srcH) {
+    const p = P();
+    const canvas = this.renderer.canvas;
+    const k = canvas.width / p.settings.width;
+    const fit = Math.min(p.settings.width / srcW, p.settings.height / srcH) * Math.max(0, prop(clip, "scale", kt));
+    const w = srcW * fit * k, h = srcH * fit * k;
+    const cl = clamp(prop(clip, "cropL", kt), 0, 1), cr = clamp(prop(clip, "cropR", kt), 0, 1);
+    const ct = clamp(prop(clip, "cropT", kt), 0, 1), cb = clamp(prop(clip, "cropB", kt), 0, 1);
+    const rot = (prop(clip, "rotation", kt) || 0) * Math.PI / 180;
+    const ox = (cl - cr) / 2 * w, oy = (ct - cb) / 2 * h;
+    const cx = canvas.width / 2 + prop(clip, "x", kt) * k + ox * Math.cos(rot) - oy * Math.sin(rot);
+    const cy = canvas.height / 2 + prop(clip, "y", kt) * k + ox * Math.sin(rot) + oy * Math.cos(rot);
+    return { center: [cx, cy], size: [Math.max(0, w * (1 - cl - cr)), Math.max(0, h * (1 - ct - cb))], rotation: rot,
+             uv: [cl, ct, 1 - cr, 1 - cb], full: [w, h], k };
+  }
+
   layerFor(clip, t) {
     const item = mediaOf(clip);
     if (!item) return null;
-    const kind = item.kind === "image" ? "image" : "video";
+    const kind = item.kind === "image" ? "image" : item.kind === "title" ? "title" : "video";
     const entry = this.entryFor(clip, kind);
     if (!entry) return null;
     if (kind === "video") this.syncElement(entry, clip, t, false);
     const p = P();
-    const canvas = this.renderer.canvas;
-    const k = canvas.width / p.settings.width;
-    const sw = item.width || p.settings.width, sh = item.height || p.settings.height;
+    if (kind === "title") {
+      const sig = JSON.stringify([clip.title, p.settings.width, p.settings.height]);
+      if (entry.sig !== sig) { drawTitle(entry.el, clip.title, p.settings.width, p.settings.height); entry.sig = sig; }
+    }
+    const sw = kind === "title" ? p.settings.width : item.width || p.settings.width;
+    const sh = kind === "title" ? p.settings.height : item.height || p.settings.height;
     const d = clipDur(clip);
-    const tau = t - clip.start;
-    const kt = clamp(tau, 0, d);
-    const fit = Math.min(p.settings.width / sw, p.settings.height / sh) * Math.max(0, prop(clip, "scale", kt));
-    const w = sw * fit * k, h = sh * fit * k;
-    const x = canvas.width / 2 + prop(clip, "x", kt) * k - w / 2;
-    const y = canvas.height / 2 + prop(clip, "y", kt) * k - h / 2;
+    const kt = clamp(t - clip.start, 0, d);
+    const geo = this.geometry(clip, kt, sw, sh);
     const alpha = clamp(prop(clip, "opacity", kt), 0, 1) * fadeFactor(clip, kt, d);
-    let grade = this.gradeCache.get(clip.grade);
-    if (grade === undefined) { grade = gradeUniforms(clip.grade); if (clip.grade) this.gradeCache.set(clip.grade, grade); }
-    return { type: "clip", source: entry.el, rect: [x, y, w, h], alpha, grade };
+    let gradeObj = clip.grade, grade;
+    if (hasGradeKeys(clip)) { gradeObj = gradeAt(clip, kt); grade = gradeUniforms(gradeObj); }
+    else {
+      grade = this.gradeCache.get(clip.grade);
+      if (grade === undefined) { grade = gradeUniforms(clip.grade); if (clip.grade) this.gradeCache.set(clip.grade, grade); }
+    }
+    let lut = null;
+    if (gradeObj && gradeObj.lut && gradeObj.enabled !== false) {
+      ensureLut(this.renderer, gradeObj.lut, () => { this.dirty = true; });
+      lut = { name: gradeObj.lut, mix: clamp(gradeObj.lutMix ?? 1, 0, 1) };
+    }
+    return { type: "clip", clip, source: entry.el, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, alpha, grade, lut };
   }
 
   buildFrame(t) {
@@ -294,59 +465,100 @@ export class Playback {
         }
       }
     }
+    this.lastLayers = entries;
     return { entries, needed };
   }
 
+  clipGain(clip, t) {
+    const d = clipDur(clip);
+    const tau = t - clip.start;
+    let g = dbToGain(prop(clip, "volume", clamp(tau, 0, d))) * fadeFactor(clip, clamp(tau, 0, d), d);
+    for (const tr of P().transitions) {
+      if (!isAudioTransition(tr.type) || (tr.a !== clip.id && tr.b !== clip.id)) continue;
+      const info = transitionInfo(tr);
+      if (!info || t < info.lo || t >= info.hi) continue;
+      const [ga, gb] = audioTransitionGains(tr.type, (t - info.lo) / tr.duration);
+      g *= tr.a === clip.id ? ga : gb;
+    }
+    if (speedAt(clip, clamp(tau, 0, d)) < 0.1) g *= clamp(speedAt(clip, clamp(tau, 0, d)) / 0.1, 0, 1);
+    return g;
+  }
+
   syncAudio(t, needed) {
-    const soloTracks = audioTracks();
-    const transitions = P().transitions.filter(tr => isAudioTransition(tr.type));
-    for (const track of soloTracks) {
+    for (const track of audioTracks()) {
       for (const clip of clipsOn(track.id)) {
         const item = mediaOf(clip);
         if (!item || !(item.has_audio || item.kind === "audio")) continue;
         const [w0, w1] = clipWindow(clip);
         const active = t >= w0 && t < w1;
-        const soon = this.playing && w0 > t && w0 - t < LOOKAHEAD;
+        const soon = this.playing && this.rate > 0 && w0 > t && w0 - t < LOOKAHEAD;
         if (!active && !soon) continue;
         needed.add(clip.id);
         const entry = this.entryFor(clip, "audio");
         if (!entry) continue;
         if (this.ctx) this.routeAudio(entry, track.id);
         if (!active) { this.preload(entry, clip); continue; }
-        this.syncElement(entry, clip, t, true);
-        if (entry.gain) {
-          const d = clipDur(clip);
-          const tau = t - clip.start;
-          let g = dbToGain(prop(clip, "volume", clamp(tau, 0, d))) * fadeFactor(clip, clamp(tau, 0, d), d);
-          for (const tr of transitions) {
-            if (tr.a !== clip.id && tr.b !== clip.id) continue;
-            const info = transitionInfo(tr);
-            if (!info || t < info.lo || t >= info.hi) continue;
-            const [ga, gb] = audioTransitionGains(tr.type, (t - info.lo) / tr.duration);
-            g *= tr.a === clip.id ? ga : gb;
-          }
-          entry.gain.gain.setTargetAtTime(this.playing ? g : 0, this.ctx.currentTime, 0.008);
+        if (!this.scrubbing) this.syncElement(entry, clip, t, true);
+        if (entry.gain && !this.scrubbing) {
+          const audible = this.playing && this.rate > 0;
+          entry.gain.gain.setTargetAtTime(audible ? this.clipGain(clip, t) : 0, this.ctx.currentTime, 0.008);
         }
       }
     }
   }
 
+  // Play a short burst of audio at t while scrubbing or stepping.
+  scrub(t) {
+    if (!this.scrubAudio || this.playing || !P()) return;
+    const now = performance.now();
+    if (now - (this.lastScrub || 0) < 45) return;
+    this.lastScrub = now;
+    this.ensureAudio();
+    clearTimeout(this.scrubTimer);
+    this.scrubbing = true;
+    for (const track of audioTracks()) {
+      for (const clip of clipsOn(track.id)) {
+        const item = mediaOf(clip);
+        if (!item || !(item.has_audio || item.kind === "audio")) continue;
+        if (t < clip.start || t >= clip.start + clipDur(clip)) continue;
+        const entry = this.entryFor(clip, "audio");
+        if (!entry || !entry.gain) continue;
+        this.routeAudio(entry, track.id);
+        const el = entry.el;
+        const target = clamp(this.elementTime(entry, clip, t - clip.start), 0, Math.max(0, (item.duration || 0) - 0.1));
+        if (Math.abs(el.currentTime - target) > 0.02) el.currentTime = target;
+        el.playbackRate = 1;
+        entry.gain.gain.setTargetAtTime(this.clipGain(clip, t), this.ctx.currentTime, 0.005);
+        el.play().catch(() => {});
+      }
+    }
+    this.updateStrips();
+    this.scrubTimer = setTimeout(() => {
+      for (const entry of this.pool.values()) {
+        if (entry.kind !== "audio") continue;
+        if (entry.gain) entry.gain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.005);
+        setTimeout(() => { if (!this.playing) entry.el.pause(); }, 20);
+      }
+      this.scrubbing = false;
+    }, 90);
+  }
+
   preload(entry, clip) {
     const el = entry.el;
     if (!el.paused) el.pause();
-    const target = clamp(srcTime(clip, 0), 0, Math.max(0, (mediaOf(clip).duration || 0) - 0.03));
+    const target = clamp(this.elementTime(entry, clip, 0), 0, Math.max(0, (mediaOf(clip).duration || 0) - 0.03));
     if (!el.seeking && Math.abs(el.currentTime - target) > 0.05) el.currentTime = target;
   }
 
   preloadVideo(t, needed) {
-    if (!this.playing) return;
+    if (!this.playing || this.rate < 0) return;
     for (const track of videoTracks()) {
       if (track.hidden) continue;
       for (const clip of clipsOn(track.id)) {
         const [w0] = clipWindow(clip);
         if (w0 > t && w0 - t < LOOKAHEAD && !needed.has(clip.id)) {
           const item = mediaOf(clip);
-          if (!item || item.kind === "audio") continue;
+          if (!item || item.kind === "audio" || item.kind === "title") continue;
           const entry = this.entryFor(clip, item.kind === "image" ? "image" : "video");
           if (entry && item.kind !== "image") this.preload(entry, clip);
           needed.add(clip.id);
@@ -360,28 +572,30 @@ export class Playback {
     if (!P()) return;
     if (this.playing && window.innerWidth === 0) this.pause();
     if (this.playing) {
-      let t = this.timeStart + (now - this.wallStart) / 1000;
+      let t = this.timeStart + this.rate * (now - this.wallStart) / 1000;
       const [start, end] = this.playRange();
-      if (t >= end) {
+      if (this.rate > 0 && t >= end) {
         if (this.loop && end > start) { t = start; this.wallStart = now; this.timeStart = start; }
         else { this.time = end; state.playhead = end; this.pause(); return; }
       }
+      if (this.rate < 0 && t <= 0) { this.time = 0; state.playhead = 0; this.pause(); return; }
       this.time = t;
       state.playhead = t;
     }
     const t = this.time;
-    if (!this.playing && !this.dirty && !this.pending) return;
+    if (!this.playing && !this.dirty && !this.pending && !this.scrubbing) return;
     const { entries, needed } = this.buildFrame(t);
     this.preloadVideo(t, needed);
     this.syncAudio(t, needed);
     this.updateStrips();
+    this.measureLoudness(now);
     const complete = this.renderer.render(entries);
     this.pending = !complete;
     this.dirty = false;
     for (const [id, entry] of this.pool) {
       if (needed.has(id)) continue;
-      if (entry.el.pause && !entry.el.paused) entry.el.pause();
-      if (entry.gain && this.ctx) entry.gain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.01);
+      if (entry.el.pause && !entry.el.paused && !this.scrubbing) entry.el.pause();
+      if (entry.gain && this.ctx && !this.scrubbing) entry.gain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.01);
       if (!getClip(id) || now - entry.used > 8000) this.dispose(id);
     }
     if (this.playing || this.lastEmit !== t) { this.lastEmit = t; bus.emit("time", t); }

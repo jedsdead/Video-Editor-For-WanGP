@@ -14,6 +14,8 @@ import { MixerPanel } from "./mixer.js";
 import { TransitionsPanel } from "./transitionspanel.js";
 import { openExportDialog } from "./exportdialog.js";
 import { CURVES, FADE_CURVES } from "./keys.js";
+import { TransformOverlay } from "./transform.js";
+import { MarkersPanel } from "./markers.js";
 
 const $ = (id) => document.getElementById(id);
 const app = { status: {} };
@@ -205,6 +207,48 @@ function jumpEdit(dir) {
   if (next !== undefined) { app.playback.pause(); app.playback.seek(next); }
 }
 
+function addMarker() {
+  const m = M.edit("Add marker", () => M.addMarker(state.playhead));
+  if (m) toast(`${m.name} at ${timecode(m.t, M.fps())}`);
+}
+app.addMarker = addMarker;
+
+function editMarker(id) {
+  const m = M.getMarker(id);
+  if (!m) return;
+  prompt_("Marker", "Name", m.name || "").then((name) => { if (name !== null) M.edit("Rename marker", () => { const x = M.getMarker(id); if (x) x.name = name; }); });
+}
+
+function freezeFrame() {
+  const sel = state.selection.size ? new Set(state.selection) : null;
+  const frozen = M.edit("Freeze frame", () => M.freezeFrame(state.playhead, 2, sel));
+  if (frozen) { M.select([frozen.id]); toast("Added a 2 second freeze frame (trim it to change the length)"); }
+  else toast("Put the playhead over a video clip to freeze it", "warn");
+}
+app.freezeFrame = freezeFrame;
+
+function toggleReverse() {
+  const clips = M.selectedClips().filter(c => !M.isStill(c));
+  if (!clips.length) { toast("Select clips to reverse", "warn"); return; }
+  const on = !clips[0].reverse;
+  M.edit(on ? "Reverse" : "Play forwards", () => M.setReverse(clips.map(c => c.id), on));
+  if (on) for (const c of clips) prepareReverse(M.mediaOf(c));
+}
+
+// Build a reversed preview proxy for smooth backwards playback (export does not need it).
+const reverseRequests = new Set();
+function prepareReverse(item) {
+  if (!item || item.proxy_rev === "ready" || reverseRequests.has(item.id) || !["video", "audio"].includes(item.kind)) return;
+  reverseRequests.add(item.id);
+  P().media[item.id] = { ...item, proxy_rev: "pending" };
+  toast("Preparing reversed playback…");
+  api(`api/media/${item.id}/reverse`, { method: "POST" }).then((info) => {
+    if (P().media[item.id]) P().media[item.id] = { ...P().media[item.id], ...info };
+    bus.emit("media-updated", item.id);
+  }).catch((e) => toast(`Could not prepare reversed playback: ${e.message}`, "error")).finally(() => reverseRequests.delete(item.id));
+}
+app.prepareReverse = prepareReverse;
+
 function copyGrade() { app.colour.copy(); }
 function pasteGrade() { app.colour.paste(); }
 
@@ -252,12 +296,20 @@ function menuItems(name) {
     { label: "Copy grade", kbd: K("Ctrl+Alt+C"), action: copyGrade },
     { label: "Paste grade", kbd: K("Ctrl+Alt+V"), action: pasteGrade },
     "-",
+    { label: "Add marker", kbd: "Shift+M", action: addMarker },
+    { label: "Freeze frame at playhead", kbd: "Shift+F", action: freezeFrame },
+    { label: "Reverse selected clips", kbd: "Shift+R", action: toggleReverse },
+    { label: "Add title at playhead", kbd: "Shift+T", action: () => app.bin.addTitle() },
+    "-",
     { label: "Mark in", kbd: "I", action: setIn },
     { label: "Mark out", kbd: "O", action: setOut },
     { label: "Clear in / out", kbd: "Alt+X", action: clearInOut },
   ];
   if (name === "view") return [
     ...app.docks.menuItems(),
+    "-",
+    { label: "Audio scrubbing", check: app.playback.scrubAudio, action: () => { app.playback.scrubAudio = !app.playback.scrubAudio; localStorage.setItem("ve_scrub", app.playback.scrubAudio ? "1" : "0"); } },
+    { label: "Crop handles on the viewer", kbd: "C", check: app.overlay.cropMode, action: () => app.overlay.setCropMode(!app.overlay.cropMode) },
     "-",
     { label: "Zoom in", kbd: "+", action: () => app.timeline.setZoom(app.timeline.pps * 1.4) },
     { label: "Zoom out", kbd: "-", action: () => app.timeline.setZoom(app.timeline.pps / 1.4) },
@@ -285,7 +337,7 @@ function laneItems(clip, row) {
   const items = [{ head: "Show keyframes for" }];
   for (const [name, def] of Object.entries(M.KEYABLE)) {
     if (!(def.kind === kind || def.kind === "any")) continue;
-    if (name === "speed" && M.kindOf(clip) === "image") continue;
+    if (name === "speed" && M.isStill(clip)) continue;
     const n = M.keysOf(clip, name).length;
     items.push({ label: `${def.label}${n ? `  (${n})` : ""}`, check: current === name,
       action: () => { const c = M.getClip(clip.id); if (c) { c.lane = name; bus.emit("change"); } } });
@@ -294,6 +346,37 @@ function laneItems(clip, row) {
 }
 
 function contextMenu(x, y, hit) {
+  if (hit.area === "marker") {
+    const m = hit.marker;
+    showMenu(x, y, [
+      { head: m.name || "Marker" },
+      { label: "Rename…", action: () => editMarker(m.id) },
+      ...M.MARKER_COLORS.map((c, i) => ({ label: ["Blue", "Red", "Yellow", "Green", "Purple", "Orange", "White"][i], check: m.color === c,
+        action: () => M.edit("Marker colour", () => { const x = M.getMarker(m.id); if (x) x.color = c; }) })),
+      "-",
+      { label: "Delete marker", action: () => M.edit("Delete marker", () => M.removeMarker(m.id)) },
+    ]);
+    return;
+  }
+  if (hit.area === "auto") {
+    const trackId = hit.row.track.id;
+    if (hit.zone === "key") {
+      const key = M.trackKeys(hit.row.track)[hit.index];
+      showMenu(x, y, [
+        { head: "Automation keyframe · ease to next" },
+        ...CURVES.map(([id, label]) => ({ label, check: (key.ease || "linear") === id, action: () => M.edit("Automation ease", () => M.setTrackKeyEase(trackId, hit.index, id)) })),
+        "-",
+        { label: "Delete keyframe", action: () => M.edit("Delete automation keyframe", () => M.removeTrackKey(trackId, hit.index)) },
+      ]);
+    } else {
+      showMenu(x, y, [
+        { label: "Add automation keyframe here", kbd: "Ctrl+click", action: () => M.edit("Add automation keyframe", () => M.setTrackKeyAt(trackId, Math.max(0, hit.t), M.trackGainDb(hit.row.track, Math.max(0, hit.t)))) },
+        { label: "Clear track automation", disabled: !M.trackKeys(hit.row.track).length, action: () => M.edit("Clear automation", () => M.clearTrackKeys(trackId)) },
+        { label: "Hide automation", action: () => M.edit("Hide automation", () => { const t = M.getTrack(trackId); if (t) t.showAuto = false; }) },
+      ]);
+    }
+    return;
+  }
   if (hit.area === "clip" && hit.zone === "key") {
     const clip = hit.clip, lane = hit.lane, index = hit.keyIndex;
     const key = M.keysOf(clip, lane)[index];
@@ -342,7 +425,9 @@ function contextMenu(x, y, hit) {
       { label: "Copy", action: () => copy() },
       { label: clip.linkId ? "Unlink" : "Link selected", action: linkToggle },
       "-",
-      { label: "Reset speed to 100%", disabled: M.kindOf(clip) === "image", action: () => M.edit("Reset speed", () => M.setSpeed([...state.selection], 1)) },
+      { label: "Reset speed to 100%", disabled: M.isStill(clip), action: () => M.edit("Reset speed", () => M.setSpeed([...state.selection], 1)) },
+      { label: clip.reverse ? "Play forwards" : "Reverse", kbd: "Shift+R", disabled: M.isStill(clip), action: toggleReverse },
+      hit.row.kind === "video" ? { label: "Freeze frame at playhead", kbd: "Shift+F", disabled: M.isStill(clip), action: freezeFrame } : null,
       hit.row.kind === "video" ? { label: "Copy grade", action: copyGrade } : null,
       hit.row.kind === "video" ? { label: "Paste grade", action: pasteGrade } : null,
       "-",
@@ -371,7 +456,8 @@ function contextMenu(x, y, hit) {
 
 function showShortcuts() {
   const rows = [
-    ["Space / K / L", "Play-pause / pause / play"], ["J", "Back one second"], ["← / →", "Previous / next frame (Shift: 1 second)"],
+    ["Space", "Play / pause"], ["J / K / L", "Shuttle back / stop / forward (press again for 2x, 4x, 8x)"], ["← / →", "Previous / next frame (Shift: 1 second)"],
+    ["Shift+M", "Add a marker"], ["Shift+F", "Freeze frame at the playhead"], ["Shift+R", "Reverse selected clips"], ["Shift+T", "Add a title"], ["C", "Crop handles on the viewer"],
     ["↑ / ↓", "Previous / next edit point"], ["Home / End", "Start / end of timeline"], ["I / O, Alt+X", "Mark in / out, clear"],
     ["V / B / R", "Select / Blade / Range tool"], ["S / M", "Snapping / Magnetic timeline"], [K("Ctrl+Shift+L"), "Linked selection"],
     [K("Ctrl+B"), "Split at playhead (selected clips, or all)"], ["Del / Shift+Del", "Delete / ripple delete (clips, range or transition)"],
@@ -412,9 +498,10 @@ function onKey(e) {
   if (e.altKey && key.toLowerCase() === "x") { handled(); clearInOut(); return; }
   switch (key) {
     case " ": handled(); pb.toggle(); break;
-    case "k": case "K": handled(); pb.pause(); break;
-    case "l": case "L": handled(); pb.play(); break;
-    case "j": case "J": handled(); pb.pause(); pb.seek(state.playhead - 1); break;
+    case "k": case "K": handled(); pb.shuttle(0); break;
+    case "l": case "L": handled(); pb.shuttle(1); break;
+    case "j": case "J": handled(); pb.shuttle(-1); break;
+    case "c": case "C": handled(); app.overlay.setCropMode(!app.overlay.cropMode); break;
     case "ArrowLeft": handled(); e.shiftKey ? (pb.pause(), pb.seek(state.playhead - 1)) : pb.step(-1); break;
     case "ArrowRight": handled(); e.shiftKey ? (pb.pause(), pb.seek(state.playhead + 1)) : pb.step(1); break;
     case "ArrowUp": handled(); jumpEdit(-1); break;
@@ -425,9 +512,11 @@ function onKey(e) {
     case "o": case "O": handled(); setOut(); break;
     case "v": case "V": handled(); setTool("select"); break;
     case "b": case "B": handled(); setTool("blade"); break;
-    case "r": case "R": handled(); setTool("range"); break;
+    case "r": case "R": handled(); e.shiftKey ? toggleReverse() : setTool("range"); break;
     case "s": case "S": handled(); toggleSnap(); break;
-    case "m": case "M": handled(); toggleMagnetic(); break;
+    case "m": case "M": handled(); e.shiftKey ? addMarker() : toggleMagnetic(); break;
+    case "f": case "F": if (e.shiftKey) { handled(); freezeFrame(); } break;
+    case "t": case "T": if (e.shiftKey) { handled(); app.bin.addTitle(); } break;
     case "Delete": case "Backspace": handled(); deleteSelection(e.shiftKey); break;
     case "Escape": M.clearSelection(); state.range = null; bus.emit("range"); break;
     case "+": case "=": handled(); app.timeline.setZoom(app.timeline.pps * 1.4); break;
@@ -468,6 +557,7 @@ async function main() {
   app.scopes = new ScopesPanel(app);
   app.mixer = new MixerPanel(app);
   app.transitions = new TransitionsPanel(app);
+  app.markers = new MarkersPanel(app);
   app.docks = new Docks([
     { id: "media", title: "Media", node: app.bin.node, dock: "left" },
     { id: "transitions", title: "Transitions", node: app.transitions.node, dock: "left" },
@@ -475,6 +565,7 @@ async function main() {
     { id: "colour", title: "Colour", node: app.colour.node, dock: "right" },
     { id: "scopes", title: "Scopes", node: app.scopes.node, dock: "right", onShow: () => { app.scopes.visible = true; app.scopes.update(true); }, onHide: () => { app.scopes.visible = false; } },
     { id: "mixer", title: "Mixer", node: app.mixer.node, dock: "bottom", onShow: () => { app.mixer.visible = true; }, onHide: () => { app.mixer.visible = false; } },
+    { id: "markers", title: "Markers", node: app.markers.node, dock: "left" },
   ]);
   app.docks.onTabMenu = (x, y, id) => showMenu(x, y, [{ head: "Move panel" },
     ...[["left", "To left dock"], ["right", "To right dock"], ["bottom", "To bottom dock"], ["hidden", "Hide"]].map(([d, l]) => ({ label: l, action: () => app.docks.place(id, d) }))]);
@@ -485,6 +576,13 @@ async function main() {
     onContextAction: contextMenu,
   });
   bus.on("open-panel", (id) => app.docks.show(id));
+  app.overlay = new TransformOverlay(app, $("viewerStage"));
+  app.playback.onNeedReverse = prepareReverse;
+  try { app.playback.scrubAudio = localStorage.getItem("ve_scrub") !== "0"; } catch (_) { /* storage blocked */ }
+  bus.on("edit-marker", editMarker);
+  bus.on("crop-mode", (on) => $("tglCrop").classList.toggle("active", on));
+  bus.on("rate", (rate) => { $("rateBadge").textContent = rate === 1 ? "" : `${rate > 0 ? "▶" : "◀"} ${Math.abs(rate)}x`; });
+  $("tglCrop").onclick = () => app.overlay.setCropMode(!app.overlay.cropMode);
 
   // toolbar
   document.querySelectorAll(".menu-btn").forEach(b => {

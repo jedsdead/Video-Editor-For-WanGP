@@ -125,12 +125,16 @@ def key_integral(keys, t):
     return float(out) if scalar else out
 
 
+def is_still(kind):
+    return kind in ("image", "title")
+
+
 def keys_of(clip, name):
     return ((clip.get("keys") or {}).get(name)) or []
 
 
 def has_speed_keys(clip, media_kind=None):
-    return media_kind != "image" and bool(keys_of(clip, "speed"))
+    return not is_still(media_kind) and bool(keys_of(clip, "speed"))
 
 
 def prop(clip, name, tau, fallback):
@@ -145,20 +149,28 @@ def clip_speeds(clip):
 
 def clip_duration(clip, media_kind=None):
     length = max(0.0, float(clip["out"]) - float(clip["in"]))
-    if media_kind == "image":
+    if is_still(media_kind):
         return length
     if has_speed_keys(clip, media_kind):
         return max(0.0, float(clip.get("dur") or 0.0))
     return length / clip_speeds(clip)[0]
 
 
-def source_time(clip, tau, media_kind=None):
-    """Source media time for clip-local time(s) tau. Speed keyframes integrate exactly."""
-    if media_kind == "image":
-        return tau * 0.0 if isinstance(tau, np.ndarray) else 0.0
+def consumed(clip, tau, media_kind=None):
+    """Source seconds used from the clip start to clip time(s) tau (the integral of speed)."""
     if has_speed_keys(clip, media_kind):
-        return float(clip["in"]) + key_integral(keys_of(clip, "speed"), tau)
-    return float(clip["in"]) + clip_speeds(clip)[0] * tau
+        return key_integral(keys_of(clip, "speed"), tau)
+    return clip_speeds(clip)[0] * tau
+
+
+def source_time(clip, tau, media_kind=None):
+    """Source media time for clip-local time(s) tau. Speed keyframes integrate exactly; reversed clips run out -> in."""
+    if is_still(media_kind):
+        return tau * 0.0 if isinstance(tau, np.ndarray) else 0.0
+    used = consumed(clip, tau, media_kind)
+    if clip.get("reverse"):
+        return float(clip["out"]) - used
+    return float(clip["in"]) + used
 
 
 def speed_at(clip, tau, media_kind=None):
@@ -242,6 +254,31 @@ _LEGACY = {
     "push_left": ("slide", {"angle": 180, "push": True}), "push_right": ("slide", {"angle": 0, "push": True}),
     "circle_open": ("iris", {"shape": "circle"}), "circle_close": ("iris", {"shape": "circle", "reverse": True}),
 }
+
+
+GRADE_FIELDS = ("lift.x", "lift.y", "lift.master", "gamma.x", "gamma.y", "gamma.master", "gain.x", "gain.y", "gain.master",
+                "exposure", "contrast", "saturation", "temperature", "tint", "lutMix")
+
+
+def has_grade_keys(clip):
+    return any(keys_of(clip, "grade:" + f) for f in GRADE_FIELDS)
+
+
+def grade_at(clip, tau):
+    """The clip's grade at clip time tau, with keyframed fields interpolated (mirrors model.gradeAt)."""
+    import copy
+    grade = copy.deepcopy(clip.get("grade") or {})
+    for field in GRADE_FIELDS:
+        ks = keys_of(clip, "grade:" + field)
+        if not ks:
+            continue
+        value = float(key_values(ks, tau))
+        node = grade
+        parts = field.split(".")
+        for p in parts[:-1]:
+            node = node.setdefault(p, {})
+        node[parts[-1]] = value
+    return grade
 
 
 def normalize_transition(tr):

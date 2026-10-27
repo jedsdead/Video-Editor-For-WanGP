@@ -1,21 +1,30 @@
 // WebGL2 compositor for the viewer: draws graded, transformed clip layers bottom-to-top and blends transitions.
 import { TRANSITION_GLSL, transitionUniforms } from "./transitions.js";
 
+// A layer is a (possibly cropped) image of size uSize centred at uCenter, rotated clockwise by uRot (radians);
+// uUv selects the visible part of the texture. render.py's Compositor.place uses the same geometry.
 const LAYER_VS = `#version 300 es
 in vec2 aPos;
-uniform vec4 uRect;
-uniform vec2 uCanvas;
+uniform vec2 uCenter, uSize, uCanvas;
+uniform float uRot;
+uniform vec4 uUv;
 out vec2 vUv;
 void main() {
-  vec2 px = uRect.xy + aPos * uRect.zw;
+  vec2 local = (aPos - 0.5) * uSize;
+  float c = cos(uRot), s = sin(uRot);
+  vec2 px = uCenter + vec2(local.x * c - local.y * s, local.x * s + local.y * c);
   gl_Position = vec4(px.x / uCanvas.x * 2.0 - 1.0, 1.0 - px.y / uCanvas.y * 2.0, 0.0, 1.0);
-  vUv = aPos;
+  vUv = mix(uUv.xy, uUv.zw, aPos);
 }`;
 
 const LAYER_FS = `#version 300 es
 precision highp float;
+precision highp sampler3D;
 in vec2 vUv;
 uniform sampler2D uTex;
+uniform sampler3D uLut;
+uniform bool uLutOn;
+uniform float uLutMix, uLutSize;
 uniform float uAlpha;
 uniform bool uGrade;
 uniform float uExposure, uContrast, uSat;
@@ -32,6 +41,10 @@ void main() {
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
     c = l + (c - l) * uSat;
     c = clamp(c, 0.0, 1.0);
+  }
+  if (uLutOn) {
+    vec3 coord = clamp(c, 0.0, 1.0) * ((uLutSize - 1.0) / uLutSize) + 0.5 / uLutSize;
+    c = mix(c, texture(uLut, coord).rgb, uLutMix);
   }
   float a = uAlpha * t.a;
   o = vec4(c * a, a);
@@ -90,8 +103,30 @@ export class Renderer {
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     this.textures = new WeakMap();
+    this.luts = new Map();
+    // a 2x2x2 identity LUT keeps the sampler valid when no LUT is used
+    this.emptyLut = this.makeLut(2, new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1]));
     this.fbos = [];
   }
+
+  makeLut(size, rgb) {
+    const gl = this.gl;
+    const data = new Uint8Array(size * size * size * 4);
+    for (let i = 0; i < size * size * size; i++) {
+      for (let c = 0; c < 3; c++) data[i * 4 + c] = Math.round(Math.min(1, Math.max(0, rgb[i * 3 + c])) * 255);
+      data[i * 4 + 3] = 255;
+    }
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_3D, tex);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, size, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, p, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    return { tex, size };
+  }
+  // lut: {size, data: Float32Array of r,g,b in 0..1, red fastest}
+  setLut(name, lut) { if (!this.luts.has(name)) this.luts.set(name, this.makeLut(lut.size, lut.data)); }
+  hasLut(name) { return this.luts.has(name); }
 
   setSize(w, h) {
     if (this.canvas.width === w && this.canvas.height === h) return;
@@ -128,7 +163,14 @@ export class Renderer {
       this.textures.set(source, entry);
     }
     const isVideo = source instanceof HTMLVideoElement;
-    if (isVideo) {
+    if (source instanceof HTMLCanvasElement) {
+      if (entry.time !== source.__version) {
+        gl.bindTexture(gl.TEXTURE_2D, entry.tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+        entry.time = source.__version;
+        entry.ready = true;
+      }
+    } else if (isVideo) {
       if (source.readyState >= 2 && (!source.paused || entry.time !== source.currentTime || !entry.ready)) {
         gl.bindTexture(gl.TEXTURE_2D, entry.tex);
         try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source); entry.ready = true; entry.time = source.currentTime; }
@@ -151,8 +193,19 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.uniform1i(u.uTex, 0);
-    gl.uniform4f(u.uRect, ...item.rect);
+    gl.uniform2f(u.uCenter, item.center[0], item.center[1]);
+    gl.uniform2f(u.uSize, item.size[0], item.size[1]);
+    gl.uniform1f(u.uRot, item.rotation || 0);
+    gl.uniform4f(u.uUv, ...(item.uv || [0, 0, 1, 1]));
     gl.uniform2f(u.uCanvas, this.canvas.width, this.canvas.height);
+    const lut = item.lut && this.luts.get(item.lut.name);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_3D, (lut || this.emptyLut).tex);
+    gl.uniform1i(u.uLut, 1);
+    gl.uniform1i(u.uLutOn, lut ? 1 : 0);
+    gl.uniform1f(u.uLutMix, lut ? item.lut.mix : 0);
+    gl.uniform1f(u.uLutSize, (lut || this.emptyLut).size);
+    gl.activeTexture(gl.TEXTURE0);
     gl.uniform1f(u.uAlpha, item.alpha);
     const g = item.grade;
     gl.uniform1i(u.uGrade, g ? 1 : 0);

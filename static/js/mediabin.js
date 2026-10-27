@@ -26,14 +26,33 @@ export class MediaBin {
     this.poll();
   }
 
-  items() { return Object.values(P().media || {}); }
+  items() { return Object.values(P().media || {}).filter(i => !i.generator); }
 
   render() {
     if (!P()) return;
     this.grid.innerHTML = "";
     const items = this.items().filter(i => !this.filter || i.name.toLowerCase().includes(this.filter));
     this.hint.hidden = items.length > 0 && !this.filter ? false : false;
+    const title = P().media[M.TITLE_MEDIA.id];
+    if (title && (!this.filter || "title".includes(this.filter))) this.grid.append(this.titleTile(title));
     for (const item of items) this.grid.append(this.tile(item));
+  }
+
+  // The title generator: drag onto a video track (or double-click) for a new text clip.
+  titleTile(item) {
+    const thumb = el("div.thumb.title-thumb", {}, el("span.kind", {}, "GENERATOR"), el("div.busy", { style: { background: "transparent", fontSize: "30px", fontWeight: "700", color: "#ffd9a8" } }, "T"));
+    return el("div.media-item.title", {
+      draggable: true, title: "Title: drag onto a video track, or double-click to add it at the playhead on the top video track",
+      ondragstart: (e) => { e.dataTransfer.setData("text/x-ve-media", item.id); e.dataTransfer.effectAllowed = "copy"; window.__veDragMedia = item.id; },
+      ondragend: () => { window.__veDragMedia = null; },
+      ondblclick: () => this.addTitle(),
+    }, thumb, el("div.name", {}, "Title"));
+  }
+
+  addTitle(at = null) {
+    const tracks = M.videoTracks();
+    const clips = M.edit("Add title", () => M.placeMedia(P().media[M.TITLE_MEDIA.id], tracks[tracks.length - 1].id, at ?? state.playhead));
+    if (clips) { M.select(clips.map(c => c.id)); this.app.docks.show("inspector"); }
   }
 
   tile(item) {
@@ -125,14 +144,14 @@ export class MediaBin {
     clearTimeout(this.pollTimer);
     const run = async () => {
       if (!P()) return this.poll();
-      const pending = this.items().filter(i => ["pending", "stale"].includes(i.proxy) || ["pending", "stale"].includes(i.thumbs) || ["pending", "stale"].includes(i.wave));
+      const pending = this.items().filter(i => ["pending", "stale"].includes(i.proxy) || ["pending", "stale"].includes(i.thumbs) || ["pending", "stale"].includes(i.wave) || i.proxy_rev === "pending");
       if (pending.length) {
         try {
           const res = await api("api/media/batch", { method: "POST", body: { ids: pending.map(i => i.id) } });
           for (const [id, info] of Object.entries(res)) {
-            if (!info || !P().media[id]) continue;
+            if (!info || !P().media[id] || P().media[id].generator) continue;
             const before = P().media[id];
-            const changed = ["proxy", "thumbs", "wave"].some(k => before[k] !== info[k]);
+            const changed = ["proxy", "proxy_rev", "thumbs", "wave"].some(k => before[k] !== info[k]);
             P().media[id] = { ...before, ...info };
             if (changed) bus.emit("media-updated", id);
           }
@@ -149,7 +168,7 @@ export class MediaBin {
     try {
       const res = await api("api/media/batch", { method: "POST", body: { ids } });
       for (const [id, info] of Object.entries(res)) {
-        if (!P().media[id]) continue;
+        if (!P().media[id] || P().media[id].generator) continue;
         if (!info) P().media[id].missing = true;
         else P().media[id] = { ...P().media[id], ...info };
       }

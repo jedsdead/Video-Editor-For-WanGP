@@ -3,6 +3,7 @@ import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { api, el, toast, timecode, shortTime, clamp } from "./util.js";
 import { CURVES, FADE_CURVES } from "./keys.js";
+import { FONT_FALLBACK } from "./titles.js";
 import { FAMILIES, AUDIO_TRANSITIONS, DISSOLVE_STYLES, IRIS_SHAPES, ANGLE_PRESETS, DEFAULT_PARAMS, MAX_BORDER, isAudioTransition, hasEdge } from "./transitions.js";
 
 const RES_PRESETS = [[1280, 720], [1920, 1080], [3840, 2160], [832, 480], [480, 832], [720, 1280], [1080, 1920], [1024, 1024], [2560, 1080]];
@@ -97,7 +98,7 @@ export class Inspector {
         this.readout("Track", () => M.trackLabel(M.getTrack(live(first).trackId) || {})),
         this.readout("Start", () => timecode(live(first).start, fps)),
         this.readout("Duration", () => `${timecode(M.clipDur(live(first)), fps)}  (${shortTime(M.clipDur(live(first)))})`),
-        M.kindOf(first) !== "image" ? this.readout("Source in / out", () => `${live(first).in.toFixed(2)}s → ${live(first).out.toFixed(2)}s`) : null,
+        !M.isStill(first) ? this.readout("Source in / out", () => `${live(first).in.toFixed(2)}s → ${live(first).out.toFixed(2)}s`) : null,
         this.readout("Media", () => (M.mediaOf(first) || {}).name || "?"));
     } else {
       this.section(`${clips.length} clips selected`, el("div.dim", {}, "Changes apply to every selected clip of the matching kind."));
@@ -111,16 +112,28 @@ export class Inspector {
         this.keySlider("Scale", video, "scale", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 400, step: 0.5 }),
         this.keySlider("Position X", video, "x", { toUi: (v) => Math.round(v), fromUi: (v) => v, min: -pw, max: pw, step: 1 }),
         this.keySlider("Position Y", video, "y", { toUi: (v) => Math.round(v), fromUi: (v) => v, min: -ph, max: ph, step: 1 }),
+        this.keySlider("Rotation", video, "rotation", { toUi: (v) => Math.round(v * 10) / 10, fromUi: (v) => v, min: -360, max: 360, step: 0.5, format: (v) => v.toFixed(1) }),
+        this.keySlider("Crop left", video, "cropL", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 99, step: 0.5 }),
+        this.keySlider("Crop right", video, "cropR", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 99, step: 0.5 }),
+        this.keySlider("Crop top", video, "cropT", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 99, step: 0.5 }),
+        this.keySlider("Crop bottom", video, "cropB", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 99, step: 0.5 }),
         this.slider("Fade in", { get: () => (M.getClip(video[0].id) || video[0]).fadeIn || 0, set: (v) => each(video, c => { c.fadeIn = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 1 / fps, format: (v) => v.toFixed(2), editLabel: "Video fade in" }),
         this.curveSelect("Fade in shape", video, "fadeInCurve"),
         this.slider("Fade out", { get: () => (M.getClip(video[0].id) || video[0]).fadeOut || 0, set: (v) => each(video, c => { c.fadeOut = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 1 / fps, format: (v) => v.toFixed(2), editLabel: "Video fade out" }),
         this.curveSelect("Fade out shape", video, "fadeOutCurve"),
-        el("div.btnrow", {}, el("button.small", { onclick: () => M.edit("Reset transform", each(video, c => { c.opacity = 1; c.scale = 1; c.x = 0; c.y = 0; for (const n of ["opacity", "scale", "x", "y"]) if (c.keys) delete c.keys[n]; })) }, "Reset transform"),
+        el("div.btnrow", {}, el("button.small", { onclick: () => M.edit("Reset transform", each(video, c => {
+            Object.assign(c, { opacity: 1, scale: 1, x: 0, y: 0, rotation: 0, cropL: 0, cropR: 0, cropT: 0, cropB: 0 });
+            for (const n of ["opacity", "scale", "x", "y", "rotation", "cropL", "cropR", "cropT", "cropB"]) if (c.keys) delete c.keys[n];
+          })) }, "Reset transform"),
+          el("button.small", { title: "Show crop handles on the viewer (C)", onclick: () => this.app.overlay.setCropMode(!this.app.overlay.cropMode) }, "Crop on viewer"),
           el("button.small", { onclick: () => this.app.docks.show("colour") }, "Colour…")),
         this.keyHelp());
     }
 
-    const timed = clips.filter(c => M.kindOf(c) !== "image");
+    const titles = clips.filter(c => M.kindOf(c) === "title");
+    if (titles.length) this.renderTitle(titles);
+
+    const timed = clips.filter(c => !M.isStill(c));
     if (timed.length) this.renderSpeed(timed);
 
     if (audio.length) {
@@ -222,6 +235,52 @@ export class Inspector {
     return el("div", {}, field, easeRow);
   }
 
+  reverseRow(timed) {
+    const box = el("input", { type: "checkbox" });
+    const update = () => { box.checked = !!(M.getClip(timed[0].id) || timed[0]).reverse; };
+    box.addEventListener("change", () => {
+      M.edit("Reverse", () => M.setReverse(timed.map(c => c.id), box.checked));
+      if (box.checked) for (const c of timed) this.app.prepareReverse(M.mediaOf(c));
+    });
+    update();
+    this.refreshers.push(update);
+    return el("div.field.wide", {}, el("label", {}, "Direction"), el("label", { style: { display: "flex", gap: "6px", alignItems: "center", color: "inherit" } }, box, "Reverse (play backwards)"));
+  }
+
+  // ---------------------------------------------------------------- titles
+  renderTitle(list) {
+    const live = () => M.getClip(list[0].id) || list[0];
+    const t0 = () => M.mergeTitle(live().title);
+    const update = (fn, label = "Title", key = null) => M.edit(label, () => {
+      for (const c of list) { const l = M.getClip(c.id); if (l) { const t = M.mergeTitle(l.title); fn(t); l.title = t; } }
+    }, key ? { coalesceKey: `title-${key}-${list[0].id}` } : {});
+    const text = el("textarea", { rows: 3, value: t0().text, oninput: (e) => update(t => { t.text = e.target.value; }, "Title text", "text") });
+    const fonts = [...new Set([...(this.app.status?.fonts || []), ...FONT_FALLBACK])];
+    const font = el("select", { onchange: (e) => update(t => { t.font = e.target.value; }, "Font") }, fonts.map(f => el("option", { value: f, selected: f === t0().font, style: { fontFamily: f } }, f)));
+    const num = (value, min, max, step, fn, key) => el("input", { type: "number", value, min, max, step, style: { width: "64px" }, onchange: (e) => { const v = parseFloat(e.target.value); if (isFinite(v)) update(t => fn(t, clamp(v, min, max)), "Title", key); } });
+    const color = (value, fn, key) => el("input", { type: "color", value, oninput: (e) => update(t => fn(t, e.target.value), "Title colour", key) });
+    const check = (value, label, fn) => el("label", { style: { display: "flex", gap: "4px", alignItems: "center", color: "inherit" } }, el("input", { type: "checkbox", checked: value, onchange: (e) => update(t => fn(t, e.target.checked)) }), label);
+    const t = t0();
+    const align = el("select", { onchange: (e) => update(t => { t.align = e.target.value; }, "Alignment") }, [["left", "Left"], ["center", "Centre"], ["right", "Right"]].map(([v, l]) => el("option", { value: v, selected: v === t.align }, l)));
+    const row = (label, ...items) => el("div.field.wide", {}, el("label", {}, label), el("div", { style: { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" } }, ...items));
+    this.section("Title",
+      text,
+      row("Font", font),
+      row("Size", num(t.size, 4, 800, 1, (t, v) => { t.size = v; }, "size"), check(t.bold, "Bold", (t, v) => { t.bold = v; }), check(t.italic, "Italic", (t, v) => { t.italic = v; })),
+      row("Colour", color(t.color, (t, v) => { t.color = v; }, "color"), align),
+      row("Line height", num(t.lineHeight, 0.5, 3, 0.05, (t, v) => { t.lineHeight = v; }, "lh")),
+      row("Outline", check(t.outline.on, "On", (t, v) => { t.outline.on = v; }), color(t.outline.color, (t, v) => { t.outline.color = v; }, "oc"), num(t.outline.width, 0, 60, 1, (t, v) => { t.outline.width = v; }, "ow")),
+      row("Shadow", check(t.shadow.on, "On", (t, v) => { t.shadow.on = v; }), color(t.shadow.color, (t, v) => { t.shadow.color = v; }, "sc"),
+        el("span.dim", {}, "blur"), num(t.shadow.blur, 0, 100, 1, (t, v) => { t.shadow.blur = v; }, "sb"),
+        el("span.dim", {}, "x"), num(t.shadow.x, -100, 100, 1, (t, v) => { t.shadow.x = v; }, "sx"),
+        el("span.dim", {}, "y"), num(t.shadow.y, -100, 100, 1, (t, v) => { t.shadow.y = v; }, "sy"),
+        el("span.dim", {}, "opacity"), num(t.shadow.opacity, 0, 1, 0.05, (t, v) => { t.shadow.opacity = v; }, "so")),
+      row("Background", check(t.box.on, "Box", (t, v) => { t.box.on = v; }), color(t.box.color, (t, v) => { t.box.color = v; }, "bc"),
+        el("span.dim", {}, "opacity"), num(t.box.opacity, 0, 1, 0.05, (t, v) => { t.box.opacity = v; }, "bo"),
+        el("span.dim", {}, "padding"), num(t.box.padding, 0, 400, 1, (t, v) => { t.box.padding = v; }, "bp")),
+      el("div.dim", { style: { fontSize: "11px", marginTop: "4px" } }, "Position, scale, rotation, opacity and fades are in the Video section and can be keyframed to animate the title."));
+  }
+
   // ---------------------------------------------------------------- speed
   renderSpeed(timed) {
     const live = (c) => M.getClip(c.id) || c;
@@ -282,6 +341,8 @@ export class Inspector {
         el("button.small", { title: "Ease from 25% up to normal speed", onclick: () => ramp(0.25, 1, "s_curve") }, "Speed up"),
         keyed ? el("button.small", { title: "Remove the speed keyframes and keep the speed at the start", onclick: () => M.edit("Clear speed keyframes", () => { for (const c of timed) M.setSpeedKeys(live(c).id, []); }) }, "Clear ramp") : null),
       el("div.field.wide", {}, el("label", {}, "In-betweens"), interp),
+      this.reverseRow(timed),
+      el("div.btnrow", {}, el("button.small", { title: "Insert a held frame of the clip under the playhead (Shift+F)", onclick: () => this.app.freezeFrame() }, "Freeze frame at playhead")),
       el("div.dim", { style: { fontSize: "11px", marginTop: "4px" } },
         "Speed can go down to 0% (the frame holds). Ramps keep the clip's length and change how much of the source it uses. Ramp presets start at the playhead when it is over the clip. Right-click a clip > Show keyframes > Speed to edit the curve on the timeline. Optical flow is applied on export."));
   }

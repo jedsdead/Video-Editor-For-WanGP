@@ -12,8 +12,23 @@ export const DEFAULT_STILL = 5;
 
 export function defaultGrade() {
   return { enabled: true, lift: { x: 0, y: 0, master: 0 }, gamma: { x: 0, y: 0, master: 0 }, gain: { x: 0, y: 0, master: 0 },
-           exposure: 0, contrast: 0, saturation: 1, temperature: 0, tint: 0 };
+           exposure: 0, contrast: 0, saturation: 1, temperature: 0, tint: 0, lut: null, lutMix: 1 };
 }
+// Numeric grade fields that can be keyframed; each is stored as its own key lane "grade:<field>".
+export const GRADE_FIELDS = ["lift.x", "lift.y", "lift.master", "gamma.x", "gamma.y", "gamma.master", "gain.x", "gain.y", "gain.master",
+                             "exposure", "contrast", "saturation", "temperature", "tint", "lutMix"];
+
+export function defaultFx() {
+  return { eq: { on: false, low: { f: 120, g: 0 }, mid: { f: 1000, g: 0, q: 1 }, high: { f: 8000, g: 0 } },
+           comp: { on: false, threshold: -18, ratio: 3, attack: 10, release: 150, makeup: 0 } };
+}
+
+export function defaultTitle() {
+  return { text: "Title", font: "Segoe UI", size: 96, bold: true, italic: false, color: "#ffffff", align: "center", lineHeight: 1.15,
+           outline: { on: false, color: "#000000", width: 4 }, shadow: { on: true, color: "#000000", blur: 8, x: 3, y: 3, opacity: 0.6 },
+           box: { on: false, color: "#000000", opacity: 0.5, padding: 24 } };
+}
+export const TITLE_MEDIA = { id: "__title__", kind: "title", name: "Title", duration: 0, generator: true };
 
 export const state = {
   project: null,
@@ -38,10 +53,10 @@ export function newProject(name = "Untitled") {
     tracks: [
       { id: uid("v"), kind: "video", name: "", hidden: false, locked: false },
       { id: uid("v"), kind: "video", name: "", hidden: false, locked: false },
-      { id: uid("a"), kind: "audio", name: "", mute: false, solo: false, locked: false, volume: 0, pan: 0 },
-      { id: uid("a"), kind: "audio", name: "", mute: false, solo: false, locked: false, volume: 0, pan: 0 },
+      { id: uid("a"), kind: "audio", name: "", mute: false, solo: false, locked: false, volume: 0, pan: 0, fx: defaultFx(), keys: {} },
+      { id: uid("a"), kind: "audio", name: "", mute: false, solo: false, locked: false, volume: 0, pan: 0, fx: defaultFx(), keys: {} },
     ],
-    clips: [], transitions: [], media: {}, master: { volume: 0 },
+    clips: [], transitions: [], media: { [TITLE_MEDIA.id]: { ...TITLE_MEDIA } }, master: { volume: 0, fx: defaultFx() }, markers: [],
     magnetic: true, snapping: true, inPoint: null, outPoint: null, exportDefaults: null,
   };
 }
@@ -53,6 +68,8 @@ export const frameDur = () => 1 / fps();
 export const snapFrame = (t) => Math.round(t * fps()) / fps();
 export const mediaOf = (clip) => P().media[clip.mediaId];
 export const kindOf = (clip) => (mediaOf(clip) || {}).kind;
+export const isStillKind = (kind) => kind === "image" || kind === "title";
+export const isStill = (clip) => isStillKind(kindOf(clip));
 export const getClip = (id) => P().clips.find(c => c.id === id);
 export const getTrack = (id) => P().tracks.find(t => t.id === id);
 export const videoTracks = () => P().tracks.filter(t => t.kind === "video");
@@ -74,15 +91,43 @@ export const KEYABLE = {
   scale: { label: "Scale", fallback: 1, kind: "video" },
   x: { label: "Position X", fallback: 0, kind: "video" },
   y: { label: "Position Y", fallback: 0, kind: "video" },
+  rotation: { label: "Rotation", fallback: 0, kind: "video" },
+  cropL: { label: "Crop left", fallback: 0, kind: "video" },
+  cropR: { label: "Crop right", fallback: 0, kind: "video" },
+  cropT: { label: "Crop top", fallback: 0, kind: "video" },
+  cropB: { label: "Crop bottom", fallback: 0, kind: "video" },
   speed: { label: "Speed", fallback: 1, kind: "any" },
 };
 export const keysOf = (clip, prop) => (clip.keys && clip.keys[prop]) || [];
 export const hasKeys = (clip, prop) => keysOf(clip, prop).length > 0;
-export const hasSpeedKeys = (clip) => hasKeys(clip, "speed") && kindOf(clip) !== "image";
+export const hasSpeedKeys = (clip) => hasKeys(clip, "speed") && !isStill(clip);
 export function prop(clip, name, tau) {
   const fallback = clip[name] ?? KEYABLE[name].fallback;
   return keyValue(keysOf(clip, name), tau, fallback);
 }
+
+// ---- grade keyframes
+const getPath = (obj, path) => path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
+function setPath(obj, path, value) {
+  const parts = path.split(".");
+  let o = obj;
+  for (const p of parts.slice(0, -1)) { o[p] = o[p] && typeof o[p] === "object" ? { ...o[p] } : {}; o = o[p]; }
+  o[parts[parts.length - 1]] = value;
+}
+export const hasGradeKeys = (clip) => GRADE_FIELDS.some(f => hasKeys(clip, "grade:" + f));
+// The grade in effect at clip time tau (keyframed fields interpolated, the rest static).
+export function gradeAt(clip, tau) {
+  const base = { ...defaultGrade(), ...(clip.grade || {}) };
+  if (!hasGradeKeys(clip)) return base;
+  const g = JSON.parse(JSON.stringify(base));
+  for (const f of GRADE_FIELDS) {
+    const ks = keysOf(clip, "grade:" + f);
+    if (ks.length) setPath(g, f, keyValue(ks, tau));
+  }
+  return g;
+}
+export function gradeFieldValue(grade, field) { const v = getPath(grade, field); return typeof v === "number" ? v : getPath(defaultGrade(), field); }
+export { setPath as setGradePath };
 
 export function speeds(clip) {
   if (hasSpeedKeys(clip)) { const k = K.sorted(keysOf(clip, "speed")); return [k[0].v, k[k.length - 1].v]; }
@@ -93,38 +138,51 @@ export const isRamped = (clip) => hasSpeedKeys(clip);
 
 export function clipDur(clip) {
   const length = Math.max(0, clip.out - clip.in);
-  if (kindOf(clip) === "image") return length;
+  if (isStill(clip)) return length;
   if (hasSpeedKeys(clip)) return Math.max(0, clip.dur || 0);
   return length / speeds(clip)[0];
 }
 export const clipEnd = (clip) => clip.start + clipDur(clip);
 
+// Source seconds consumed from the clip start to clip time tau (the integral of speed).
+export function consumed(clip, tau) {
+  return hasSpeedKeys(clip) ? keyIntegral(keysOf(clip, "speed"), tau) : speeds(clip)[0] * tau;
+}
+// Source time shown at clip time tau. Reversed clips play their source range from out back to in.
 export function srcTime(clip, tau) {
-  if (kindOf(clip) === "image") return 0;
-  if (hasSpeedKeys(clip)) return clip.in + keyIntegral(keysOf(clip, "speed"), tau);
-  return clip.in + speeds(clip)[0] * tau;
+  if (isStill(clip)) return 0;
+  return clip.reverse ? clip.out - consumed(clip, tau) : clip.in + consumed(clip, tau);
+}
+// Clip time needed to consume `length` seconds of source.
+function tauForLength(clip, length) {
+  if (hasSpeedKeys(clip)) return K.solveIntegral(keysOf(clip, "speed"), length);
+  return length / speeds(clip)[0];
+}
+// Unused source before the first shown frame and after the last one (in playback direction).
+export function sourceRoom(clip) {
+  const total = (mediaOf(clip) || {}).duration || clip.out;
+  const atIn = clip.in, atOut = Math.max(0, total - clip.out);
+  return clip.reverse ? { before: atOut, after: atIn } : { before: atIn, after: atOut };
 }
 export function speedAt(clip, tau) {
   return hasSpeedKeys(clip) ? keyValue(keysOf(clip, "speed"), tau) : speeds(clip)[0];
 }
-// Timeline time (from the clip start) at which the clip reaches a source time.
-export function tauForSource(clip, src) {
-  if (hasSpeedKeys(clip)) return K.solveIntegral(keysOf(clip, "speed"), src - clip.in);
-  return (src - clip.in) / speeds(clip)[0];
-}
-// Keep a speed-keyed clip's source out point consistent with its curve and length, and inside the media.
+// Keep a speed-keyed clip's source range consistent with its curve and length, and inside the media.
 export function syncSpeedOut(clip) {
   if (!hasSpeedKeys(clip)) return;
-  const media = mediaOf(clip) || {};
-  const total = media.duration || clip.out;
-  clip.dur = Math.max(frameDur(), clip.dur || 0);
-  let out = srcTime(clip, clip.dur);
-  if (out > total + 1e-6) {
-    clip.dur = Math.max(frameDur(), tauForSource(clip, total));
-    out = total;
-  }
-  clip.out = Math.max(clip.in + 1e-4, out);
   for (const k of keysOf(clip, "speed")) k.v = Math.max(0, k.v);
+  const total = (mediaOf(clip) || {}).duration || Math.max(clip.out, clip.in);
+  clip.dur = Math.max(frameDur(), clip.dur || 0);
+  if (clip.reverse) {
+    // the playback start (out) is fixed; the curve decides how far back towards 0 it goes
+    let used = consumed(clip, clip.dur);
+    if (used > clip.out + 1e-6) { clip.dur = Math.max(frameDur(), tauForLength(clip, clip.out)); used = clip.out; }
+    clip.in = Math.min(clip.out - 1e-4, Math.max(0, clip.out - used));
+  } else {
+    let used = consumed(clip, clip.dur);
+    if (clip.in + used > total + 1e-6) { clip.dur = Math.max(frameDur(), tauForLength(clip, total - clip.in)); used = total - clip.in; }
+    clip.out = Math.max(clip.in + 1e-4, clip.in + used);
+  }
 }
 
 export function fadeFactor(clip, tau, d) {
@@ -257,7 +315,8 @@ function cropAllKeys(clip, a, b) {
 function trimStartTo(clip, newStart) {
   const tau = newStart - clip.start;
   const d = clipDur(clip);
-  if (kindOf(clip) === "image") clip.in += tau;
+  if (isStill(clip)) clip.in += tau;
+  else if (clip.reverse) clip.out = srcTime(clip, tau);
   else clip.in = srcTime(clip, tau);
   cropAllKeys(clip, tau, d);
   if (hasSpeedKeys(clip)) clip.dur = d - tau;
@@ -267,7 +326,8 @@ function trimStartTo(clip, newStart) {
 
 function trimEndTo(clip, newEnd) {
   const tau = newEnd - clip.start;
-  if (kindOf(clip) === "image") clip.out = clip.in + tau;
+  if (isStill(clip)) clip.out = clip.in + tau;
+  else if (clip.reverse) clip.in = srcTime(clip, tau);
   else clip.out = srcTime(clip, tau);
   cropAllKeys(clip, 0, tau);
   if (hasSpeedKeys(clip)) clip.dur = tau;
@@ -376,7 +436,7 @@ export function ensureAudioTrack(index) {
 
 export function addTrack(kind, emit = true) {
   const track = kind === "video" ? { id: uid("v"), kind, name: "", hidden: false, locked: false }
-                                 : { id: uid("a"), kind, name: "", mute: false, solo: false, locked: false, volume: 0, pan: 0 };
+                                 : { id: uid("a"), kind, name: "", mute: false, solo: false, locked: false, volume: 0, pan: 0, fx: defaultFx(), keys: {} };
   const tracks = P().tracks;
   if (kind === "video") {
     const lastVideo = tracks.map(t => t.kind).lastIndexOf("video");
@@ -397,12 +457,15 @@ export function removeTrack(trackId) {
 
 export function newClipsForMedia(item, videoTrackId, audioTrackId, start) {
   const clips = [];
-  const base = { mediaId: item.id, start, name: item.name, speed: 1, interp: "default", fadeIn: 0, fadeOut: 0, fadeInCurve: "linear", fadeOutCurve: "linear", parentId: null, keys: {} };
-  const length = item.kind === "image" ? DEFAULT_STILL : Math.max(frameDur(), item.duration || 0);
+  const base = { mediaId: item.id, start, name: item.name, speed: 1, interp: "default", fadeIn: 0, fadeOut: 0, fadeInCurve: "linear", fadeOutCurve: "linear",
+                 parentId: null, keys: {}, reverse: false };
+  const length = isStillKind(item.kind) ? DEFAULT_STILL : Math.max(frameDur(), item.duration || 0);
   const linkId = item.kind === "video" && item.has_audio ? uid("l") : null;
-  if (item.kind === "video" || item.kind === "image") {
-    clips.push({ ...base, id: uid("c"), trackId: videoTrackId, in: 0, out: length, linkId,
-                 opacity: 1, scale: 1, x: 0, y: 0, grade: defaultGrade() });
+  if (item.kind === "video" || isStillKind(item.kind)) {
+    const clip = { ...base, id: uid("c"), trackId: videoTrackId, in: 0, out: length, linkId,
+                   opacity: 1, scale: 1, x: 0, y: 0, rotation: 0, cropL: 0, cropR: 0, cropT: 0, cropB: 0, grade: defaultGrade() };
+    if (item.kind === "title") { clip.title = defaultTitle(); clip.name = "Title"; }
+    clips.push(clip);
   }
   if (item.kind === "audio" || (item.kind === "video" && item.has_audio)) {
     clips.push({ ...base, id: uid("c"), trackId: audioTrackId, in: 0, out: length, linkId, volume: 0 });
@@ -412,6 +475,7 @@ export function newClipsForMedia(item, videoTrackId, audioTrackId, start) {
 
 export function registerMedia(item) {
   P().media[item.id] = { ...(P().media[item.id] || {}), ...item };
+  if (item.generator) return;
   const s = P().settings;
   if (s.auto && item.kind === "video" && item.width && item.height && !P().clips.length) {
     s.width = Math.round(item.width / 2) * 2;
@@ -429,6 +493,8 @@ export function placeMedia(item, trackId, time) {
   let vTrack, aTrack;
   if (item.kind === "audio") {
     aTrack = kind === "audio" ? trackId : audioTracks()[0].id;
+  } else if (item.kind === "title") {
+    vTrack = kind === "video" ? trackId : videoTracks()[videoTracks().length - 1].id;
   } else {
     vTrack = kind === "video" ? trackId : primaryId();
     const vIndex = videoTracks().findIndex(t => t.id === vTrack);
@@ -508,7 +574,7 @@ function afterLengthChange(changed) {
 // Constant speed (removes any speed keyframes).
 export function setSpeed(ids, speed) {
   const set = withPartners(ids);
-  const clips = P().clips.filter(c => set.has(c.id) && kindOf(c) !== "image");
+  const clips = P().clips.filter(c => set.has(c.id) && !isStill(c));
   const changed = [];
   for (const c of clips) {
     const oldEnd = clipEnd(c);
@@ -526,7 +592,7 @@ export function setSpeed(ids, speed) {
 function syncTimingToPartners(clip, before) {
   for (const p of partners(clip)) {
     if (Math.abs(p.start - before.start) > 1e-4 || Math.abs(p.in - before.in) > 1e-4) continue;
-    p.in = clip.in; p.out = clip.out; p.speed = clip.speed;
+    p.in = clip.in; p.out = clip.out; p.speed = clip.speed; p.reverse = !!clip.reverse;
     if (hasSpeedKeys(clip)) { p.keys = { ...(p.keys || {}), speed: JSON.parse(JSON.stringify(clip.keys.speed)) }; p.dur = clip.dur; }
     else { if (p.keys) delete p.keys.speed; delete p.dur; }
   }
@@ -535,7 +601,7 @@ function syncTimingToPartners(clip, before) {
 // Replace a clip's speed curve (keys in multiplier units, t from the clip start). Keeps the clip length.
 export function setSpeedKeys(clipId, keys, { keepLength = true } = {}) {
   const clip = getClip(clipId);
-  if (!clip || kindOf(clip) === "image") return;
+  if (!clip || isStill(clip)) return;
   const before = { start: clip.start, in: clip.in };
   const oldEnd = clipEnd(clip);
   const dur = clipDur(clip);
@@ -544,8 +610,9 @@ export function setSpeedKeys(clipId, keys, { keepLength = true } = {}) {
     const s = clip.keys.speed?.length ? Math.max(0.01, keyValue(clip.keys.speed, 0)) : clip.speed;
     delete clip.keys.speed;
     delete clip.dur;
-    clip.speed = s;
-    clip.out = Math.min((mediaOf(clip) || {}).duration || Infinity, clip.in + s * dur);
+    clip.speed = Math.max(0.01, s);
+    if (clip.reverse) clip.in = Math.max(0, clip.out - clip.speed * dur);
+    else clip.out = Math.min((mediaOf(clip) || {}).duration || Infinity, clip.in + clip.speed * dur);
   } else {
     clip.keys.speed = keys.map(k => ({ ...k, v: Math.max(0, k.v) }));
     if (keepLength || !clip.dur) clip.dur = dur;
@@ -557,19 +624,19 @@ export function setSpeedKeys(clipId, keys, { keepLength = true } = {}) {
 
 // Allowed new time for trimming a clip edge, honouring source length and neighbours.
 export function trimLimits(clip, edge, groupIds) {
-  const kind = kindOf(clip);
-  const item = mediaOf(clip) || {};
-  const [s0] = speeds(clip);
+  const still = isStill(clip);
+  const room = sourceRoom(clip);
+  const s0 = speedAt(clip, 0);
   const free = !(P().magnetic && (clip.trackId === primaryId() || isPrimaryLinked(clip)));
   const neighbours = clipsOn(clip.trackId).filter(c => !groupIds.has(c.id));
   const minDur = frameDur();
   if (edge === "start") {
-    let lo = kind === "image" || s0 <= 1e-6 ? -Infinity : clip.start - clip.in / s0;
+    let lo = still || s0 <= 1e-6 ? -Infinity : clip.start - room.before / s0;
     if (free) for (const n of neighbours) if (clipEnd(n) <= clip.start + EPS) lo = Math.max(lo, clipEnd(n));
     if (free) lo = Math.max(lo, 0);
     return [lo, clipEnd(clip) - minDur];
   }
-  let hi = kind === "image" ? Infinity : clip.start + tauForSource(clip, item.duration || clip.out);
+  let hi = still ? Infinity : clip.start + tauForLength(clip, (clip.out - clip.in) + room.after);
   if (free) for (const n of neighbours) if (n.start >= clipEnd(clip) - EPS) hi = Math.min(hi, n.start);
   return [clip.start + minDur, hi];
 }
@@ -620,18 +687,60 @@ export function moveClips(ids, dt, trackShift, grabbedKind) {
 }
 
 // ------------------------------------------------------------------ keyframe editing
-// Times are seconds from the clip start; values are in stored units (dB, 0-1 opacity, multiplier scale/speed, pixels).
+// Times are seconds from the owner's start (clip start, or 0 for track automation); values in stored units.
 
-export function keyIndexAt(clip, name, tau, tol = null) {
+function indexNear(ks, tau, tol) {
   tol = tol ?? frameDur() / 2 + 1e-6;
-  const ks = keysOf(clip, name);
   let best = -1, dist = Infinity;
   ks.forEach((k, i) => { const d = Math.abs(k.t - tau); if (d <= tol && d < dist) { best = i; dist = d; } });
   return best;
 }
-
-function plainKeys(clip, name) { return K.sorted(keysOf(clip, name)).map(k => ({ ...k })); }
 function resetShape(ks, i) { for (const j of [i - 1, i]) if (ks[j]) delete ks[j].r; }
+function tidy(ks) { for (const k of ks) if (k.r && Math.abs(k.r[0]) < 1e-9 && Math.abs(k.r[1] - 1) < 1e-9) delete k.r; return ks; }
+
+// Pure operations on a key list (sorted copies in, sorted copies out).
+const KeyOps = {
+  set(list, tau, value) {
+    const ks = K.sorted(list).map(k => ({ ...k }));
+    const i = indexNear(ks, tau);
+    if (i >= 0) { ks[i].v = value; resetShape(ks, i); return ks; }
+    if (!ks.length) return [{ t: tau, v: value, ease: "linear" }];
+    const before = keyValue(ks, tau);
+    const j = ks.findIndex((k, n) => ks[n + 1] && k.t < tau && tau < ks[n + 1].t);
+    const key = { t: tau, v: before, ease: j >= 0 ? (ks[j].ease || "linear") : "linear" };
+    if (j >= 0) {
+      const [r0, r1] = ks[j].r || [0, 1];
+      const xm = r0 + (tau - ks[j].t) / (ks[j + 1].t - ks[j].t) * (r1 - r0);
+      ks[j].r = [r0, xm];
+      key.r = [xm, r1];
+    }
+    ks.push(key);
+    const out = K.sorted(ks);
+    if (Math.abs(value - before) > 1e-9) { key.v = value; resetShape(out, out.indexOf(key)); }
+    return tidy(out);
+  },
+  remove(list, index) { const ks = K.sorted(list).map(k => ({ ...k })); if (ks[index]) { ks.splice(index, 1); resetShape(ks, index); } return ks; },
+  ease(list, index, ease) { const ks = K.sorted(list).map(k => ({ ...k })); if (ks[index]) { ks[index].ease = ease; delete ks[index].r; } return ks; },
+  move(list, index, tau, value, maxT) {
+    const ks = K.sorted(list).map(k => ({ ...k }));
+    const k = ks[index];
+    if (!k) return ks;
+    const fd = frameDur() / 4;
+    const lo = index > 0 ? ks[index - 1].t + fd : 0;
+    const hi = index < ks.length - 1 ? ks[index + 1].t - fd : maxT;
+    if (tau !== null && tau !== undefined) k.t = clamp(tau, Math.min(lo, hi), Math.max(lo, hi));
+    if (value !== null && value !== undefined) k.v = value;
+    resetShape(ks, index);
+    return ks;
+  },
+  offset(list, indices, delta, [lo, hi]) {
+    const ks = K.sorted(list).map(k => ({ ...k }));
+    for (const i of indices) if (ks[i]) { ks[i].v = clamp(ks[i].v + delta, lo, hi); resetShape(ks, i); }
+    return ks;
+  },
+};
+
+export function keyIndexAt(clip, name, tau, tol = null) { return indexNear(keysOf(clip, name), tau, tol); }
 
 function storeKeys(clip, name, ks) {
   ks = K.sorted(ks);
@@ -641,86 +750,173 @@ function storeKeys(clip, name, ks) {
   else delete clip.keys[name];
 }
 
-// Add a key (splitting the curve exactly) or change the value of the key at tau.
 export function setKeyAt(clipId, name, tau, value) {
   const clip = getClip(clipId);
   if (!clip) return;
-  tau = clamp(tau, 0, clipDur(clip));
-  const ks = plainKeys(clip, name);
-  let i = keyIndexAt(clip, name, tau);
-  if (i >= 0) { ks[i].v = value; resetShape(ks, i); storeKeys(clip, name, ks); return; }
-  if (!ks.length) { storeKeys(clip, name, [{ t: tau, v: value, ease: "linear" }]); return; }
-  const before = keyValue(ks, tau);
-  const j = ks.findIndex((k, n) => ks[n + 1] && k.t < tau && tau < ks[n + 1].t);
-  const key = { t: tau, v: before, ease: j >= 0 ? (ks[j].ease || "linear") : "linear" };
-  if (j >= 0) {
-    const [r0, r1] = ks[j].r || [0, 1];
-    const xm = r0 + (tau - ks[j].t) / (ks[j + 1].t - ks[j].t) * (r1 - r0);
-    ks[j].r = [r0, xm];
-    key.r = [xm, r1];
-  }
-  ks.push(key);
-  const sortedKs = K.sorted(ks);
-  const at = sortedKs.indexOf(key);
-  if (Math.abs(value - before) > 1e-9) { key.v = value; resetShape(sortedKs, at); }
-  for (const k of sortedKs) if (k.r && Math.abs(k.r[0]) < 1e-9 && Math.abs(k.r[1] - 1) < 1e-9) delete k.r;
-  storeKeys(clip, name, sortedKs);
+  storeKeys(clip, name, KeyOps.set(keysOf(clip, name), clamp(tau, 0, clipDur(clip)), value));
 }
-
 export function removeKey(clipId, name, index) {
   const clip = getClip(clipId);
   if (!clip) return;
-  const ks = plainKeys(clip, name);
+  const ks = K.sorted(keysOf(clip, name));
   if (!ks[index]) return;
-  const value = ks[index].v;
-  ks.splice(index, 1);
-  resetShape(ks, index);
-  if (!ks.length && name !== "speed") clip[name] = value;
-  storeKeys(clip, name, ks);
+  const after = KeyOps.remove(ks, index);
+  if (!after.length && name !== "speed" && !name.startsWith("grade:")) clip[name] = ks[index].v;
+  if (!after.length && name.startsWith("grade:")) { clip.grade = { ...(clip.grade || defaultGrade()) }; setPath(clip.grade, name.slice(6), ks[index].v); }
+  storeKeys(clip, name, after);
 }
-
 export function clearKeys(clipId, name, keepValue) {
   const clip = getClip(clipId);
   if (!clip) return;
   if (name !== "speed" && keepValue !== undefined) clip[name] = keepValue;
   storeKeys(clip, name, []);
 }
-
 export function setKeyEase(clipId, name, index, ease) {
   const clip = getClip(clipId);
-  if (!clip) return;
-  const ks = plainKeys(clip, name);
-  if (!ks[index]) return;
-  ks[index].ease = ease;
-  delete ks[index].r;
-  storeKeys(clip, name, ks);
+  if (clip) storeKeys(clip, name, KeyOps.ease(keysOf(clip, name), index, ease));
 }
-
-// Move a key in time (between its neighbours) and/or value.
 export function moveKey(clipId, name, index, tau, value) {
   const clip = getClip(clipId);
-  if (!clip) return;
-  const ks = plainKeys(clip, name);
-  const k = ks[index];
-  if (!k) return;
-  const fd = frameDur() / 4;
-  const lo = index > 0 ? ks[index - 1].t + fd : 0;
-  const hi = index < ks.length - 1 ? ks[index + 1].t - fd : clipDur(clip);
-  if (tau !== null && tau !== undefined) k.t = clamp(tau, Math.min(lo, hi), Math.max(lo, hi));
-  if (value !== null && value !== undefined) k.v = value;
-  resetShape(ks, index);
-  storeKeys(clip, name, ks);
+  if (clip) storeKeys(clip, name, KeyOps.move(keysOf(clip, name), index, tau, value, clipDur(clip)));
 }
-
-// Shift every key of a property by a value delta (dragging the line between keys, or with no keys the static value).
 export function offsetKeys(clipId, name, indices, delta, limits) {
   const clip = getClip(clipId);
-  if (!clip) return;
-  const [lo, hi] = limits;
-  const ks = plainKeys(clip, name);
-  for (const i of indices) if (ks[i]) { ks[i].v = clamp(ks[i].v + delta, lo, hi); resetShape(ks, i); }
-  storeKeys(clip, name, ks);
+  if (clip) storeKeys(clip, name, KeyOps.offset(keysOf(clip, name), indices, delta, limits));
 }
+
+// Set a property at a clip time: a keyframe if the property is keyframed, otherwise the static value.
+export function setPropAt(clipId, name, tau, value) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  if (hasKeys(clip, name)) { if (tau >= -1e-6 && tau <= clipDur(clip) + 1e-6) setKeyAt(clipId, name, snapFrame(clamp(tau, 0, clipDur(clip))), value); }
+  else if (name === "speed") setSpeed([clipId], Math.max(0.01, value));
+  else clip[name] = value;
+}
+
+// ---- grade keyframes: every grade field is keyed together at the same times
+export function gradeKeyTimes(clip) {
+  const times = new Set();
+  for (const f of GRADE_FIELDS) for (const k of keysOf(clip, "grade:" + f)) times.add(+k.t.toFixed(6));
+  return [...times].sort((a, b) => a - b);
+}
+export function setGradeAt(clipId, tau, grade, { addKey = false } = {}) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  const keyed = hasGradeKeys(clip);
+  if (!keyed && !addKey) { clip.grade = JSON.parse(JSON.stringify(grade)); return; }
+  tau = snapFrame(clamp(tau, 0, clipDur(clip)));
+  clip.grade = { ...(clip.grade || defaultGrade()), enabled: grade.enabled, lut: grade.lut ?? null };
+  for (const f of GRADE_FIELDS) storeKeys(clip, "grade:" + f, KeyOps.set(keysOf(clip, "grade:" + f), tau, gradeFieldValue(grade, f)));
+}
+export function removeGradeKeyAt(clipId, tau) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  const current = gradeAt(clip, tau);
+  for (const f of GRADE_FIELDS) {
+    const i = keyIndexAt(clip, "grade:" + f, tau);
+    if (i >= 0) storeKeys(clip, "grade:" + f, KeyOps.remove(keysOf(clip, "grade:" + f), i));
+  }
+  if (!hasGradeKeys(clip)) clip.grade = current;
+}
+export function clearGradeKeys(clipId, tau) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  const current = gradeAt(clip, tau);
+  for (const f of GRADE_FIELDS) storeKeys(clip, "grade:" + f, []);
+  clip.grade = current;
+}
+export function setGradeEaseAt(clipId, tau, ease) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  for (const f of GRADE_FIELDS) {
+    const i = keyIndexAt(clip, "grade:" + f, tau);
+    if (i >= 0) storeKeys(clip, "grade:" + f, KeyOps.ease(keysOf(clip, "grade:" + f), i, ease));
+  }
+}
+
+// ---- track volume automation (times are timeline seconds, values dB added to the fader)
+export const trackKeys = (track) => (track && track.keys && track.keys.volume) || [];
+export function trackGainDb(track, t) { const ks = trackKeys(track); return ks.length ? keyValue(ks, t) : 0; }
+function storeTrackKeys(track, ks) { track.keys = track.keys || {}; if (ks.length) track.keys.volume = K.sorted(ks); else delete track.keys.volume; }
+export function trackKeyIndexAt(trackId, t) { return indexNear(trackKeys(getTrack(trackId)), t, Math.max(frameDur() / 2, 1e-3)); }
+export function setTrackKeyAt(trackId, t, value) { const tr = getTrack(trackId); if (tr) storeTrackKeys(tr, KeyOps.set(trackKeys(tr), Math.max(0, snapFrame(t)), value)); }
+export function removeTrackKey(trackId, index) { const tr = getTrack(trackId); if (tr) storeTrackKeys(tr, KeyOps.remove(trackKeys(tr), index)); }
+export function setTrackKeyEase(trackId, index, ease) { const tr = getTrack(trackId); if (tr) storeTrackKeys(tr, KeyOps.ease(trackKeys(tr), index, ease)); }
+export function moveTrackKey(trackId, index, t, value) { const tr = getTrack(trackId); if (tr) storeTrackKeys(tr, KeyOps.move(trackKeys(tr), index, t, value, 1e9)); }
+export function offsetTrackKeys(trackId, indices, delta) { const tr = getTrack(trackId); if (tr) storeTrackKeys(tr, KeyOps.offset(trackKeys(tr), indices, delta, [-60, 12])); }
+export function clearTrackKeys(trackId) { const tr = getTrack(trackId); if (tr) storeTrackKeys(tr, []); }
+
+// ------------------------------------------------------------------ reverse, freeze frame, markers
+
+export function setReverse(ids, on) {
+  const set = withPartners(ids);
+  for (const c of P().clips) if (set.has(c.id) && !isStill(c)) c.reverse = !!on;
+}
+
+// Insert a held frame of the clip under the playhead, pushing later material along.
+export function freezeFrame(t, duration = 2, preferIds = null) {
+  const candidates = videoTracks().slice().reverse()
+    .flatMap(tr => clipsOn(tr.id))
+    .filter(c => !isStill(c) && c.start <= t + EPS && clipEnd(c) > t + EPS && !getTrack(c.trackId).hidden && !getTrack(c.trackId).locked);
+  const source = (preferIds && candidates.find(c => preferIds.has(c.id))) || candidates[0];
+  if (!source) return null;
+  const tau = clamp(t - source.start, 0, clipDur(source));
+  const frozen = cloneClip(source);
+  frozen.id = uid("c");
+  frozen.linkId = null;
+  frozen.parentId = null;
+  for (const name of Object.keys(frozen.keys || {})) {
+    if (name === "speed") continue;
+    const v = keyValue(frozen.keys[name], tau);
+    frozen.keys[name] = [{ t: 0, v, ease: "linear" }];
+  }
+  const src = srcTime(source, Math.min(tau, Math.max(0, clipDur(source) - frameDur() / 2)));
+  frozen.reverse = false;
+  frozen.in = src;
+  frozen.out = src + 1e-3;
+  frozen.keys = { ...(frozen.keys || {}), speed: [{ t: 0, v: 0, ease: "linear" }] };
+  frozen.dur = Math.max(frameDur(), duration);
+  frozen.fadeIn = 0; frozen.fadeOut = 0;
+  frozen.name = `${source.name || "Clip"} (freeze)`;
+  const pid = primaryId();
+  const cut = snapFrame(t);
+  splitAt(cut, { ids: new Set([source.id]) });
+  frozen.start = cut;
+  frozen.trackId = source.trackId;
+  if (P().magnetic && source.trackId === pid) {
+    const order = clipsOn(pid);
+    const idx = order.findIndex(c => c.start >= cut - EPS);
+    order.splice(idx < 0 ? order.length : idx, 0, frozen);
+    P().clips.push(frozen);
+    pack(order);
+  } else if (P().magnetic) {
+    // freeze on a connected track: push only that track's later clips (and what is linked to them)
+    const moving = new Set(clipsOn(source.trackId).filter(c => c.start >= cut - EPS).map(c => c.id));
+    for (const id of [...moving]) for (const p of partners(getClip(id))) moving.add(p.id);
+    for (const c of P().clips) if (moving.has(c.id)) c.start += frozen.dur;
+    P().clips.push(frozen);
+    assignParent(frozen);
+  } else {
+    for (const c of P().clips) if (c.start >= cut - EPS) c.start += frozen.dur;
+    for (const m of P().markers || []) if (m.t >= cut - EPS) m.t += frozen.dur;
+    P().clips.push(frozen);
+  }
+  return frozen;
+}
+
+export const MARKER_COLORS = ["#4f8cff", "#ff5a5a", "#ffcc4d", "#36c46f", "#b86bff", "#ff8a3d", "#e0e0e0"];
+export function addMarker(t, name = "") {
+  P().markers = P().markers || [];
+  t = Math.max(0, snapFrame(t));
+  const existing = P().markers.find(m => Math.abs(m.t - t) < frameDur() / 2);
+  if (existing) return existing;
+  const m = { id: uid("m"), t, name: name || `Marker ${P().markers.length + 1}`, color: MARKER_COLORS[0], note: "" };
+  P().markers.push(m);
+  P().markers.sort((a, b) => a.t - b.t);
+  return m;
+}
+export const getMarker = (id) => (P().markers || []).find(m => m.id === id);
+export function removeMarker(id) { P().markers = (P().markers || []).filter(m => m.id !== id); }
 
 // ------------------------------------------------------------------ transitions
 
@@ -765,10 +961,9 @@ export function transitionHandles(tr) {
   if (!info) return null;
   const { a, b } = info;
   const half = tr.duration / 2;
-  const itemA = mediaOf(a) || {}, itemB = mediaOf(b) || {};
-  const spareA = kindOf(a) === "image" ? Infinity : Math.max(0, tauForSource(a, itemA.duration || a.out) - clipDur(a));
-  const [b0] = speeds(b);
-  const spareB = kindOf(b) === "image" || b0 <= 1e-6 ? Infinity : b.in / b0;
+  const endSpeed = speedAt(a, clipDur(a)), startSpeed = speedAt(b, 0);
+  const spareA = isStill(a) || endSpeed <= 1e-6 ? Infinity : sourceRoom(a).after / endSpeed;
+  const spareB = isStill(b) || startSpeed <= 1e-6 ? Infinity : sourceRoom(b).before / startSpeed;
   return { needed: half, spareA, spareB };
 }
 
@@ -821,6 +1016,7 @@ export function unlinkClips(ids) {
 export function editPoints() {
   const pts = new Set([0]);
   for (const c of P().clips) { pts.add(+c.start.toFixed(6)); pts.add(+clipEnd(c).toFixed(6)); }
+  for (const m of P().markers || []) pts.add(+m.t.toFixed(6));
   return [...pts].sort((a, b) => a - b);
 }
 
@@ -839,14 +1035,31 @@ export function repairTimes(project) {
   return fixed;
 }
 
+function mergeFx(fx) {
+  const d = defaultFx();
+  fx = fx || {};
+  return { eq: { ...d.eq, ...(fx.eq || {}), low: { ...d.eq.low, ...(fx.eq?.low || {}) }, mid: { ...d.eq.mid, ...(fx.eq?.mid || {}) }, high: { ...d.eq.high, ...(fx.eq?.high || {}) } },
+           comp: { ...d.comp, ...(fx.comp || {}) } };
+}
+export function mergeTitle(t) {
+  const d = defaultTitle();
+  t = t || {};
+  return { ...d, ...t, outline: { ...d.outline, ...(t.outline || {}) }, shadow: { ...d.shadow, ...(t.shadow || {}) }, box: { ...d.box, ...(t.box || {}) } };
+}
+
 export function normalizeProject(project) {
   const base = newProject(project.name || "Untitled");
   for (const key of Object.keys(base)) if (project[key] === undefined) project[key] = base[key];
   project.settings = { ...base.settings, ...project.settings };
+  project.media[TITLE_MEDIA.id] = { ...TITLE_MEDIA };
+  project.markers ??= [];
+  project.master = { volume: 0, ...(project.master || {}) };
+  project.master.fx = mergeFx(project.master.fx);
+  for (const t of project.tracks) if (t.kind === "audio") { t.fx = mergeFx(t.fx); t.keys ??= {}; }
   for (const tr of project.transitions) normalizeTransition(tr);
   for (const c of project.clips) {
     c.speed ??= 1; c.interp ??= "default"; c.fadeIn ??= 0; c.fadeOut ??= 0; c.parentId ??= null; c.linkId ??= null;
-    c.fadeInCurve ??= "linear"; c.fadeOutCurve ??= "linear"; c.keys ??= {};
+    c.fadeInCurve ??= "linear"; c.fadeOutCurve ??= "linear"; c.keys ??= {}; c.reverse ??= false;
     // Older projects stored a linear ramp as speed -> rampTo; turn it into two speed keyframes.
     if (c.rampTo !== undefined && c.rampTo !== null && c.rampTo !== "" && Math.abs(Number(c.rampTo) - c.speed) > 1e-9 && project.media[c.mediaId]?.kind !== "image") {
       const s0 = Math.max(0.05, Number(c.speed) || 1), s1 = Math.max(0.05, Number(c.rampTo));
@@ -856,7 +1069,9 @@ export function normalizeProject(project) {
     }
     delete c.rampTo;
     if (project.tracks.find(t => t.id === c.trackId)?.kind === "video") {
-      c.opacity ??= 1; c.scale ??= 1; c.x ??= 0; c.y ??= 0; c.grade = { ...defaultGrade(), ...(c.grade || {}) };
+      c.opacity ??= 1; c.scale ??= 1; c.x ??= 0; c.y ??= 0; c.rotation ??= 0; c.cropL ??= 0; c.cropR ??= 0; c.cropT ??= 0; c.cropB ??= 0;
+      c.grade = { ...defaultGrade(), ...(c.grade || {}) };
+      if (project.media[c.mediaId]?.kind === "title") c.title = mergeTitle(c.title);
     } else c.volume ??= 0;
   }
   return project;

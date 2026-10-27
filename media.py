@@ -192,7 +192,7 @@ class MediaRegistry:
 
     def public(self, item):
         keys = ("id", "name", "path", "kind", "duration", "has_audio", "width", "height", "fps", "vcodec", "acodec",
-                "proxy", "thumbs", "wave", "thumb_count", "thumb_width", "thumb_interval", "has_metadata", "missing", "error")
+                "proxy", "proxy_rev", "thumbs", "wave", "thumb_count", "thumb_width", "thumb_interval", "has_metadata", "missing", "error")
         return {key: item.get(key) for key in keys if key in item}
 
     def get(self, media_id):
@@ -329,6 +329,65 @@ class MediaRegistry:
         if requeue:
             self.pool.submit(self._process, media_id)
         return item
+
+    def make_reverse(self, media_id, chunk=4.0):
+        """Build a reversed preview proxy (video and audio played backwards) in short chunks, so memory stays small."""
+        item = self.get(media_id)
+        if not item or item["kind"] not in ("video", "audio"):
+            return item
+        folder = self.item_dir(media_id)
+        audio_only = item["kind"] == "audio"
+        out = os.path.join(folder, "proxy_rev.m4a" if audio_only else "proxy_rev.mp4")
+        if item.get("proxy_rev") == "ready" and os.path.isfile(out):
+            return item
+        with self.lock:
+            self.items[media_id]["proxy_rev"] = "pending"
+        source = self.proxy_path(media_id)
+        duration = max(0.04, float(item.get("duration") or 0))
+        count = max(1, int(math.ceil(duration / chunk)))
+        parts = []
+        try:
+            for i in range(count):
+                start = i * chunk
+                part = os.path.join(folder, f"rev_{i:04d}{'.m4a' if audio_only else '.mp4'}")
+                args = [ffmpeg_path(), "-y", "-v", "error", "-ss", f"{start:.4f}", "-t", f"{min(chunk, duration - start):.4f}", "-i", source]
+                if audio_only:
+                    args += ["-vn", "-af", "areverse", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", part]
+                else:
+                    args += ["-map", "0:v:0", "-map", "0:a:0?", "-vf", "reverse,format=yuv420p", "-af", "areverse",
+                             "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-g", "12", "-bf", "0",
+                             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2", part]
+                result = run(args, timeout=1800)
+                if result.returncode != 0 or not os.path.isfile(part):
+                    raise RuntimeError(result.stderr.strip()[-300:])
+                parts.append(part)
+            listing = os.path.join(folder, "rev_list.txt")
+            with open(listing, "w", encoding="utf-8") as handle:
+                for part in reversed(parts):
+                    handle.write("file '" + part.replace("\\", "/").replace("'", "'\\''") + "'\n")
+            tmp = out + ".part" + os.path.splitext(out)[1]
+            result = run([ffmpeg_path(), "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", listing, "-c", "copy", "-movflags", "+faststart", tmp], timeout=1800)
+            if result.returncode != 0 or not os.path.isfile(tmp):
+                raise RuntimeError(result.stderr.strip()[-300:])
+            os.replace(tmp, out)
+            self._set(media_id, proxy_rev="ready")
+        except Exception as error:
+            print(f"[Video Editor] reverse proxy failed for {item['name']}: {error}")
+            self._set(media_id, proxy_rev="error")
+        finally:
+            for part in parts + [os.path.join(folder, "rev_list.txt")]:
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+        return self.get(media_id)
+
+    def reverse_path(self, media_id):
+        item = self.get(media_id)
+        if not item or item.get("proxy_rev") != "ready":
+            return None
+        path = os.path.join(self.cache_dir, media_id, "proxy_rev.m4a" if item["kind"] == "audio" else "proxy_rev.mp4")
+        return path if os.path.isfile(path) else None
 
     def proxy_path(self, media_id):
         item = self.get(media_id)

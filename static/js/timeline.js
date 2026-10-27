@@ -8,7 +8,7 @@ import { transitionLabel, isAudioTransition } from "./transitions.js";
 import { isNeutral } from "./grade.js";
 
 const RULER_H = 28, VIDEO_H = 64, AUDIO_H = 52, GAP_H = 8, EDGE = 7, SNAP_PX = 9;
-const COLORS = { video: "#34588f", videoHead: "#284774", image: "#5f4489", imageHead: "#4b356d", audio: "#2c6a4c", audioHead: "#215239",
+const COLORS = { video: "#34588f", videoHead: "#284774", image: "#5f4489", imageHead: "#4b356d", title: "#8a5a2c", titleHead: "#6d4520", audio: "#2c6a4c", audioHead: "#215239",
                  wave: "rgba(170,240,200,.85)", sel: "#ffcc4d", trans: "rgba(201,141,44,.85)", playhead: "#ff4d4d", snap: "#ffe14d" };
 
 export class Timeline {
@@ -99,7 +99,7 @@ export class Timeline {
   }
   zoomToFit() {
     // The editor tab may still be hidden (zero width); fit as soon as it gets a real size.
-    if (!(this.width > 80)) { this.pendingFit = true; return; }
+    if (!(this.width > 80) || !P()) { this.pendingFit = true; return; }
     this.pendingFit = false;
     const end = Math.max(5, M.timelineEnd());
     this.pps = clamp((this.width - 40) / end, 1, 12000);
@@ -160,6 +160,7 @@ export class Timeline {
           onchange: (e) => M.edit("Rename track", () => { t.name = e.target.value; }) }),
         row.kind === "video" ? toggle("hidden", "Hide this track in the viewer and export", "H") : toggle("mute", "Mute", "M", "mute"),
         row.kind === "audio" ? toggle("solo", "Solo", "S", "solo") : null,
+        row.kind === "audio" ? toggle("showAuto", "Show this track's volume automation (keyframes across the whole track)", "A") : null,
         toggle("locked", "Lock (prevent edits)", "L"),
         el("button.del", { title: "Delete track", onclick: () => M.edit("Delete track", () => M.removeTrack(t.id)) }, "✕"));
       inner.append(head);
@@ -226,6 +227,7 @@ export class Timeline {
         this.paintClip(ctx, clip, row, y);
       }
       for (const tr of p.transitions.filter(tr => tr.trackId === row.track.id)) this.paintTransition(ctx, tr, row, y);
+      if (row.kind === "audio" && row.track.showAuto) this.paintAutomation(ctx, row, y);
     }
 
     // ghost (media drop)
@@ -249,6 +251,7 @@ export class Timeline {
     const firstAudio = rows.find(r => r.kind === "audio");
     if (firstAudio) { ctx.fillStyle = "#0f1013"; ctx.fillRect(0, this.rowY(firstAudio) - GAP_H, this.width, GAP_H); }
 
+    this.paintMarkerLines(ctx);
     this.paintRuler(ctx);
 
     // blade hover
@@ -309,6 +312,53 @@ export class Timeline {
       ctx.beginPath(); ctx.moveTo(x, isMajor ? 12 : 20); ctx.lineTo(x, RULER_H - 1); ctx.stroke();
       if (isMajor) ctx.fillText(this.rulerLabel(t, major), x + 3, 3);
     }
+    for (const m of p.markers || []) {
+      const x = Math.round(this.x(m.t)) + .5;
+      if (x < -60 || x > this.width + 4) continue;
+      ctx.fillStyle = m.color || "#4f8cff";
+      ctx.beginPath(); ctx.moveTo(x - 5, 2); ctx.lineTo(x + 5, 2); ctx.lineTo(x + 5, 12); ctx.lineTo(x, 17); ctx.lineTo(x - 5, 12); ctx.closePath(); ctx.fill();
+      ctx.fillRect(x - 0.5, 17, 1, RULER_H - 18);
+      if (m.name) {
+        ctx.font = "10px Segoe UI, system-ui, sans-serif"; ctx.textBaseline = "top";
+        const w = ctx.measureText(m.name).width;
+        ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(x + 7, 3, w + 6, 13);
+        ctx.fillStyle = "#e9ecf2"; ctx.fillText(m.name, x + 10, 4);
+      }
+    }
+  }
+
+  paintMarkerLines(ctx) {
+    for (const m of P().markers || []) {
+      const x = Math.round(this.x(m.t)) + .5;
+      if (x < 0 || x > this.width) continue;
+      ctx.strokeStyle = (m.color || "#4f8cff") + "55"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, RULER_H); ctx.lineTo(x, this.height); ctx.stroke();
+    }
+  }
+
+  // ---------------------------------------------------------------- track automation (audio)
+  autoGeo(row, ry) { const top = ry + 4, bottom = ry + row.h - 5; return { top, bottom, h: Math.max(4, bottom - top) }; }
+  paintAutomation(ctx, row, ry) {
+    const geo = this.autoGeo(row, ry);
+    const ks = M.trackKeys(row.track);
+    ctx.fillStyle = "rgba(10,12,16,.35)";
+    ctx.fillRect(0, geo.top - 2, this.width, geo.h + 4);
+    ctx.strokeStyle = "rgba(255,150,70,.95)"; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let px = 0; px <= this.width; px += 2) {
+      const py = this.laneY("volume", M.trackGainDb(row.track, Math.max(0, this.t(px))), geo);
+      px ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.stroke();
+    ctx.fillStyle = "#ff9646"; ctx.strokeStyle = "rgba(0,0,0,.7)"; ctx.lineWidth = 1;
+    for (const k of ks) {
+      const kx = this.x(k.t), ky = this.laneY("volume", k.v, geo);
+      if (kx < -6 || kx > this.width + 6) continue;
+      ctx.beginPath(); ctx.moveTo(kx, ky - 4.5); ctx.lineTo(kx + 4.5, ky); ctx.lineTo(kx, ky + 4.5); ctx.lineTo(kx - 4.5, ky); ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+    ctx.fillStyle = "rgba(255,150,70,.9)"; ctx.font = "10px Segoe UI, system-ui, sans-serif"; ctx.textBaseline = "top";
+    const label = "Track volume automation";
+    ctx.fillText(label, this.width - ctx.measureText(label).width - 8, geo.bottom - 11);
   }
 
   rulerLabel(t, step) {
@@ -326,7 +376,7 @@ export class Timeline {
     const x0 = this.x(clip.start), x1 = this.x(M.clipEnd(clip));
     const w = Math.max(1, x1 - x0);
     const top = y + 2, h = row.h - 5;
-    const kind = item.kind === "image" ? "image" : row.kind;
+    const kind = item.kind === "image" ? "image" : item.kind === "title" ? "title" : row.kind;
     const selected = state.selection.has(clip.id);
     ctx.save();
     ctx.beginPath(); ctx.rect(x0, top, w, h); ctx.clip();
@@ -346,6 +396,10 @@ export class Timeline {
           ctx.drawImage(img, idx * item.thumb_width, 0, item.thumb_width, 72, x, top + headH, tw, th);
         }
       }
+    } else if (row.kind === "video" && item.kind === "title") {
+      ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.font = "bold 13px Segoe UI, system-ui, sans-serif";
+      ctx.fillText(String(clip.title?.text || "").split("\n")[0].slice(0, 60), Math.max(x0, 0) + 6, top + headH + 6);
+      ctx.font = "11px Segoe UI, system-ui, sans-serif";
     } else if (row.kind === "video" && item.kind === "image") {
       ctx.fillStyle = "rgba(255,255,255,.06)";
       ctx.fillRect(x0, top + headH, w, h - headH);
@@ -373,10 +427,11 @@ export class Timeline {
     ctx.fillRect(x0, top, w, headH);
     const badges = [];
     if (clip.linkId) badges.push("🔗");
-    if (M.hasSpeedKeys(clip)) badges.push("⏱ ramp");
-    else if (Math.abs((clip.speed || 1) - 1) > 1e-6 && item.kind !== "image") badges.push(`${Math.round(clip.speed * 100)}%`);
+    if (M.hasSpeedKeys(clip)) badges.push(M.keysOf(clip, "speed").every(k => k.v <= 1e-6) ? "❄ freeze" : "⏱ ramp");
+    else if (Math.abs((clip.speed || 1) - 1) > 1e-6 && !M.isStillKind(item.kind)) badges.push(`${Math.round(clip.speed * 100)}%`);
     if (row.kind === "video" && clip.grade && !isNeutral(clip.grade)) badges.push("CC");
     if (clip.parentId) badges.push("⤓");
+    if (clip.reverse) badges.push("◀◀");
     ctx.fillStyle = "#e9ecf2";
     const label = `${badges.join(" ")}${badges.length ? "  " : ""}${clip.name || item.name || "clip"}`;
     ctx.fillText(label, Math.max(x0, 0) + 4, top + 2);
@@ -435,19 +490,21 @@ export class Timeline {
     const kind = row ? row.kind : M.trackKind(clip.trackId);
     const chosen = clip.lane;
     if (chosen && M.KEYABLE[chosen] && (M.KEYABLE[chosen].kind === kind || M.KEYABLE[chosen].kind === "any")) {
-      if (chosen !== "speed" || M.kindOf(clip) !== "image") return chosen;
+      if (chosen !== "speed" || !M.isStill(clip)) return chosen;
     }
     return kind === "audio" ? "volume" : "opacity";
   }
   laneGeo(row, ry) { const top = ry + 2 + 15 + 3, bottom = ry + row.h - 6; return { top, bottom, h: Math.max(4, bottom - top) }; }
   laneLimits(name) {
     const s = P().settings;
-    return { volume: [-60, 12], opacity: [0, 1], scale: [0, 20], speed: [0, 10], x: [-s.width, s.width], y: [-s.height, s.height] }[name];
+    if (name.startsWith("crop")) return [0, 1];
+    return { volume: [-60, 12], opacity: [0, 1], scale: [0, 20], speed: [0, 10], x: [-s.width, s.width], y: [-s.height, s.height], rotation: [-360, 360] }[name];
   }
   laneNorm(name, v) {
     const s = P().settings;
     if (name === "volume") return Math.sqrt(dbToGain(v) / dbToGain(12));
-    if (name === "opacity") return clamp(v, 0, 1);
+    if (name === "opacity" || name.startsWith("crop")) return clamp(v, 0, 1);
+    if (name === "rotation") return clamp((v + 360) / 720, 0, 1);
     if (name === "scale" || name === "speed") return Math.max(0, v) / (Math.max(0, v) + 1);
     if (name === "x") return clamp(0.5 + v / (2 * s.width), 0, 1);
     if (name === "y") return clamp(0.5 - v / (2 * s.height), 0, 1);
@@ -457,7 +514,8 @@ export class Timeline {
     const s = P().settings;
     f = clamp(f, 0, 1);
     if (name === "volume") return Math.round(clamp(gainToDb(f * f * dbToGain(12)), -60, 12) * 10) / 10;
-    if (name === "opacity") return Math.round(f * 1000) / 1000;
+    if (name === "opacity" || name.startsWith("crop")) return Math.round(f * 1000) / 1000;
+    if (name === "rotation") return Math.round(f * 720 - 360);
     if (name === "scale" || name === "speed") return Math.round(Math.min(f, 0.995) / (1 - Math.min(f, 0.995)) * 1000) / 1000;
     if (name === "x") return Math.round((f - 0.5) * 2 * s.width);
     if (name === "y") return Math.round((0.5 - f) * 2 * s.height);
@@ -467,7 +525,8 @@ export class Timeline {
   laneValue(name, y, geo) { return this.laneDenorm(name, (geo.bottom - y) / geo.h); }
   laneText(name, v) {
     if (name === "volume") return v <= -60 ? "-∞ dB" : `${v > 0 ? "+" : ""}${v.toFixed(1)} dB`;
-    if (name === "opacity" || name === "scale" || name === "speed") return `${Math.round(v * 100)}%`;
+    if (name === "opacity" || name === "scale" || name === "speed" || name.startsWith("crop")) return `${Math.round(v * 100)}%`;
+    if (name === "rotation") return `${Math.round(v)}°`;
     return `${Math.round(v)} px`;
   }
 
@@ -498,7 +557,9 @@ export class Timeline {
     }
     if (lane !== "volume" && lane !== "opacity" || selected) {
       ctx.fillStyle = "rgba(255,225,77,.85)"; ctx.font = "10px Segoe UI, system-ui, sans-serif";
-      if (x1 - x0 > 80) ctx.fillText(M.KEYABLE[lane].label, Math.max(x0, 0) + 4, geo.top);
+      const label = M.KEYABLE[lane].label;
+      const lw = ctx.measureText(label).width;
+      if (x1 - x0 > lw + 60) ctx.fillText(label, Math.min(x1, this.width) - lw - 6, geo.top);
       ctx.font = "11px Segoe UI, system-ui, sans-serif";
     }
     // small markers for other keyed properties
@@ -513,11 +574,21 @@ export class Timeline {
 
   // ---------------------------------------------------------------- hit testing
   hit(x, y) {
-    if (y < RULER_H) return { area: "ruler", t: this.t(x) };
+    if (y < RULER_H) {
+      const marker = (P().markers || []).find(m => Math.abs(this.x(m.t) - x) <= 6 && y <= 18);
+      return marker ? { area: "marker", marker, t: marker.t } : { area: "ruler", t: this.t(x) };
+    }
     const row = this.rowAt(y);
     if (!row) return { area: "empty", t: this.t(x) };
     const ry = this.rowY(row);
     const t = this.t(x);
+    if (row.kind === "audio" && row.track.showAuto && !row.track.locked && state.tool === "select") {
+      const geo = this.autoGeo(row, ry);
+      const ks = M.trackKeys(row.track);
+      const index = ks.findIndex(k => Math.abs(this.x(k.t) - x) <= 5 && Math.abs(this.laneY("volume", k.v, geo) - y) <= 5);
+      if (index >= 0) return { area: "auto", zone: "key", row, t, index };
+      if (Math.abs(this.laneY("volume", M.trackGainDb(row.track, Math.max(0, t)), geo) - y) <= 4) return { area: "auto", zone: "line", row, t };
+    }
     for (const tr of P().transitions.filter(tr => tr.trackId === row.track.id)) {
       const info = M.transitionInfo(tr);
       if (!info) continue;
@@ -571,6 +642,7 @@ export class Timeline {
     if (p.inPoint !== null) pts.push(p.inPoint);
     if (p.outPoint !== null) pts.push(p.outPoint);
     for (const c of p.clips) if (!exclude.has(c.id)) { pts.push(c.start, M.clipEnd(c)); }
+    for (const m of p.markers || []) pts.push(m.t);
     return pts;
   }
   snap(t, points, force = false) {
@@ -591,6 +663,28 @@ export class Timeline {
     const h = this.hit(x, y);
     this.canvas.setPointerCapture(e.pointerId);
     const base = { startX: x, startY: y, moved: false, alt: e.altKey, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey };
+    if (h.area === "marker") {
+      this.drag = { ...base, mode: "marker", markerId: h.marker.id, snapData: M.snapshot() };
+      return;
+    }
+    if (h.area === "auto") {
+      const trackId = h.row.track.id;
+      let index = h.index;
+      if (h.zone === "line" && (base.ctrl || !M.trackKeys(h.row.track).length)) {
+        const geo = this.autoGeo(h.row, this.rowY(h.row));
+        M.edit("Add automation keyframe", () => M.setTrackKeyAt(trackId, Math.max(0, h.t), this.laneValue("volume", y, geo)));
+        index = M.trackKeyIndexAt(trackId, M.snapFrame(Math.max(0, h.t)));
+      }
+      if (index !== undefined && index >= 0) {
+        this.drag = { ...base, mode: "autoKey", trackId, index, snapData: M.snapshot() };
+      } else {
+        const ks = M.trackKeys(h.row.track);
+        const j = ks.findIndex((k, i) => ks[i + 1] && k.t <= h.t && h.t <= ks[i + 1].t);
+        const indices = j >= 0 ? [j, j + 1] : [h.t < ks[0].t ? 0 : ks.length - 1];
+        this.drag = { ...base, mode: "autoLine", trackId, indices, startValue: M.trackGainDb(h.row.track, Math.max(0, h.t)), snapData: M.snapshot() };
+      }
+      return;
+    }
     if (h.area === "ruler") {
       this.playback.pause();
       this.drag = { ...base, mode: "scrub" };
@@ -679,9 +773,11 @@ export class Timeline {
   }
 
   scrubTo(x, e) {
+    this.scrubAudioAfter = true;
     let t = Math.max(0, this.t(x));
     if (!e.shiftKey) { const s = this.snap(t, this.snapPoints()); t = s.t; }
     this.playback.seek(t);
+    this.playback.scrub(t);
   }
 
   move(e) {
@@ -702,6 +798,34 @@ export class Timeline {
     this.snapLine = null;
     if (d.mode === "pan") { this.scrollX = Math.max(0, d.scrollX - (x - d.startX)); this.scrollY = Math.max(0, d.scrollY - (y - d.startY)); this.renderHeaders(); this.draw(); return; }
     if (d.mode === "scrub") { this.scrubTo(x, e); return; }
+    if (d.mode === "marker") {
+      if (firstMove) M.commit("Move marker");
+      M.restore(d.snapData);
+      const m = M.getMarker(d.markerId);
+      if (m) {
+        const s = this.snap(Math.max(0, this.t(x)), this.snapPoints().filter(p => Math.abs(p - m.t) > 1e-6));
+        m.t = s.snapped ? s.t : M.snapFrame(Math.max(0, this.t(x)));
+        if (s.snapped) this.snapLine = s.t;
+      }
+      M.finalize();
+      return;
+    }
+    if (d.mode === "autoKey" || d.mode === "autoLine") {
+      if (firstMove) M.commit("Track automation");
+      M.restore(d.snapData);
+      const track = M.getTrack(d.trackId);
+      const row = this.rows().find(r => r.track.id === d.trackId);
+      if (track && row) {
+        const geo = this.autoGeo(row, this.rowY(row));
+        const value = this.laneValue("volume", y, geo);
+        if (d.mode === "autoKey") M.moveTrackKey(d.trackId, d.index, e.shiftKey ? null : M.snapFrame(Math.max(0, this.t(x))), value);
+        else M.offsetTrackKeys(d.trackId, d.indices, value - d.startValue);
+        const k = M.trackKeys(M.getTrack(d.trackId))[d.mode === "autoKey" ? d.index : d.indices[0]];
+        this.dragLabel = { x, y, text: this.laneText("volume", d.mode === "autoKey" && k ? k.v : value) };
+      }
+      M.finalize();
+      return;
+    }
     if (d.mode === "marquee") {
       this.marquee = { x0: Math.min(d.startX, x), y0: Math.min(d.startY, y), x1: Math.max(d.startX, x), y1: Math.max(d.startY, y) };
       const ta = this.t(this.marquee.x0), tb = this.t(this.marquee.x1);
@@ -788,6 +912,7 @@ export class Timeline {
     this.snapLine = null;
     this.marquee = null;
     if (d && d.mode === "move" && !d.moved && d.deferredSelect) M.select([d.clipId]);
+    if (d && d.mode === "marker" && !d.moved) { const m = M.getMarker(d.markerId); if (m) { this.playback.pause(); this.playback.seek(m.t); } }
     if (d && d.mode === "range" && !d.moved) { state.range = null; bus.emit("range"); this.playback.seek(Math.max(0, this.t(d.startX))); }
     if (d && d.mode === "marquee" && !d.moved) this.playback.seek(Math.max(0, this.t(d.startX)));
     if (d && d.moved) bus.emit("change");
@@ -804,6 +929,8 @@ export class Timeline {
     if (state.tool === "blade") return h.clip ? "crosshair" : "default";
     if (state.tool === "range") return "text";
     if (h.area === "ruler") return "col-resize";
+    if (h.area === "marker") return "pointer";
+    if (h.area === "auto") return h.zone === "key" ? "move" : "ns-resize";
     if (h.area === "transition") return h.zone === "body" ? "pointer" : "ew-resize";
     if (h.area === "clip") return { trimL: "w-resize", trimR: "e-resize", fadeIn: "nesw-resize", fadeOut: "nwse-resize", key: "move", line: "ns-resize" }[h.zone] || "grab";
     return "default";
@@ -828,6 +955,7 @@ export class Timeline {
   dblclick(e) {
     const [x, y] = this.local(e);
     const h = this.hit(x, y);
+    if (h.area === "marker") { bus.emit("edit-marker", h.marker.id); return; }
     if (h.area === "clip") bus.emit("open-panel", h.row.kind === "video" ? "inspector" : "inspector");
     if (h.area === "transition") bus.emit("open-panel", "inspector");
   }
@@ -855,7 +983,7 @@ export class Timeline {
     let t = Math.max(0, this.t(x));
     const row = this.rowAt(y) || this.nearestRow(y);
     if (!item) { this.ghost = null; return; }
-    const dur = item.kind === "image" ? M.DEFAULT_STILL : item.duration || 1;
+    const dur = M.isStillKind(item.kind) ? M.DEFAULT_STILL : item.duration || 1;
     const s = this.snap(t, this.snapPoints());
     t = s.snapped ? s.t : M.snapFrame(t);
     const parts = [];

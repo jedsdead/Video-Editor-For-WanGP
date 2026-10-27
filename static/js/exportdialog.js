@@ -16,7 +16,12 @@ export function openExportDialog(app) {
   const sizeNote = el("span.dim");
   const fpsSel = el("select", {}, [["project", `Project (${s.fps} fps)`], [24, "24"], [25, "25"], [30, "30"], [48, "48"], [50, "50"], [60, "60"]]
     .map(([v, l]) => el("option", { value: v, selected: String(saved.fps ?? "project") === String(v) }, l)));
-  const codec = el("select", {}, (status.codecs || [{ id: "h264", label: "H.264 (MP4)" }]).map(c => el("option", { value: c.id, selected: (saved.codec || "h264") === c.id }, c.label)));
+  const codecs = status.codecs || [{ id: "h264", label: "H.264 (MP4)", kind: "video" }];
+  const group = (kind, label) => el("optgroup", { label }, codecs.filter(c => (c.kind || "video") === kind).map(c => el("option", { value: c.id, selected: (saved.codec || "h264") === c.id }, c.label)));
+  const codec = el("select", {}, group("video", "Video"), group("audio", "Audio only"), group("still", "Still frame"));
+  const kindOf = () => (codecs.find(c => c.id === codec.value) || {}).kind || "video";
+  const loudness = el("select", {}, [["off", "Off (measure only)"], [-14, "-14 LUFS (YouTube, Spotify)"], [-16, "-16 LUFS (podcasts, Apple)"], [-23, "-23 LUFS (EBU R128 broadcast)"], [-24, "-24 LUFS (ATSC A/85)"]]
+    .map(([v, l]) => el("option", { value: v, selected: String(saved.loudness ?? "off") === String(v) }, l)));
   const quality = el("input", { type: "range", min: 10, max: 32, step: 1, value: saved.quality || 18 });
   const qualityVal = el("span.dim");
   const hasRange = !!state.range && state.range.end > state.range.start;
@@ -51,12 +56,22 @@ export function openExportDialog(app) {
     el("label", {}, "Format"), codec,
     el("label", {}, "Quality"), el("div.row", {}, quality, qualityVal),
     el("label", {}, "Range"), range,
-    el("label", { title: "How slowed-down or frame-rate converted clips get their in-between frames, unless a clip overrides it in the Inspector" }, "In-between frames"), interp);
+    el("label", { title: "How slowed-down or frame-rate converted clips get their in-between frames, unless a clip overrides it in the Inspector" }, "In-between frames"), interp,
+    el("label", { title: "Measure the mix with the EBU R128 meter and adjust it to the target, with a -1 dBFS peak limiter" }, "Loudness"), loudness);
+  const stillNote = el("div.dim", { style: { fontSize: "12px", marginTop: "6px" } });
+  const syncKind = () => {
+    const kind = kindOf();
+    const show = (node, on) => { const label = node.closest(".row") ? node.closest(".row").previousElementSibling : node.previousElementSibling; node.closest(".row") ? (node.closest(".row").hidden = !on) : (node.hidden = !on); if (label) label.hidden = !on; };
+    show(size, kind !== "audio"); show(fpsSel, kind === "video"); show(quality, kind === "video"); show(range, kind !== "still"); show(interp, kind !== "audio"); show(loudness, kind !== "still");
+    stillNote.textContent = kind === "still" ? `Saves the frame at the playhead (${timecode(state.playhead, s.fps)}) as an image.` : "";
+  };
+  codec.addEventListener("change", syncKind);
   const progress = el("div.progress", {}, el("div"));
   const message = el("div.dim", { style: { marginTop: "6px", fontSize: "12px" } });
   const result = el("div", { style: { marginTop: "8px" } });
   const progressBox = el("div", { hidden: true, style: { marginTop: "14px" } }, progress, message, result);
-  const body = el("div", {}, form, el("div.dim", { style: { marginTop: "10px", fontSize: "12px" } }, `Saved to ${status.exports_dir || "the editor's exports folder"}. Rendering uses ${status.device || "the GPU when available"}.`), progressBox);
+  syncKind();
+  const body = el("div", {}, form, stillNote, el("div.dim", { style: { marginTop: "10px", fontSize: "12px" } }, `Saved to ${status.exports_dir || "the editor's exports folder"}. Rendering uses ${status.device || "the GPU when available"}.`), progressBox);
   let job = null, timer = null;
   const m = modal({ title: "Export", body, buttons: ["spacer",
     { label: "Close", action: () => { if (job && job.status === "running") { toast("Export keeps running in the background"); } } },
@@ -70,8 +85,9 @@ export function openExportDialog(app) {
     if (range.value === "inout") { a = p.inPoint ?? 0; b = p.outPoint ?? M.timelineEnd(); }
     if (range.value === "range") { a = state.range.start; b = state.range.end; }
     const options = { filename: name.value.trim() || "export", width: w, height: h, fps: fpsSel.value === "project" ? s.fps : parseFloat(fpsSel.value),
-                      codec: codec.value, quality: parseInt(quality.value, 10), start: a, end: b, interpolation: interp.value };
-    P().exportDefaults = { filename: options.filename, size: size.value, fps: fpsSel.value, codec: codec.value, quality: options.quality, interpolation: interp.value };
+                      codec: codec.value, quality: parseInt(quality.value, 10), start: a, end: b, interpolation: interp.value,
+                      loudness: loudness.value === "off" ? null : parseFloat(loudness.value), at: state.playhead };
+    P().exportDefaults = { filename: options.filename, size: size.value, fps: fpsSel.value, codec: codec.value, quality: options.quality, interpolation: interp.value, loudness: loudness.value };
     bus.emit("change");
     exportBtn.disabled = true;
     progressBox.hidden = false;
@@ -94,6 +110,7 @@ export function openExportDialog(app) {
           result.append(el("div", { style: { marginBottom: "6px" } }, "Saved: ", el("span", { style: { userSelect: "text" } }, job.output)),
             el("div.btnrow", {}, el("a", { href: `api/exports/${encodeURIComponent(job.name)}`, download: job.name }, el("button.small.primary", {}, "Download")),
               el("button.small", { onclick: async () => { try { const item = await api("api/exports/import", { method: "POST", body: { name: job.name } }); M.edit("Import media", () => M.registerMedia(item)); bus.emit("media"); toast("Added to the media bin"); } catch (e) { toast(e.message, "error"); } } }, "Add to media bin")));
+          for (const i of job.info || []) result.append(el("div.dim", { style: { fontSize: "12px", marginTop: "4px" } }, i));
           for (const w of job.warnings || []) result.append(el("div.warn", {}, w));
           toast("Export finished");
         } else if (job.status === "error") result.append(el("div.warn", {}, job.error || "Export failed"));

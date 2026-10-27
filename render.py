@@ -11,14 +11,21 @@ import wave
 
 import numpy as np
 
+from . import luts as L
 from . import media as M
 from . import timeline_math as T
+from . import titles as TT
 
 CODECS = {
     "h264": {"label": "H.264 (MP4)", "ext": ".mp4", "video": ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"], "crf": True, "audio": ["-c:a", "aac", "-b:a", "192k"]},
     "h265": {"label": "H.265 (MP4)", "ext": ".mp4", "video": ["-c:v", "libx265", "-preset", "medium", "-pix_fmt", "yuv420p", "-tag:v", "hvc1"], "crf": True, "audio": ["-c:a", "aac", "-b:a", "192k"]},
     "h264_nvenc": {"label": "H.264 NVENC (MP4, fast)", "ext": ".mp4", "video": ["-c:v", "h264_nvenc", "-preset", "p5", "-pix_fmt", "yuv420p"], "cq": True, "audio": ["-c:a", "aac", "-b:a", "192k"]},
     "prores": {"label": "ProRes 422 HQ (MOV)", "ext": ".mov", "video": ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"], "audio": ["-c:a", "pcm_s16le"]},
+    "wav": {"label": "Audio only: WAV", "ext": ".wav", "kind": "audio", "audio": ["-c:a", "pcm_s16le"]},
+    "mp3": {"label": "Audio only: MP3 320 kbps", "ext": ".mp3", "kind": "audio", "audio": ["-c:a", "libmp3lame", "-b:a", "320k"]},
+    "m4a": {"label": "Audio only: AAC (M4A)", "ext": ".m4a", "kind": "audio", "audio": ["-c:a", "aac", "-b:a", "256k"]},
+    "png": {"label": "Still frame: PNG (at the playhead)", "ext": ".png", "kind": "still"},
+    "jpg": {"label": "Still frame: JPEG (at the playhead)", "ext": ".jpg", "kind": "still"},
 }
 SAMPLE_RATE = 48000
 
@@ -53,7 +60,7 @@ class Timeline:
             item = registry.get(clip["mediaId"]) or (project.get("media") or {}).get(clip["mediaId"])
             if item is None:
                 raise RuntimeError(f"Media for clip '{clip.get('name', clip['id'])}' is not available")
-            if not os.path.isfile(item.get("path", "")):
+            if item.get("kind") != "title" and not os.path.isfile(item.get("path", "")):
                 raise RuntimeError(f"Missing file: {item.get('path')}")
             self.media[clip["mediaId"]] = item
         self.tracks = {track["id"]: track for track in project.get("tracks", [])}
@@ -170,6 +177,64 @@ class VideoReader:
         self.proc = None
 
 
+class WindowReader:
+    """Random-access reader for reversed clips: decodes a short window of frames around the requested time."""
+
+    def __init__(self, path, src_fps, width, height, duration):
+        self.path, self.width, self.height = path, width, height
+        self.fps = src_fps if src_fps and src_fps > 0 else 24.0
+        self.dt = 1.0 / self.fps
+        self.duration = duration
+        frame_bytes = width * height * 3
+        self.count = int(max(4, min(48, (200 * 1024 * 1024) // max(1, frame_bytes))))
+        self.base = None
+        self.frames = []
+
+    def _load(self, src):
+        # window ending just after src, so a backwards walk reuses it for count-1 more frames
+        start = max(0.0, src - (self.count - 2) * self.dt)
+        vf = f"scale={self.width}:{self.height}:flags=lanczos,format=rgb24"
+        args = [M.ffmpeg_path(), "-v", "error", "-ss", f"{start:.4f}", "-i", self.path, "-an", "-vf", vf,
+                "-frames:v", str(self.count), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        data = subprocess.run(args, capture_output=True, timeout=600, **M.popen_kwargs()).stdout
+        size = self.width * self.height * 3
+        self.frames = [np.frombuffer(data[i:i + size], dtype=np.uint8).reshape(self.height, self.width, 3)
+                       for i in range(0, len(data) - size + 1, size)]
+        self.base = start
+
+    def get(self, src):
+        src = min(max(0.0, src), max(0.0, self.duration - self.dt))
+        if self.base is None or not self.frames or src < self.base - 1e-6 or src > self.base + (len(self.frames) - 1) * self.dt + 1e-6:
+            self._load(src)
+        if not self.frames:
+            return None, None, 0.0
+        pos = (src - self.base) / self.dt
+        i0 = int(max(0, min(len(self.frames) - 1, math.floor(pos + 1e-6))))
+        if i0 + 1 >= len(self.frames):
+            return self.frames[i0], None, 0.0
+        return self.frames[i0], self.frames[i0 + 1], float(min(1.0, max(0.0, pos - i0)))
+
+    def close(self):
+        self.frames = []
+
+
+class TitleSource:
+    """A title rendered once at project resolution (straight-alpha RGBA), then resized like a still image."""
+
+    def __init__(self, title, project_w, project_h, width, height):
+        from PIL import Image
+        frame = TT.render_title(title, int(project_w), int(project_h))
+        if (width, height) != (int(project_w), int(project_h)):
+            frame = np.asarray(Image.fromarray(frame, "RGBA").resize((width, height), Image.LANCZOS)).copy()
+        self.frame = frame
+
+    def get(self, _src):
+        return self.frame, None, 0.0
+
+    def close(self):
+        pass
+
+
 class StillSource:
     def __init__(self, path, width, height):
         from PIL import Image
@@ -247,6 +312,44 @@ class Compositor:
         luma = (c * self.luma).sum(0, keepdim=True)
         c = luma + (c - luma) * params["saturation"]
         return c.clamp(0.0, 1.0)
+
+    def place(self, img, x, y, alpha, rotation=0.0, crop=(0.0, 0.0, 0.0, 0.0)):
+        """Crop (fractions l, r, t, b of the image), rotate (degrees, clockwise) and place an image whose centre sits at
+        (x, y) pixels from the canvas centre. Returns premultiplied RGBA (4, H, W). Same maths as the WebGL layer shader."""
+        _, h, w = img.shape
+        cl, cr, ct, cb = [min(1.0, max(0.0, float(v))) for v in crop]
+        if cl + cr >= 0.999 or ct + cb >= 0.999 or alpha <= 0:
+            return self.torch.zeros(4, self.height, self.width, device=self.device)
+        x0, x1 = int(round(cl * w)), w - int(round(cr * w))
+        y0, y1 = int(round(ct * h)), h - int(round(cb * h))
+        if (x0, y0, x1, y1) != (0, 0, w, h):
+            img = img[:, y0:y1, x0:x1]
+        # the cropped part's centre moves away from the full image's centre
+        ox, oy = (x0 + x1 - w) / 2.0, (y0 + y1 - h) / 2.0
+        rad = math.radians(float(rotation or 0.0))
+        cos, sin = math.cos(rad), math.sin(rad)
+        cx, cy = x + ox * cos - oy * sin, y + ox * sin + oy * cos
+        if abs(rotation or 0.0) < 1e-4:
+            return self.layer(img, cx, cy, alpha)
+        return self.rotated(img, cx, cy, alpha, rad)
+
+    def rotated(self, img, x, y, alpha, rad):
+        torch = self.torch
+        import torch.nn.functional as F
+        _, h, w = img.shape
+        if img.shape[0] == 3:
+            img = torch.cat([img, torch.ones(1, h, w, device=self.device)], 0)
+        premul = torch.cat([img[:3] * img[3:4], img[3:4]], 0)
+        px = self.X * self.width - (self.width / 2 + x)
+        py = self.Y * self.height - (self.height / 2 + y)
+        cos, sin = math.cos(rad), math.sin(rad)
+        lx = px * cos + py * sin          # inverse rotation back into the image's frame
+        ly = -px * sin + py * cos
+        gx = lx / (w / 2.0)
+        gy = ly / (h / 2.0)
+        grid = torch.stack([gx, gy], -1).unsqueeze(0)
+        out = F.grid_sample(premul.unsqueeze(0), grid, mode="bilinear", padding_mode="zeros", align_corners=False)[0]
+        return out * alpha
 
     def layer(self, img, x, y, alpha):
         """Place an image on a transparent canvas; returns premultiplied RGBA (4, H, W)."""
@@ -430,13 +533,14 @@ class ExportJob:
         self.message = "Waiting..."
         self.error = None
         self.warnings = []
+        self.info = []
         self.cancel_event = threading.Event()
         self.started = time.time()
         self.finished = None
 
     def public(self):
         return {"id": self.id, "status": self.status, "progress": round(self.progress, 4), "message": self.message,
-                "error": self.error, "warnings": self.warnings, "output": self.out_path if self.status == "done" else None,
+                "error": self.error, "warnings": self.warnings, "info": self.info, "output": self.out_path if self.status == "done" else None,
                 "name": os.path.basename(self.out_path), "elapsed": round((self.finished or time.time()) - self.started, 1)}
 
     def check(self):
@@ -480,20 +584,35 @@ class ExportJob:
             tl.width, tl.height = even(opts["width"]), even(opts["height"])
         if opts.get("fps"):
             tl.fps = float(opts["fps"])
+        codec = CODECS.get(opts.get("codec") or "h264", CODECS["h264"])
+        kind = codec.get("kind", "video")
+
+        if kind == "still":
+            self._still(tl, float(opts.get("at") or 0.0), opts, codec)
+            return
+
         start = max(0.0, float(opts.get("start") or 0.0))
         end = float(opts.get("end") or 0.0) or tl.end_time()
         if end - start < 1.0 / tl.fps:
             raise RuntimeError("Nothing to export: the timeline (or the selected range) is empty")
         frames = int(round((end - start) * tl.fps))
-        codec = CODECS.get(opts.get("codec") or "h264", CODECS["h264"])
 
         has_audio = any(tl.kind(c) in ("audio", "video") and tl.tracks.get(c["trackId"], {}).get("kind") == "audio" for c in tl.clips.values())
         audio_path = None
-        if has_audio:
+        if has_audio or kind == "audio":
             self.message = "Mixing audio..."
             audio_path = os.path.join(self.temp_dir, f"{self.id}_mix.wav")
-            self._mix_audio(tl, start, end, audio_path)
+            self._mix_audio(tl, start, end, audio_path, loudness=opts.get("loudness"))
         self.check()
+
+        if kind == "audio":
+            try:
+                result = M.run([M.ffmpeg_path(), "-y", "-v", "error", "-i", audio_path, *codec["audio"], self.out_path], timeout=3600)
+                if result.returncode != 0:
+                    raise RuntimeError(f"Encoder failed: {result.stderr.strip()[-500:]}")
+            finally:
+                self._remove(audio_path)
+            return
 
         args = [M.ffmpeg_path(), "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{tl.width}x{tl.height}",
                 "-framerate", f"{tl.fps}", "-i", "-"]
@@ -507,10 +626,10 @@ class ExportJob:
             args += ["-rc", "vbr", "-cq", str(quality), "-b:v", "0"]
         if audio_path:
             args += codec["audio"]
-        args += ["-t", f"{frames / tl.fps:.6f}", "-movflags", "+faststart", self.out_path]
-        if codec["ext"] == ".mov":
-            args.remove("-movflags")
-            args.remove("+faststart")
+        args += ["-t", f"{frames / tl.fps:.6f}"]
+        if codec["ext"] != ".mov":
+            args += ["-movflags", "+faststart"]
+        args.append(self.out_path)
         encoder = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE, **M.popen_kwargs())
         stderr_chunks = []
         reader_thread = threading.Thread(target=lambda: stderr_chunks.append(encoder.stderr.read()), daemon=True)
@@ -533,6 +652,27 @@ class ExportJob:
             message = (stderr_chunks[0] if stderr_chunks else b"").decode("utf-8", "ignore").strip()
             raise RuntimeError(f"Encoder failed: {message[-500:]}")
 
+    def _still(self, tl, at, opts, codec):
+        """Render the single frame at time `at` and save it as an image."""
+        from PIL import Image
+
+        class Grab:
+            def __init__(self):
+                self.frame = None
+                self.stdin = self
+
+            def write(self, data):
+                self.frame = data
+
+        grab = Grab()
+        at = max(0.0, min(at, max(0.0, tl.end_time() - 1.0 / tl.fps)))
+        self._render_video(tl, at, 1, grab, opts)
+        image = Image.frombytes("RGB", (tl.width, tl.height), grab.frame)
+        if codec["ext"] == ".jpg":
+            image.save(self.out_path, quality=95)
+        else:
+            image.save(self.out_path)
+
     # ----------------------------------------------------------------- video
     def _render_video(self, tl, start, frames, encoder, opts):
         import torch
@@ -541,8 +681,23 @@ class ExportJob:
         default_interp = opts.get("interpolation") or "blend"
         sources = {}
         rife = {"model": None, "failed": False}
-        grades = {cid: T.grade_params(c.get("grade")) for cid, c in tl.clips.items()}
+        grades = {cid: (None if T.has_grade_keys(c) else T.grade_params(c.get("grade"))) for cid, c in tl.clips.items()}
+        lut_dir = os.path.join(self.registry.data_root, "luts")
+        missing_luts = set()
         decode_scale = {}
+
+        def apply_lut(img, grade):
+            name = (grade or {}).get("lut")
+            if not name or (grade or {}).get("enabled") is False:
+                return img
+            lut = L.load(lut_dir, name)
+            if lut is None:
+                if name not in missing_luts:
+                    missing_luts.add(name)
+                    self.warnings.append(f"LUT '{name}' was not found and was skipped")
+                return img
+            mix = float(grade.get("lutMix") if grade.get("lutMix") is not None else 1.0)
+            return L.apply(img, lut, min(1.0, max(0.0, mix))) if mix > 1e-4 else img
 
         def source_for(clip):
             src = sources.get(clip["id"])
@@ -552,8 +707,14 @@ class ExportJob:
                 scales = [float(clip.get("scale") if clip.get("scale") is not None else 1)] + [float(k["v"]) for k in T.keys_of(clip, "scale")]
                 decode_scale[clip["id"]] = min(8.0, max(0.05, max(scales)))
                 w, h = fit_size(item.get("width") or tl.width, item.get("height") or tl.height, tl.width, tl.height, decode_scale[clip["id"]])
-                if item["kind"] == "image":
+                if item["kind"] == "title":
+                    pw, ph = self._project_w(tl), self._project_h(tl)
+                    w, h = fit_size(pw, ph, tl.width, tl.height, decode_scale[clip["id"]])
+                    src = TitleSource(clip.get("title"), pw, ph, w, h)
+                elif item["kind"] == "image":
                     src = StillSource(item["path"], w, h)
+                elif clip.get("reverse"):
+                    src = WindowReader(item["path"], item.get("fps") or tl.fps, w, h, float(item.get("duration") or 0))
                 else:
                     src = VideoReader(item["path"], item.get("fps") or tl.fps, w, h, float(item.get("duration") or 0))
                 sources[clip["id"]] = src
@@ -589,12 +750,14 @@ class ExportJob:
             img = frame_for(clip, tau)
             if img is None:
                 return None
-            if img.shape[0] == 4:
-                img = self._cat(comp.grade(img[:3], grades[clip["id"]]), img[3:4])
-            else:
-                img = comp.grade(img, grades[clip["id"]])
             duration = tl.durations[clip["id"]]
             kt = min(max(tau, 0.0), duration)
+            keyed = T.has_grade_keys(clip)
+            grade = T.grade_at(clip, kt) if keyed else (clip.get("grade") or {})
+            params = T.grade_params(grade) if keyed else grades[clip["id"]]
+            rgb = img[:3] if img.shape[0] == 4 else img
+            rgb = apply_lut(comp.grade(rgb, params), grade)
+            img = self._cat(rgb, img[3:4]) if img.shape[0] == 4 else rgb
             scale = max(0.0, T.prop(clip, "scale", kt, 1.0))
             base = decode_scale.get(clip["id"], 1.0)
             if abs(scale - base) > 1e-4:
@@ -603,8 +766,10 @@ class ExportJob:
                 img = comp.resize(img, img.shape[2] * scale / base, img.shape[1] * scale / base)
             alpha = min(1.0, max(0.0, T.prop(clip, "opacity", kt, 1.0)))
             alpha *= T.fade_factor(clip, kt, duration)
-            return comp.layer(img, T.prop(clip, "x", kt, 0.0) * tl.width / max(1, self._project_w(tl)),
-                              T.prop(clip, "y", kt, 0.0) * tl.height / max(1, self._project_h(tl)), alpha)
+            crop = tuple(T.prop(clip, name, kt, 0.0) for name in ("cropL", "cropR", "cropT", "cropB"))
+            return comp.place(img, T.prop(clip, "x", kt, 0.0) * tl.width / max(1, self._project_w(tl)),
+                              T.prop(clip, "y", kt, 0.0) * tl.height / max(1, self._project_h(tl)), alpha,
+                              rotation=T.prop(clip, "rotation", kt, 0.0), crop=crop)
 
         track_clips = {t["id"]: sorted([c for c in tl.clips.values() if c["trackId"] == t["id"]], key=lambda c: float(c["start"]))
                        for t in tl.video_tracks}
@@ -699,7 +864,67 @@ class ExportJob:
             data = np.concatenate([np.zeros((2, lead_samples), dtype=np.float32), data], axis=1)
         return data
 
-    def _mix_audio(self, tl, start, end, out_path):
+    @staticmethod
+    def fx_filters(fx):
+        """ffmpeg audio filter chain for a track's EQ and compressor (mirrors the Web Audio chain in playback.js)."""
+        fx = fx or {}
+        chain = []
+        eq = fx.get("eq") or {}
+        if eq.get("on"):
+            low, mid, high = eq.get("low") or {}, eq.get("mid") or {}, eq.get("high") or {}
+            if abs(float(low.get("g") or 0)) > 1e-3:
+                chain.append(f"lowshelf=f={float(low.get('f') or 120):.1f}:g={float(low.get('g')):.2f}:t=s:w=1")
+            if abs(float(mid.get("g") or 0)) > 1e-3:
+                chain.append(f"equalizer=f={float(mid.get('f') or 1000):.1f}:t=q:w={max(0.1, float(mid.get('q') or 1)):.3f}:g={float(mid.get('g')):.2f}")
+            if abs(float(high.get("g") or 0)) > 1e-3:
+                chain.append(f"highshelf=f={float(high.get('f') or 8000):.1f}:g={float(high.get('g')):.2f}:t=s:w=1")
+        comp = fx.get("comp") or {}
+        if comp.get("on"):
+            threshold = 10 ** (float(comp.get("threshold") or -18) / 20)
+            makeup = min(64.0, max(1.0, 10 ** (float(comp.get("makeup") or 0) / 20)))
+            chain.append(f"acompressor=threshold={max(0.000976563, min(1.0, threshold)):.6f}:ratio={max(1.0, min(20.0, float(comp.get('ratio') or 3))):.3f}"
+                         f":attack={max(0.01, min(2000.0, float(comp.get('attack') or 10))):.3f}:release={max(0.01, min(9000.0, float(comp.get('release') or 150))):.3f}"
+                         f":makeup={makeup:.4f}:knee=6")
+        return chain
+
+    def _apply_fx(self, buffer, fx):
+        chain = self.fx_filters(fx)
+        if not chain or not buffer.shape[1]:
+            return buffer
+        data = np.ascontiguousarray(buffer.T.astype(np.float32)).tobytes()
+        args = [M.ffmpeg_path(), "-v", "error", "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "2", "-i", "-",
+                "-af", ",".join(chain), "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "2", "-"]
+        proc = subprocess.run(args, input=data, capture_output=True, timeout=3600, **M.popen_kwargs())
+        if proc.returncode != 0:
+            self.warnings.append("An audio effect could not be applied: " + proc.stderr.decode("utf-8", "ignore").strip()[-200:])
+            return buffer
+        out = np.frombuffer(proc.stdout, dtype=np.float32)
+        out = out[: (len(out) // 2) * 2].reshape(-1, 2).T
+        if out.shape[1] < buffer.shape[1]:
+            out = np.pad(out, ((0, 0), (0, buffer.shape[1] - out.shape[1])))
+        return out[:, : buffer.shape[1]].copy()
+
+    def _loudness(self, wav_path):
+        """Integrated loudness (LUFS) and true peak (dBTP) of a wav, measured with ffmpeg's EBU R128 scanner."""
+        import re
+        result = M.run([M.ffmpeg_path(), "-hide_banner", "-nostats", "-i", wav_path, "-af", "ebur128=peak=true", "-f", "null", "-"], timeout=3600)
+        text = result.stderr or ""
+        summary = text[text.rfind("Summary:"):] if "Summary:" in text else text
+        integrated = re.search(r"I:\s*(-?[\d.]+|-inf)\s*LUFS", summary)
+        peak = re.search(r"Peak:\s*(-?[\d.]+|-inf)\s*dBFS", summary)
+        to_float = lambda m: (float(m.group(1)) if m and m.group(1) != "-inf" else None)
+        return to_float(integrated), to_float(peak)
+
+    @staticmethod
+    def _write_wav(path, mix):
+        pcm = (np.clip(mix, -1.0, 1.0).T * 32767.0).round().astype(np.int16)
+        with wave.open(path, "wb") as handle:
+            handle.setnchannels(2)
+            handle.setsampwidth(2)
+            handle.setframerate(SAMPLE_RATE)
+            handle.writeframes(pcm.tobytes())
+
+    def _mix_audio(self, tl, start, end, out_path, loudness=None):
         total = int(round((end - start) * SAMPLE_RATE))
         mix = np.zeros((2, total), dtype=np.float32)
         soloed = any(t.get("solo") for t in tl.audio_tracks)
@@ -728,13 +953,13 @@ class ExportJob:
                 keyed_speed = T.has_speed_keys(clip, item["kind"])
                 src_a, src_b = T.source_time(clip, s - cs), T.source_time(clip, e - cs)
                 taus = (s - cs) + np.arange(count, dtype=np.float64) / SAMPLE_RATE
-                if not keyed_speed:
+                if not keyed_speed and not clip.get("reverse"):
                     seg = self._decode_audio(item["path"], src_a, src_b, tempo=s0)
                     seg = seg[:, :count]
                     if seg.shape[1] < count:
                         seg = np.pad(seg, ((0, 0), (0, count - seg.shape[1])))
                 else:
-                    # Varispeed: resample along the speed curve (pitch follows speed, like tape).
+                    # Varispeed / reverse: resample along the source-time curve (pitch follows speed, like tape).
                     src_times = T.source_time(clip, taus)
                     lo_src, hi_src = float(src_times.min()), float(src_times.max())
                     raw = self._decode_audio(item["path"], lo_src, hi_src + 2.0 / SAMPLE_RATE, tempo=1.0)
@@ -761,7 +986,12 @@ class ExportJob:
                             curve = np.cos(p * np.pi / 2) if tr["a"] == clip["id"] else np.sin(p * np.pi / 2)
                         gain = np.where(within, gain * curve, gain)
                 buffer[:, i0:i0 + count] += seg * gain.astype(np.float32)
+            buffer = self._apply_fx(buffer, track.get("fx"))
             buffer *= T.db_to_gain(track.get("volume"))
+            automation = ((track.get("keys") or {}).get("volume")) or []
+            if automation:
+                times = start + np.arange(total, dtype=np.float64) / SAMPLE_RATE
+                buffer *= T.db_to_gain(np.asarray(T.key_values(automation, times), dtype=np.float64)).astype(np.float32)
             pan = float(track.get("pan") or 0)
             if abs(pan) > 1e-6:
                 left, right = buffer[0].copy(), buffer[1].copy()
@@ -773,10 +1003,37 @@ class ExportJob:
                     buffer[0], buffer[1] = left * gl, right + left * gr
             mix += buffer
             self.progress = 0.05 * (n + 1) / max(1, len(tl.audio_tracks))
-        mix *= T.db_to_gain((self.project.get("master") or {}).get("volume"))
-        pcm = (np.clip(mix, -1.0, 1.0).T * 32767.0).round().astype(np.int16)
-        with wave.open(out_path, "wb") as handle:
-            handle.setnchannels(2)
-            handle.setsampwidth(2)
-            handle.setframerate(SAMPLE_RATE)
-            handle.writeframes(pcm.tobytes())
+        master = self.project.get("master") or {}
+        mix = self._apply_fx(mix, master.get("fx"))
+        mix *= T.db_to_gain(master.get("volume"))
+        self._write_wav(out_path, mix)
+        if loudness in (None, "", "off"):
+            measured, peak = self._loudness(out_path)
+            if measured is not None:
+                self.info.append(f"Loudness: {measured:.1f} LUFS integrated, peak {peak:.1f} dBFS" if peak is not None else f"Loudness: {measured:.1f} LUFS integrated")
+            return
+        target = float(loudness)
+        measured, peak = self._loudness(out_path)
+        if measured is None:
+            self.warnings.append("The mix is silent, so it could not be normalised")
+            return
+        gain_db = target - measured
+        mix *= 10 ** (gain_db / 20)
+        ceiling = 10 ** (-1.0 / 20)
+        if np.abs(mix).max() > ceiling:
+            # keep peaks under -1 dBFS with ffmpeg's look-ahead limiter (fed float samples, so nothing clips on the way in)
+            data = np.ascontiguousarray(mix.T.astype(np.float32)).tobytes()
+            limited = out_path + ".lim.wav"
+            proc = subprocess.run([M.ffmpeg_path(), "-y", "-v", "error", "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "2", "-i", "-",
+                                   "-af", f"alimiter=limit={ceiling:.4f}:level=disabled", "-c:a", "pcm_s16le", limited],
+                                  input=data, capture_output=True, timeout=3600, **M.popen_kwargs())
+            if proc.returncode == 0 and os.path.isfile(limited):
+                os.replace(limited, out_path)
+            else:
+                self.warnings.append("The limiter could not run; peaks above -1 dBFS were clipped")
+                self._write_wav(out_path, mix)
+        else:
+            self._write_wav(out_path, mix)
+        final, final_peak = self._loudness(out_path)
+        self.info.append(f"Loudness: {measured:.1f} LUFS normalised to {final:.1f} LUFS (target {target:.0f}), peak {final_peak:.1f} dBFS"
+                         if final is not None and final_peak is not None else f"Loudness normalised by {gain_db:+.1f} dB")

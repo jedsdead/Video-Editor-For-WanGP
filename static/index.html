@@ -50,6 +50,8 @@
             <button class="icon" id="btnNextFrame" title="Next frame (→)"><svg viewBox="0 0 24 24"><path d="M9 5v14l9-7z"/></svg></button>
             <button class="icon" id="btnEnd" title="Go to end (End)"><svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
             <button class="toggle small" id="tglLoop" title="Loop playback (in/out or whole timeline)">Loop</button>
+            <button class="toggle small" id="tglCrop" title="Crop handles on the viewer (C)">Crop</button>
+            <span id="rateBadge" class="rate-badge"></span>
           </div>
           <span id="tcDuration" class="timecode dim">00:00:00:00</span>
           <button class="icon" id="btnFullscreen" title="Full-screen viewer"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
@@ -90,6 +92,7 @@
       <button class="primary" id="btnTakeBack">Edit here instead</button>
     </div>
   </div>
+  <div id="floatLayer"></div>
   <div id="menuLayer"></div>
   <div id="modalLayer"></div>
   <div id="toasts"></div>

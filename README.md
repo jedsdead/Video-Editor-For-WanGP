@@ -2,7 +2,7 @@
 
 A multi-track video editor that runs as a plugin inside [WanGP](https://github.com/deepbeepmeep/Wan2GP), in its own tab. Cut your generations together, grade them, mix the audio and export, without leaving WanGP.
 
-**Version 0.2** · by jedsdeadbaby · MIT licence
+**Version 0.3** · by jedsdeadbaby · MIT licence
 
 ## Features
 
@@ -11,12 +11,22 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - **Magnetic mode (M):** V1 is the main storyline. It closes gaps and pushes clips aside, and clips on the tracks above connect to the V1 clip under them and move with it. Turn it off for free placement, where dropped clips overwrite what's underneath.
 - **Select (V)**, **Blade (B)** (Shift-click cuts every track) and **Range (R)** tools. In a range, Del removes it and Shift+Del ripples the rest of the timeline up.
 - Snapping (S), marquee and Ctrl/Shift multi-select, copy and paste, in/out points, and full undo and redo.
+- **Markers (Shift+M):** named, coloured markers on the ruler and in a Markers panel. Drag to move, double-click to rename; ↑/↓ and snapping include them.
+- **Shuttle (J/K/L):** play backwards or forwards, pressing again for 2x, 4x and 8x. Audio scrubbing plays a short burst as you drag the playhead or step frames.
+- **Freeze frame (Shift+F)** inserts a held frame at the playhead, and **Reverse (Shift+R)** plays clips backwards (with their audio).
 
 **Keyframes**
-- Keyframe volume, opacity, scale, position and speed. Each keyframe eases to the next with Linear, Ease in, Ease out, S-curve, Fast start, Slow start or Hold.
+- Keyframe volume, opacity, scale, position, rotation, crop, speed and the colour grade. Each keyframe eases to the next with Linear, Ease in, Ease out, S-curve, Fast start, Slow start or Hold.
 - Clips show a line for one property (volume on audio, opacity on video; right-click a clip > *Show keyframes for* to switch). Select the clip, then Ctrl+click the line to add a keyframe, drag points to move them, drag the line to raise or lower a section, and right-click a point for its ease or to delete it.
 - In the Inspector, ◆ adds or removes a keyframe at the playhead and ◀ ▶ jump between them. Once a property has keyframes, changing it adds one automatically.
 - Fades have shapes too: right-click a fade handle, or use the Inspector.
+
+**Transform**
+- Position, scale, rotation and crop for every video clip, all keyframeable.
+- Handles on the viewer: drag to move, corners to scale, the knob to rotate (Shift snaps to 15°), and crop mode (C) for edge handles. Clicking in the viewer selects the clip under the pointer.
+
+**Titles**
+- Drag the **Title** generator from the Media panel (or press Shift+T). Set the text, font, size, bold and italic, colour, alignment, line height, outline, drop shadow and background box in the Inspector, and animate it with the transform keyframes.
 
 **Speed**
 - A constant speed, or a speed curve with keyframes that can go anywhere from 0% (a freeze frame) to 1000%. Presets: *Ramp to stop*, *Ease to slow-mo* and *Speed up*, starting at the playhead. A graph in the Inspector shows the curve.
@@ -33,12 +43,17 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 
 **Colour and scopes**
 - Lift, gamma and gain wheels with master sliders, plus exposure, contrast, saturation, temperature and tint.
+- **LUTs:** import `.cube` 3D LUTs and apply one per clip with a mix amount.
+- **Grade keyframes:** ◆ in the Colour panel keys the whole grade at the playhead, with an ease to the next keyframe.
 - Bypass, and copy and paste a grade between clips.
 - Waveform, RGB parade, vectorscope and histogram.
 
 **Audio**
 - A mixer with fader, pan, mute, solo and stereo meters for each track, plus a master bus.
-- Clip volume and fade handles.
+- **EQ and compressor** on every track and the master (FX button): low shelf, mid peak and high shelf, plus threshold, ratio, attack, release and makeup, with a gain-reduction meter.
+- **Track volume automation:** press **A** on an audio track header to show a volume line across the whole track, then Ctrl+click to add points.
+- **Loudness meter** on the master (EBU R128 momentary, short-term and integrated LUFS).
+- Clip volume keyframes and fade handles.
 
 **WanGP integration**
 - Browse WanGP's output folders and import files in place, with nothing copied.
@@ -46,11 +61,13 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 
 **Export**
 - H.264, H.265, H.264 NVENC or ProRes 422 HQ, at any resolution and frame rate.
+- **Audio only** (WAV, MP3 or AAC) and **still frame** (PNG or JPEG at the playhead).
+- **Loudness normalisation** to -14, -16, -23 or -24 LUFS with a -1 dBFS peak limiter. Every export reports its measured loudness.
 - The whole timeline, in/out points or a range selection.
 - Rendered on the GPU from the original files.
 
 **Layout**
-- Media, Transitions, Inspector, Colour, Scopes and Mixer panels can each be moved to the left, right or bottom dock, or hidden.
+- Media, Transitions, Markers, Inspector, Colour, Scopes and Mixer panels can each be moved to the left, right or bottom dock, **floated** as a movable, resizable window, or hidden.
 - Use the **View** menu or right-click a panel tab. The layout is remembered.
 
 ## Installation
@@ -82,7 +99,8 @@ Projects save automatically. **Help → Keyboard shortcuts** lists every key.
 
 | Key | Action |
 |---|---|
-| Space / J K L | Play-pause, back, pause, play |
+| Space | Play / pause |
+| J / K / L | Shuttle back / stop / forward (again for 2x, 4x, 8x) |
 | ← → / ↑ ↓ | Previous or next frame / edit point |
 | V B R | Select, Blade, Range tool |
 | S / M | Snapping / Magnetic timeline |
@@ -91,6 +109,8 @@ Projects save automatically. **Help → Keyboard shortcuts** lists every key.
 | I / O | Mark in / out |
 | Ctrl+T | Transition at the cut under the playhead |
 | Ctrl+Alt+C / V | Copy / paste a grade |
+| Shift+M / Shift+F / Shift+R / Shift+T | Marker / freeze frame / reverse / title |
+| C | Crop handles on the viewer |
 | Ctrl+E | Export |
 
 ## Where files go
@@ -102,7 +122,8 @@ Everything is stored in `<WanGP output folder>/video_editor/`:
 | `projects/` | Saved projects (JSON) |
 | `exports/` | Finished exports |
 | `media/` | Files you uploaded with *Import files* |
-| `cache/` | Preview proxies, thumbnails and waveforms; safe to delete |
+| `luts/` | Imported `.cube` LUTs |
+| `cache/` | Preview proxies (including reversed ones), thumbnails and waveforms; safe to delete |
 
 ## How it works
 
@@ -111,7 +132,7 @@ The editor is a web page served by WanGP through the plugin web-app API and show
 ## Roadmap
 
 - **Regenerate a shot:** pick a clip and regenerate it in WanGP from its saved prompt and settings, then drop the result back in place.
-- Track-level volume automation, keyframed colour, LUT import, titles.
+- Multicam editing, nested sequences, audio noise reduction.
 
 ## Licence
 
