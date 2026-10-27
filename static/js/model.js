@@ -2,6 +2,8 @@
 // The speed/ramp maths mirrors timeline_math.py so the preview and the export agree.
 import { Emitter, uid, clamp } from "./util.js";
 import { presetTransition, normalizeTransition } from "./transitions.js";
+import * as K from "./keys.js";
+import { keyValue, keyIntegral, cropKeys, curve } from "./keys.js";
 
 export const bus = new Emitter();
 const EPS = 1e-6;
@@ -63,40 +65,72 @@ export function trackLabel(track) {
   return `${track.kind === "video" ? "V" : "A"}${list.indexOf(track) + 1}`;
 }
 
-// ------------------------------------------------------------------ speed & time maths
+// ------------------------------------------------------------------ keyframes, speed & time maths
+
+// Keyable clip properties: static value key, default, and which track kind they apply to.
+export const KEYABLE = {
+  volume: { label: "Volume", fallback: 0, kind: "audio" },
+  opacity: { label: "Opacity", fallback: 1, kind: "video" },
+  scale: { label: "Scale", fallback: 1, kind: "video" },
+  x: { label: "Position X", fallback: 0, kind: "video" },
+  y: { label: "Position Y", fallback: 0, kind: "video" },
+  speed: { label: "Speed", fallback: 1, kind: "any" },
+};
+export const keysOf = (clip, prop) => (clip.keys && clip.keys[prop]) || [];
+export const hasKeys = (clip, prop) => keysOf(clip, prop).length > 0;
+export const hasSpeedKeys = (clip) => hasKeys(clip, "speed") && kindOf(clip) !== "image";
+export function prop(clip, name, tau) {
+  const fallback = clip[name] ?? KEYABLE[name].fallback;
+  return keyValue(keysOf(clip, name), tau, fallback);
+}
 
 export function speeds(clip) {
-  const s0 = Math.max(0.05, Number(clip.speed) || 1);
-  const s1 = clip.rampTo !== null && clip.rampTo !== undefined && clip.rampTo !== "" ? Math.max(0.05, Number(clip.rampTo)) : s0;
-  return [s0, s1];
+  if (hasSpeedKeys(clip)) { const k = K.sorted(keysOf(clip, "speed")); return [k[0].v, k[k.length - 1].v]; }
+  const s = Math.max(0.01, Number(clip.speed) || 1);
+  return [s, s];
 }
-export const isRamped = (clip) => { const [a, b] = speeds(clip); return Math.abs(a - b) > 1e-9; };
+export const isRamped = (clip) => hasSpeedKeys(clip);
 
 export function clipDur(clip) {
   const length = Math.max(0, clip.out - clip.in);
   if (kindOf(clip) === "image") return length;
-  const [s0, s1] = speeds(clip);
-  return Math.abs(s1 - s0) < 1e-9 ? length / s0 : 2 * length / (s0 + s1);
+  if (hasSpeedKeys(clip)) return Math.max(0, clip.dur || 0);
+  return length / speeds(clip)[0];
 }
 export const clipEnd = (clip) => clip.start + clipDur(clip);
 
 export function srcTime(clip, tau) {
   if (kindOf(clip) === "image") return 0;
-  const [s0, s1] = speeds(clip);
-  const d = clipDur(clip);
-  if (tau < 0) return clip.in + s0 * tau;
-  if (tau > d) return clip.out + s1 * (tau - d);
-  return clip.in + s0 * tau + (d > 0 ? (s1 - s0) * tau * tau / (2 * d) : 0);
+  if (hasSpeedKeys(clip)) return clip.in + keyIntegral(keysOf(clip, "speed"), tau);
+  return clip.in + speeds(clip)[0] * tau;
 }
 export function speedAt(clip, tau) {
-  const [s0, s1] = speeds(clip);
-  const d = clipDur(clip);
-  return d <= 0 ? s0 : s0 + (s1 - s0) * clamp(tau / d, 0, 1);
+  return hasSpeedKeys(clip) ? keyValue(keysOf(clip, "speed"), tau) : speeds(clip)[0];
 }
+// Timeline time (from the clip start) at which the clip reaches a source time.
+export function tauForSource(clip, src) {
+  if (hasSpeedKeys(clip)) return K.solveIntegral(keysOf(clip, "speed"), src - clip.in);
+  return (src - clip.in) / speeds(clip)[0];
+}
+// Keep a speed-keyed clip's source out point consistent with its curve and length, and inside the media.
+export function syncSpeedOut(clip) {
+  if (!hasSpeedKeys(clip)) return;
+  const media = mediaOf(clip) || {};
+  const total = media.duration || clip.out;
+  clip.dur = Math.max(frameDur(), clip.dur || 0);
+  let out = srcTime(clip, clip.dur);
+  if (out > total + 1e-6) {
+    clip.dur = Math.max(frameDur(), tauForSource(clip, total));
+    out = total;
+  }
+  clip.out = Math.max(clip.in + 1e-4, out);
+  for (const k of keysOf(clip, "speed")) k.v = Math.max(0, k.v);
+}
+
 export function fadeFactor(clip, tau, d) {
   let f = 1;
-  if (clip.fadeIn > 0 && tau < clip.fadeIn) f *= Math.max(0, tau / clip.fadeIn);
-  if (clip.fadeOut > 0 && tau > d - clip.fadeOut) f *= Math.max(0, (d - tau) / clip.fadeOut);
+  if (clip.fadeIn > 0 && tau < clip.fadeIn) f *= curve(clip.fadeInCurve || "linear", tau / clip.fadeIn);
+  if (clip.fadeOut > 0 && tau > d - clip.fadeOut) f *= curve(clip.fadeOutCurve || "linear", (d - tau) / clip.fadeOut);
   return f;
 }
 export function audioTransitionGains(type, p) {
@@ -212,15 +246,21 @@ export const selectedClips = () => P().clips.filter(c => state.selection.has(c.i
 
 function cloneClip(clip) { return JSON.parse(JSON.stringify(clip)); }
 
+function cropAllKeys(clip, a, b) {
+  if (!clip.keys) return;
+  for (const name of Object.keys(clip.keys)) {
+    if (!clip.keys[name] || !clip.keys[name].length) { delete clip.keys[name]; continue; }
+    clip.keys[name] = cropKeys(clip.keys[name], a, b);
+  }
+}
+
 function trimStartTo(clip, newStart) {
   const tau = newStart - clip.start;
+  const d = clipDur(clip);
   if (kindOf(clip) === "image") clip.in += tau;
-  else {
-    const ramped = isRamped(clip);
-    const s = speedAt(clip, tau);
-    clip.in = srcTime(clip, tau);
-    if (ramped && tau > 0) clip.speed = s;
-  }
+  else clip.in = srcTime(clip, tau);
+  cropAllKeys(clip, tau, d);
+  if (hasSpeedKeys(clip)) clip.dur = d - tau;
   clip.start = newStart;
   clip.fadeIn = Math.min(clip.fadeIn || 0, clipDur(clip));
 }
@@ -228,13 +268,9 @@ function trimStartTo(clip, newStart) {
 function trimEndTo(clip, newEnd) {
   const tau = newEnd - clip.start;
   if (kindOf(clip) === "image") clip.out = clip.in + tau;
-  else {
-    const ramped = isRamped(clip);
-    const d = clipDur(clip);
-    const s = speedAt(clip, tau);
-    clip.out = srcTime(clip, tau);
-    if (ramped && tau < d) clip.rampTo = s;
-  }
+  else clip.out = srcTime(clip, tau);
+  cropAllKeys(clip, 0, tau);
+  if (hasSpeedKeys(clip)) clip.dur = tau;
   clip.fadeOut = Math.min(clip.fadeOut || 0, clipDur(clip));
 }
 
@@ -361,7 +397,7 @@ export function removeTrack(trackId) {
 
 export function newClipsForMedia(item, videoTrackId, audioTrackId, start) {
   const clips = [];
-  const base = { mediaId: item.id, start, name: item.name, speed: 1, rampTo: null, interp: "default", fadeIn: 0, fadeOut: 0, parentId: null };
+  const base = { mediaId: item.id, start, name: item.name, speed: 1, interp: "default", fadeIn: 0, fadeOut: 0, fadeInCurve: "linear", fadeOutCurve: "linear", parentId: null, keys: {} };
   const length = item.kind === "image" ? DEFAULT_STILL : Math.max(frameDur(), item.duration || 0);
   const linkId = item.kind === "video" && item.has_audio ? uid("l") : null;
   if (item.kind === "video" || item.kind === "image") {
@@ -457,39 +493,83 @@ function rippleAfter(trackIds, time, delta, exclude) {
   }
 }
 
-export function setSpeed(ids, speed, rampTo) {
+// Changes that alter a clip's length: ripple later clips in free mode, repack in magnetic mode.
+function afterLengthChange(changed) {
+  const pid = primaryId();
+  if (P().magnetic) { pack(); return; }
+  for (const { clip, oldEnd } of changed.sort((x, y) => y.oldEnd - x.oldEnd)) {
+    const delta = clipEnd(clip) - oldEnd;
+    if (Math.abs(delta) < 1e-9 || clip.trackId === pid && P().magnetic) continue;
+    const groupIds = new Set([clip.id, ...partners(clip).map(p => p.id)]);
+    rippleAfter(new Set([clip.trackId, ...partners(clip).map(p => p.trackId)]), oldEnd, delta, groupIds);
+  }
+}
+
+// Constant speed (removes any speed keyframes).
+export function setSpeed(ids, speed) {
   const set = withPartners(ids);
   const clips = P().clips.filter(c => set.has(c.id) && kindOf(c) !== "image");
-  const pid = primaryId();
-  for (const c of clips.sort((x, y) => y.start - x.start)) {
+  const changed = [];
+  for (const c of clips) {
     const oldEnd = clipEnd(c);
-    c.speed = speed;
-    c.rampTo = rampTo === null || rampTo === undefined ? null : rampTo;
+    if (c.keys) delete c.keys.speed;
+    delete c.dur;
+    c.speed = Math.max(0.01, speed);
     if (c.fadeIn) c.fadeIn = Math.min(c.fadeIn, clipDur(c));
     if (c.fadeOut) c.fadeOut = Math.min(c.fadeOut, clipDur(c));
-    if (!(P().magnetic && c.trackId === pid)) {
-      const groupIds = new Set([c.id, ...partners(c).map(p => p.id)]);
-      if (!P().magnetic) rippleAfter(new Set([c.trackId]), oldEnd, clipEnd(c) - oldEnd, groupIds);
-    }
+    changed.push({ clip: c, oldEnd });
   }
-  if (P().magnetic) pack();
+  afterLengthChange(changed);
+}
+
+// Copy a clip's timing (speed curve, length, source range) to linked partners that are aligned with it.
+function syncTimingToPartners(clip, before) {
+  for (const p of partners(clip)) {
+    if (Math.abs(p.start - before.start) > 1e-4 || Math.abs(p.in - before.in) > 1e-4) continue;
+    p.in = clip.in; p.out = clip.out; p.speed = clip.speed;
+    if (hasSpeedKeys(clip)) { p.keys = { ...(p.keys || {}), speed: JSON.parse(JSON.stringify(clip.keys.speed)) }; p.dur = clip.dur; }
+    else { if (p.keys) delete p.keys.speed; delete p.dur; }
+  }
+}
+
+// Replace a clip's speed curve (keys in multiplier units, t from the clip start). Keeps the clip length.
+export function setSpeedKeys(clipId, keys, { keepLength = true } = {}) {
+  const clip = getClip(clipId);
+  if (!clip || kindOf(clip) === "image") return;
+  const before = { start: clip.start, in: clip.in };
+  const oldEnd = clipEnd(clip);
+  const dur = clipDur(clip);
+  clip.keys = clip.keys || {};
+  if (!keys || !keys.length) {
+    const s = clip.keys.speed?.length ? Math.max(0.01, keyValue(clip.keys.speed, 0)) : clip.speed;
+    delete clip.keys.speed;
+    delete clip.dur;
+    clip.speed = s;
+    clip.out = Math.min((mediaOf(clip) || {}).duration || Infinity, clip.in + s * dur);
+  } else {
+    clip.keys.speed = keys.map(k => ({ ...k, v: Math.max(0, k.v) }));
+    if (keepLength || !clip.dur) clip.dur = dur;
+    syncSpeedOut(clip);
+  }
+  syncTimingToPartners(clip, before);
+  afterLengthChange([{ clip, oldEnd }]);
 }
 
 // Allowed new time for trimming a clip edge, honouring source length and neighbours.
 export function trimLimits(clip, edge, groupIds) {
   const kind = kindOf(clip);
   const item = mediaOf(clip) || {};
-  const [s0, s1] = speeds(clip);
+  const [s0] = speeds(clip);
   const free = !(P().magnetic && (clip.trackId === primaryId() || isPrimaryLinked(clip)));
   const neighbours = clipsOn(clip.trackId).filter(c => !groupIds.has(c.id));
   const minDur = frameDur();
   if (edge === "start") {
-    let lo = kind === "image" ? -Infinity : clip.start - clip.in / s0;
+    let lo = kind === "image" || s0 <= 1e-6 ? -Infinity : clip.start - clip.in / s0;
     if (free) for (const n of neighbours) if (clipEnd(n) <= clip.start + EPS) lo = Math.max(lo, clipEnd(n));
     if (free) lo = Math.max(lo, 0);
     return [lo, clipEnd(clip) - minDur];
   }
-  let hi = kind === "image" ? Infinity : clipEnd(clip) + Math.max(0, (item.duration || clip.out) - clip.out) / s1;
+  let hi = kind === "image" ? Infinity : clip.start + tauForSource(clip, item.duration || clip.out);
   if (free) for (const n of neighbours) if (n.start >= clipEnd(clip) - EPS) hi = Math.min(hi, n.start);
   return [clip.start + minDur, hi];
 }
@@ -539,6 +619,109 @@ export function moveClips(ids, dt, trackShift, grabbedKind) {
   applyPlacement(clips.map(c => c.id));
 }
 
+// ------------------------------------------------------------------ keyframe editing
+// Times are seconds from the clip start; values are in stored units (dB, 0-1 opacity, multiplier scale/speed, pixels).
+
+export function keyIndexAt(clip, name, tau, tol = null) {
+  tol = tol ?? frameDur() / 2 + 1e-6;
+  const ks = keysOf(clip, name);
+  let best = -1, dist = Infinity;
+  ks.forEach((k, i) => { const d = Math.abs(k.t - tau); if (d <= tol && d < dist) { best = i; dist = d; } });
+  return best;
+}
+
+function plainKeys(clip, name) { return K.sorted(keysOf(clip, name)).map(k => ({ ...k })); }
+function resetShape(ks, i) { for (const j of [i - 1, i]) if (ks[j]) delete ks[j].r; }
+
+function storeKeys(clip, name, ks) {
+  ks = K.sorted(ks);
+  if (name === "speed") { setSpeedKeys(clip.id, ks); return; }
+  clip.keys = clip.keys || {};
+  if (ks.length) clip.keys[name] = ks;
+  else delete clip.keys[name];
+}
+
+// Add a key (splitting the curve exactly) or change the value of the key at tau.
+export function setKeyAt(clipId, name, tau, value) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  tau = clamp(tau, 0, clipDur(clip));
+  const ks = plainKeys(clip, name);
+  let i = keyIndexAt(clip, name, tau);
+  if (i >= 0) { ks[i].v = value; resetShape(ks, i); storeKeys(clip, name, ks); return; }
+  if (!ks.length) { storeKeys(clip, name, [{ t: tau, v: value, ease: "linear" }]); return; }
+  const before = keyValue(ks, tau);
+  const j = ks.findIndex((k, n) => ks[n + 1] && k.t < tau && tau < ks[n + 1].t);
+  const key = { t: tau, v: before, ease: j >= 0 ? (ks[j].ease || "linear") : "linear" };
+  if (j >= 0) {
+    const [r0, r1] = ks[j].r || [0, 1];
+    const xm = r0 + (tau - ks[j].t) / (ks[j + 1].t - ks[j].t) * (r1 - r0);
+    ks[j].r = [r0, xm];
+    key.r = [xm, r1];
+  }
+  ks.push(key);
+  const sortedKs = K.sorted(ks);
+  const at = sortedKs.indexOf(key);
+  if (Math.abs(value - before) > 1e-9) { key.v = value; resetShape(sortedKs, at); }
+  for (const k of sortedKs) if (k.r && Math.abs(k.r[0]) < 1e-9 && Math.abs(k.r[1] - 1) < 1e-9) delete k.r;
+  storeKeys(clip, name, sortedKs);
+}
+
+export function removeKey(clipId, name, index) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  const ks = plainKeys(clip, name);
+  if (!ks[index]) return;
+  const value = ks[index].v;
+  ks.splice(index, 1);
+  resetShape(ks, index);
+  if (!ks.length && name !== "speed") clip[name] = value;
+  storeKeys(clip, name, ks);
+}
+
+export function clearKeys(clipId, name, keepValue) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  if (name !== "speed" && keepValue !== undefined) clip[name] = keepValue;
+  storeKeys(clip, name, []);
+}
+
+export function setKeyEase(clipId, name, index, ease) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  const ks = plainKeys(clip, name);
+  if (!ks[index]) return;
+  ks[index].ease = ease;
+  delete ks[index].r;
+  storeKeys(clip, name, ks);
+}
+
+// Move a key in time (between its neighbours) and/or value.
+export function moveKey(clipId, name, index, tau, value) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  const ks = plainKeys(clip, name);
+  const k = ks[index];
+  if (!k) return;
+  const fd = frameDur() / 4;
+  const lo = index > 0 ? ks[index - 1].t + fd : 0;
+  const hi = index < ks.length - 1 ? ks[index + 1].t - fd : clipDur(clip);
+  if (tau !== null && tau !== undefined) k.t = clamp(tau, Math.min(lo, hi), Math.max(lo, hi));
+  if (value !== null && value !== undefined) k.v = value;
+  resetShape(ks, index);
+  storeKeys(clip, name, ks);
+}
+
+// Shift every key of a property by a value delta (dragging the line between keys, or with no keys the static value).
+export function offsetKeys(clipId, name, indices, delta, limits) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  const [lo, hi] = limits;
+  const ks = plainKeys(clip, name);
+  for (const i of indices) if (ks[i]) { ks[i].v = clamp(ks[i].v + delta, lo, hi); resetShape(ks, i); }
+  storeKeys(clip, name, ks);
+}
+
 // ------------------------------------------------------------------ transitions
 
 export function findCut(trackId, time, tolerance) {
@@ -583,10 +766,9 @@ export function transitionHandles(tr) {
   const { a, b } = info;
   const half = tr.duration / 2;
   const itemA = mediaOf(a) || {}, itemB = mediaOf(b) || {};
-  const [, a1] = speeds(a);
+  const spareA = kindOf(a) === "image" ? Infinity : Math.max(0, tauForSource(a, itemA.duration || a.out) - clipDur(a));
   const [b0] = speeds(b);
-  const spareA = kindOf(a) === "image" ? Infinity : Math.max(0, (itemA.duration || a.out) - a.out) / a1;
-  const spareB = kindOf(b) === "image" ? Infinity : b.in / b0;
+  const spareB = kindOf(b) === "image" || b0 <= 1e-6 ? Infinity : b.in / b0;
   return { needed: half, spareA, spareB };
 }
 
@@ -663,7 +845,16 @@ export function normalizeProject(project) {
   project.settings = { ...base.settings, ...project.settings };
   for (const tr of project.transitions) normalizeTransition(tr);
   for (const c of project.clips) {
-    c.speed ??= 1; c.rampTo ??= null; c.interp ??= "default"; c.fadeIn ??= 0; c.fadeOut ??= 0; c.parentId ??= null; c.linkId ??= null;
+    c.speed ??= 1; c.interp ??= "default"; c.fadeIn ??= 0; c.fadeOut ??= 0; c.parentId ??= null; c.linkId ??= null;
+    c.fadeInCurve ??= "linear"; c.fadeOutCurve ??= "linear"; c.keys ??= {};
+    // Older projects stored a linear ramp as speed -> rampTo; turn it into two speed keyframes.
+    if (c.rampTo !== undefined && c.rampTo !== null && c.rampTo !== "" && Math.abs(Number(c.rampTo) - c.speed) > 1e-9 && project.media[c.mediaId]?.kind !== "image") {
+      const s0 = Math.max(0.05, Number(c.speed) || 1), s1 = Math.max(0.05, Number(c.rampTo));
+      const d = 2 * (c.out - c.in) / (s0 + s1);
+      c.keys.speed = [{ t: 0, v: s0, ease: "linear" }, { t: d, v: s1, ease: "linear" }];
+      c.dur = d;
+    }
+    delete c.rampTo;
     if (project.tracks.find(t => t.id === c.trackId)?.kind === "video") {
       c.opacity ??= 1; c.scale ??= 1; c.x ??= 0; c.y ??= 0; c.grade = { ...defaultGrade(), ...(c.grade || {}) };
     } else c.volume ??= 0;

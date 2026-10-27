@@ -1,7 +1,7 @@
 // Playback engine: master clock, pooled <video>/<audio> elements kept in sync with the timeline,
 // the Web Audio mixer graph (clip gain -> track strip -> master) and the per-frame render of the viewer.
 import { state, P, bus, clipsOn, videoTracks, audioTracks, clipDur, srcTime, speedAt, fadeFactor, isRamped, transitionInfo,
-         kindOf, mediaOf, timelineEnd, getClip, audioTransitionGains, fps, clipWindow, trackKind } from "./model.js";
+         kindOf, mediaOf, timelineEnd, getClip, audioTransitionGains, fps, clipWindow, trackKind, prop } from "./model.js";
 import { gradeUniforms } from "./grade.js";
 import { isAudioTransition } from "./transitions.js";
 import { dbToGain, clamp } from "./util.js";
@@ -223,13 +223,15 @@ export class Playback {
     const raw = srcTime(clip, tau);
     const maxT = Math.max(0, (item.duration || 0) - 0.03);
     const desired = clamp(raw, 0, maxT);
-    const holding = raw < 0 || raw > maxT;
+    const speed = speedAt(clip, tau);
+    // Below the slowest rate a media element can play, step through frames by seeking (covers speed 0 = freeze).
+    const holding = raw < 0 || raw > maxT || speed < 0.07;
     if (!this.playing || holding) {
       if (!el.paused) el.pause();
-      if (!el.seeking && Math.abs(el.currentTime - desired) > (this.playing ? 0.2 : 0.015)) el.currentTime = desired;
+      if (!el.seeking && Math.abs(el.currentTime - desired) > (this.playing && speed >= 0.07 ? 0.2 : 0.015)) el.currentTime = desired;
       return;
     }
-    const rate = clamp(speedAt(clip, tau), 0.0625, 16);
+    const rate = clamp(speed, 0.0625, 16);
     if (Math.abs(el.playbackRate - rate) > 1e-3) el.playbackRate = rate;
     const ramped = isRamped(clip);
     if ("preservesPitch" in el && el.preservesPitch === ramped) el.preservesPitch = !ramped;
@@ -253,13 +255,14 @@ export class Playback {
     const canvas = this.renderer.canvas;
     const k = canvas.width / p.settings.width;
     const sw = item.width || p.settings.width, sh = item.height || p.settings.height;
-    const fit = Math.min(p.settings.width / sw, p.settings.height / sh) * (clip.scale ?? 1);
-    const w = sw * fit * k, h = sh * fit * k;
-    const x = canvas.width / 2 + (clip.x || 0) * k - w / 2;
-    const y = canvas.height / 2 + (clip.y || 0) * k - h / 2;
     const d = clipDur(clip);
     const tau = t - clip.start;
-    const alpha = (clip.opacity ?? 1) * fadeFactor(clip, clamp(tau, 0, d), d);
+    const kt = clamp(tau, 0, d);
+    const fit = Math.min(p.settings.width / sw, p.settings.height / sh) * Math.max(0, prop(clip, "scale", kt));
+    const w = sw * fit * k, h = sh * fit * k;
+    const x = canvas.width / 2 + prop(clip, "x", kt) * k - w / 2;
+    const y = canvas.height / 2 + prop(clip, "y", kt) * k - h / 2;
+    const alpha = clamp(prop(clip, "opacity", kt), 0, 1) * fadeFactor(clip, kt, d);
     let grade = this.gradeCache.get(clip.grade);
     if (grade === undefined) { grade = gradeUniforms(clip.grade); if (clip.grade) this.gradeCache.set(clip.grade, grade); }
     return { type: "clip", source: entry.el, rect: [x, y, w, h], alpha, grade };
@@ -314,7 +317,7 @@ export class Playback {
         if (entry.gain) {
           const d = clipDur(clip);
           const tau = t - clip.start;
-          let g = dbToGain(clip.volume || 0) * fadeFactor(clip, clamp(tau, 0, d), d);
+          let g = dbToGain(prop(clip, "volume", clamp(tau, 0, d))) * fadeFactor(clip, clamp(tau, 0, d), d);
           for (const tr of transitions) {
             if (tr.a !== clip.id && tr.b !== clip.id) continue;
             const info = transitionInfo(tr);

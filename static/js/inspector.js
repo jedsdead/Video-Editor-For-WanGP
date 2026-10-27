@@ -2,6 +2,7 @@
 import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { api, el, toast, timecode, shortTime, clamp } from "./util.js";
+import { CURVES, FADE_CURVES } from "./keys.js";
 import { FAMILIES, AUDIO_TRANSITIONS, DISSOLVE_STYLES, IRIS_SHAPES, ANGLE_PRESETS, DEFAULT_PARAMS, MAX_BORDER, isAudioTransition, hasEdge } from "./transitions.js";
 
 const RES_PRESETS = [[1280, 720], [1920, 1080], [3840, 2160], [832, 480], [480, 832], [720, 1280], [1080, 1920], [1024, 1024], [2560, 1080]];
@@ -16,6 +17,8 @@ export class Inspector {
     this.metaCache = new Map();
     for (const name of ["selection", "project", "media-selected", "settings"]) bus.on(name, () => this.render());
     bus.on("change", () => this.refresh());
+    let lastTime = 0;
+    bus.on("time", () => { const now = performance.now(); if (now - lastTime > 120) { lastTime = now; for (const fn of this.refreshers) fn(); } });
   }
 
   refresh() {
@@ -101,74 +104,186 @@ export class Inspector {
     }
 
     if (video.length) {
-      const v0 = video[0];
-      const g = (key, dflt) => () => (M.getClip(v0.id) || v0)[key] ?? dflt;
+      const pw = P().settings.width, ph = P().settings.height;
       this.defaults = { Opacity: 100, Scale: 100, "Position X": 0, "Position Y": 0 };
       this.section("Video",
-        this.slider("Opacity", { get: () => Math.round(g("opacity", 1)() * 100), set: (v) => each(video, c => { c.opacity = v / 100; })(), min: 0, max: 100, step: 1 }),
-        this.slider("Scale", { get: () => Math.round(g("scale", 1)() * 100), set: (v) => each(video, c => { c.scale = v / 100; })(), min: 5, max: 400, step: 1 }),
-        this.slider("Position X", { get: g("x", 0), set: (v) => each(video, c => { c.x = v; })(), min: -P().settings.width, max: P().settings.width, step: 1 }),
-        this.slider("Position Y", { get: g("y", 0), set: (v) => each(video, c => { c.y = v; })(), min: -P().settings.height, max: P().settings.height, step: 1 }),
-        this.slider("Fade in", { get: g("fadeIn", 0), set: (v) => each(video, c => { c.fadeIn = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 1 / fps, format: (v) => v.toFixed(2), editLabel: "Video fade in" }),
-        this.slider("Fade out", { get: g("fadeOut", 0), set: (v) => each(video, c => { c.fadeOut = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 1 / fps, format: (v) => v.toFixed(2), editLabel: "Video fade out" }),
-        el("div.btnrow", {}, el("button.small", { onclick: () => M.edit("Reset transform", each(video, c => { c.opacity = 1; c.scale = 1; c.x = 0; c.y = 0; })) }, "Reset transform"),
-          el("button.small", { onclick: () => this.app.docks.show("colour") }, "Colour…")));
+        this.keySlider("Opacity", video, "opacity", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 100, step: 0.5 }),
+        this.keySlider("Scale", video, "scale", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 400, step: 0.5 }),
+        this.keySlider("Position X", video, "x", { toUi: (v) => Math.round(v), fromUi: (v) => v, min: -pw, max: pw, step: 1 }),
+        this.keySlider("Position Y", video, "y", { toUi: (v) => Math.round(v), fromUi: (v) => v, min: -ph, max: ph, step: 1 }),
+        this.slider("Fade in", { get: () => (M.getClip(video[0].id) || video[0]).fadeIn || 0, set: (v) => each(video, c => { c.fadeIn = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 1 / fps, format: (v) => v.toFixed(2), editLabel: "Video fade in" }),
+        this.curveSelect("Fade in shape", video, "fadeInCurve"),
+        this.slider("Fade out", { get: () => (M.getClip(video[0].id) || video[0]).fadeOut || 0, set: (v) => each(video, c => { c.fadeOut = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 1 / fps, format: (v) => v.toFixed(2), editLabel: "Video fade out" }),
+        this.curveSelect("Fade out shape", video, "fadeOutCurve"),
+        el("div.btnrow", {}, el("button.small", { onclick: () => M.edit("Reset transform", each(video, c => { c.opacity = 1; c.scale = 1; c.x = 0; c.y = 0; for (const n of ["opacity", "scale", "x", "y"]) if (c.keys) delete c.keys[n]; })) }, "Reset transform"),
+          el("button.small", { onclick: () => this.app.docks.show("colour") }, "Colour…")),
+        this.keyHelp());
     }
 
     const timed = clips.filter(c => M.kindOf(c) !== "image");
-    if (timed.length) {
-      const s0 = timed[0];
-      const cur = () => M.getClip(s0.id) || s0;
-      const rampBox = el("input", { type: "checkbox" });
-      const startPct = el("input", { type: "number", min: 5, max: 1000, step: 1, style: { width: "70px" } });
-      const endPct = el("input", { type: "number", min: 5, max: 1000, step: 1, style: { width: "70px" } });
-      const interp = el("select", {}, [["default", "Export default"], ["nearest", "Nearest frame"], ["blend", "Frame blend"], ["rife", "Optical flow (RIFE)"]].map(([v, l]) => el("option", { value: v }, l)));
-      const update = () => {
-        const c = cur();
-        const [a, b] = M.speeds(c);
-        if (document.activeElement !== startPct) startPct.value = Math.round(a * 100);
-        if (document.activeElement !== endPct) endPct.value = Math.round(b * 100);
-        rampBox.checked = M.isRamped(c) || this.rampOn === c.id;
-        endPct.disabled = !rampBox.checked;
-        interp.value = c.interp || "default";
-      };
-      const applySpeed = () => {
-        const a = clamp(parseFloat(startPct.value) || 100, 5, 1000) / 100;
-        const b = rampBox.checked ? clamp(parseFloat(endPct.value) || 100, 5, 1000) / 100 : null;
-        M.edit("Change speed", () => M.setSpeed(timed.map(c => c.id), a, b));
-      };
-      startPct.addEventListener("change", applySpeed);
-      endPct.addEventListener("change", applySpeed);
-      rampBox.addEventListener("change", () => { this.rampOn = rampBox.checked ? cur().id : null; if (!rampBox.checked) applySpeed(); else { endPct.disabled = false; endPct.focus(); } });
-      interp.addEventListener("change", () => M.edit("Interpolation", each(timed, c => { c.interp = interp.value; })));
-      update();
-      this.refreshers.push(update);
-      const presets = el("div.btnrow", {}, [25, 50, 100, 200, 400].map(p => el("button.small", { onclick: () => { startPct.value = p; rampBox.checked = false; this.rampOn = null; applySpeed(); } }, `${p}%`)),
-        el("button.small", { title: "Ramp from normal speed down to 25% (slow-motion ending)", onclick: () => { startPct.value = 100; endPct.value = 25; rampBox.checked = true; applySpeed(); } }, "Ramp ↘"),
-        el("button.small", { title: "Ramp from 25% up to normal speed", onclick: () => { startPct.value = 25; endPct.value = 100; rampBox.checked = true; applySpeed(); } }, "Ramp ↗"));
-      this.section("Speed",
-        el("div.field", {}, el("label", {}, "Speed %"), startPct, el("span")),
-        el("div.field", {}, el("label", {}, el("label", { style: { display: "flex", gap: "4px", alignItems: "center", color: "inherit" } }, rampBox, "Ramp to %")), endPct, el("span")),
-        presets,
-        el("div.field.wide", {}, el("label", {}, "In-betweens"), interp),
-        el("div.dim", { style: { fontSize: "11px", marginTop: "4px" } }, "Ramps change speed smoothly across the clip; blade a clip to build multi-stage ramps. Optical flow is applied on export; the viewer shows the timing live."));
-    }
+    if (timed.length) this.renderSpeed(timed);
 
     if (audio.length) {
-      const a0 = audio[0];
-      const g = (key, dflt) => () => (M.getClip(a0.id) || a0)[key] ?? dflt;
       this.defaults = { ...(this.defaults || {}), Volume: 0 };
       this.section("Audio",
-        this.slider("Volume", { get: g("volume", 0), set: (v) => each(audio, c => { c.volume = v; })(), min: -60, max: 12, step: 0.1, format: (v) => v.toFixed(1), editLabel: "Clip volume" }),
-        this.slider("Fade in ", { get: g("fadeIn", 0), set: (v) => each(audio, c => { c.fadeIn = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 0.01, format: (v) => v.toFixed(2), editLabel: "Audio fade in" }),
-        this.slider("Fade out ", { get: g("fadeOut", 0), set: (v) => each(audio, c => { c.fadeOut = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 0.01, format: (v) => v.toFixed(2), editLabel: "Audio fade out" }),
-        el("div.dim", { style: { fontSize: "11px" } }, "Volume is in dB. Track level and pan are in the Mixer."));
+        this.keySlider("Volume", audio, "volume", { toUi: (v) => Math.round(v * 10) / 10, fromUi: (v) => v, min: -60, max: 12, step: 0.1, format: (v) => v.toFixed(1) }),
+        this.slider("Fade in ", { get: () => (M.getClip(audio[0].id) || audio[0]).fadeIn || 0, set: (v) => each(audio, c => { c.fadeIn = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 0.01, format: (v) => v.toFixed(2), editLabel: "Audio fade in" }),
+        this.curveSelect("Fade in shape ", audio, "fadeInCurve"),
+        this.slider("Fade out ", { get: () => (M.getClip(audio[0].id) || audio[0]).fadeOut || 0, set: (v) => each(audio, c => { c.fadeOut = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 0.01, format: (v) => v.toFixed(2), editLabel: "Audio fade out" }),
+        this.curveSelect("Fade out shape ", audio, "fadeOutCurve"),
+        el("div.dim", { style: { fontSize: "11px" } }, "Volume is in dB. Track level and pan are in the Mixer."),
+        video.length ? null : this.keyHelp());
     }
 
     if (clips.length === 1 || new Set(clips.map(c => c.mediaId)).size === 1) {
       const item = M.mediaOf(first);
       if (item && item.has_metadata) this.renderGeneration(item);
     }
+  }
+
+  // ---------------------------------------------------------------- keyframed fields
+  keyHelp() {
+    return el("div.dim", { style: { fontSize: "11px", marginTop: "6px", lineHeight: "1.45" } },
+      "◆ adds or removes a keyframe at the playhead. Once a property has keyframes, changing it adds one automatically. On the timeline, Ctrl+click a clip's line to add one, drag points to move them and right-click a point for its ease. Right-click a clip to choose which property its line shows.");
+  }
+
+  curveSelect(label, list, field) {
+    const sel = el("select", { onchange: (e) => M.edit("Fade shape", () => { for (const c of list) { const l = M.getClip(c.id); if (l) l[field] = e.target.value; } }) },
+      FADE_CURVES.map(([id, text]) => el("option", { value: id }, text)));
+    const update = () => { if (document.activeElement !== sel) sel.value = (M.getClip(list[0].id) || list[0])[field] || "linear"; };
+    update();
+    this.refreshers.push(update);
+    return el("div.field.wide", {}, el("label", {}, label.trim()), sel);
+  }
+
+  // A slider for a keyable property, with ◀ ◆ ▶ keyframe controls and the ease of the key under the playhead.
+  keySlider(label, list, name, { toUi, fromUi, min, max, step, format }) {
+    const live = (c) => M.getClip(c.id) || c;
+    const tauOf = (c) => state.playhead - live(c).start;
+    const inside = (c) => { const t = tauOf(c); return t >= -1e-6 && t <= M.clipDur(live(c)) + 1e-6; };
+    const primary = () => live(list[0]);
+    const valueAt = (c) => M.prop(live(c), name, Math.max(0, Math.min(M.clipDur(live(c)), tauOf(c))));
+    const field = this.slider(label, {
+      get: () => toUi(valueAt(list[0])),
+      set: (ui) => {
+        const v = fromUi(ui);
+        for (const c of list) {
+          const l = live(c);
+          if (M.hasKeys(l, name)) { if (inside(c)) M.setKeyAt(l.id, name, M.snapFrame(tauOf(c)), v); }
+          else if (name === "speed") M.setSpeed([l.id], Math.max(0.01, v));
+          else l[name] = v;
+        }
+      }, min, max, step, format, editLabel: label,
+    });
+    const diamond = el("button.small.kbtn", { title: "Add / remove a keyframe at the playhead" }, "◆");
+    const prev = el("button.small.kbtn", { title: "Previous keyframe" }, "◀");
+    const next = el("button.small.kbtn", { title: "Next keyframe" }, "▶");
+    const ease = el("select", { title: "Ease from this keyframe to the next" }, CURVES.map(([id, text]) => el("option", { value: id }, text)));
+    const easeRow = el("div.field.wide.keyease", {}, el("label", {}, "↳ ease"), ease);
+    const keyTimes = () => M.keysOf(primary(), name).map(k => primary().start + k.t).sort((a, b) => a - b);
+    const update = () => {
+      const c = primary();
+      const keyed = M.hasKeys(c, name);
+      const idx = inside(list[0]) ? M.keyIndexAt(c, name, tauOf(list[0])) : -1;
+      diamond.classList.toggle("on", idx >= 0);
+      diamond.classList.toggle("keyed", keyed);
+      diamond.disabled = !inside(list[0]);
+      diamond.title = inside(list[0]) ? (idx >= 0 ? "Remove the keyframe at the playhead" : "Add a keyframe at the playhead") : "Move the playhead over the clip to add keyframes";
+      const times = keyTimes();
+      prev.disabled = !times.some(t => t < state.playhead - 1e-4);
+      next.disabled = !times.some(t => t > state.playhead + 1e-4);
+      prev.hidden = next.hidden = !keyed;
+      easeRow.hidden = idx < 0;
+      if (idx >= 0 && document.activeElement !== ease) ease.value = M.keysOf(c, name)[idx].ease || "linear";
+    };
+    diamond.addEventListener("click", () => {
+      const c = primary();
+      const idx = M.keyIndexAt(c, name, tauOf(list[0]));
+      M.edit(idx >= 0 ? "Remove keyframe" : "Add keyframe", () => {
+        for (const item of list) {
+          const l = live(item);
+          if (!inside(item)) continue;
+          const tau = M.snapFrame(tauOf(item));
+          const i = M.keyIndexAt(l, name, tau);
+          if (idx >= 0) { if (i >= 0) M.removeKey(l.id, name, i); }
+          else M.setKeyAt(l.id, name, tau, M.prop(l, name, tau));
+        }
+      });
+    });
+    prev.addEventListener("click", () => { const t = keyTimes().filter(t => t < state.playhead - 1e-4).pop(); if (t !== undefined) { this.app.playback.pause(); this.app.playback.seek(t); } });
+    next.addEventListener("click", () => { const t = keyTimes().find(t => t > state.playhead + 1e-4); if (t !== undefined) { this.app.playback.pause(); this.app.playback.seek(t); } });
+    ease.addEventListener("change", () => M.edit("Keyframe ease", () => {
+      for (const item of list) { const l = live(item); const i = M.keyIndexAt(l, name, tauOf(item)); if (i >= 0) M.setKeyEase(l.id, name, i, ease.value); }
+    }));
+    update();
+    this.refreshers.push(update);
+    field.classList.add("keyed");
+    field.append(el("span.kctl", {}, prev, diamond, next));
+    return el("div", {}, field, easeRow);
+  }
+
+  // ---------------------------------------------------------------- speed
+  renderSpeed(timed) {
+    const live = (c) => M.getClip(c.id) || c;
+    const first = () => live(timed[0]);
+    const interp = el("select", {}, [["default", "Export default"], ["nearest", "Nearest frame"], ["blend", "Frame blend"], ["rife", "Optical flow (RIFE)"]].map(([v, l]) => el("option", { value: v }, l)));
+    interp.addEventListener("change", () => M.edit("Interpolation", () => { for (const c of timed) { const l = live(c); if (l) l.interp = interp.value; } }));
+    const graph = el("canvas.speedgraph", { title: "Speed over the clip. Click to move the playhead." });
+    graph.addEventListener("click", (e) => {
+      const c = first(), r = graph.getBoundingClientRect();
+      this.app.playback.pause();
+      this.app.playback.seek(c.start + (e.clientX - r.left) / r.width * M.clipDur(c));
+    });
+    const drawGraph = () => {
+      const c = first();
+      const w = Math.max(60, Math.round(graph.clientWidth * devicePixelRatio)), h = Math.round(56 * devicePixelRatio);
+      if (graph.width !== w || graph.height !== h) { graph.width = w; graph.height = h; }
+      const ctx = graph.getContext("2d");
+      ctx.fillStyle = "#0e0f12"; ctx.fillRect(0, 0, w, h);
+      const d = M.clipDur(c) || 1;
+      const ks = M.keysOf(c, "speed");
+      const maxV = Math.max(1.2, ...ks.map(k => k.v), M.speeds(c)[0]) * 1.1;
+      const yOf = (v) => h - 4 - (h - 8) * v / maxV;
+      ctx.strokeStyle = "rgba(255,255,255,.12)"; ctx.beginPath(); ctx.moveTo(0, yOf(1)); ctx.lineTo(w, yOf(1)); ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.font = `${9 * devicePixelRatio}px Segoe UI, sans-serif`; ctx.fillText("100%", 3, yOf(1) - 2);
+      ctx.strokeStyle = "#ffe14d"; ctx.lineWidth = 1.5 * devicePixelRatio; ctx.beginPath();
+      for (let i = 0; i <= w; i += 2) { const v = M.speedAt(c, i / w * d); i ? ctx.lineTo(i, yOf(v)) : ctx.moveTo(i, yOf(v)); }
+      ctx.stroke();
+      ctx.fillStyle = "#ffe14d";
+      for (const k of ks) { const x = k.t / d * w, y = yOf(k.v); ctx.beginPath(); ctx.moveTo(x, y - 4); ctx.lineTo(x + 4, y); ctx.lineTo(x, y + 4); ctx.lineTo(x - 4, y); ctx.fill(); }
+      const px = (state.playhead - c.start) / d * w;
+      if (px >= 0 && px <= w) { ctx.fillStyle = "#ff4d4d"; ctx.fillRect(px, 0, devicePixelRatio, h); }
+    };
+    const ramp = (from, to, curveName) => {
+      M.edit("Speed ramp", () => {
+        for (const item of timed) {
+          const c = live(item);
+          const d = M.clipDur(c);
+          const tau = state.playhead - c.start;
+          const startAt = tau > M.frameDur() && tau < d - M.frameDur() ? M.snapFrame(tau) : 0;
+          const keys = startAt > 0
+            ? [{ t: 0, v: from, ease: "linear" }, { t: startAt, v: from, ease: curveName }, { t: d, v: to, ease: "linear" }]
+            : [{ t: 0, v: from, ease: curveName }, { t: d, v: to, ease: "linear" }];
+          M.setSpeedKeys(c.id, keys);
+        }
+      });
+    };
+    const update = () => { if (document.activeElement !== interp) interp.value = first().interp || "default"; requestAnimationFrame(drawGraph); };
+    update();
+    this.refreshers.push(update);
+    const keyed = M.hasSpeedKeys(first());
+    this.section("Speed",
+      this.keySlider("Speed %", timed, "speed", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 1000, step: 1 }),
+      graph,
+      el("div.btnrow", {}, [25, 50, 100, 200, 400].map(p => el("button.small", { title: `Constant ${p}% (removes speed keyframes)`, onclick: () => M.edit("Change speed", () => M.setSpeed(timed.map(c => c.id), p / 100)) }, `${p}%`))),
+      el("div.btnrow", {},
+        el("button.small", { title: "Smoothly slow to a complete stop and hold the frame. Starts at the playhead if it is over the clip, otherwise at the clip start.", onclick: () => ramp(M.speedAt(first(), Math.max(0, state.playhead - first().start)) || 1, 0, "s_curve") }, "Ramp to stop"),
+        el("button.small", { title: "Ease into 25% slow motion", onclick: () => ramp(M.speedAt(first(), Math.max(0, state.playhead - first().start)) || 1, 0.25, "s_curve") }, "Ease to slow-mo"),
+        el("button.small", { title: "Ease from 25% up to normal speed", onclick: () => ramp(0.25, 1, "s_curve") }, "Speed up"),
+        keyed ? el("button.small", { title: "Remove the speed keyframes and keep the speed at the start", onclick: () => M.edit("Clear speed keyframes", () => { for (const c of timed) M.setSpeedKeys(live(c).id, []); }) }, "Clear ramp") : null),
+      el("div.field.wide", {}, el("label", {}, "In-betweens"), interp),
+      el("div.dim", { style: { fontSize: "11px", marginTop: "4px" } },
+        "Speed can go down to 0% (the frame holds). Ramps keep the clip's length and change how much of the source it uses. Ramp presets start at the playhead when it is over the clip. Right-click a clip > Show keyframes > Speed to edit the curve on the timeline. Optical flow is applied on export."));
   }
 
   // ---------------------------------------------------------------- generation metadata (WanGP outputs)

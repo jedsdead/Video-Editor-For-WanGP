@@ -3,6 +3,8 @@ for the live preview, so what you see in the editor is what the export renders."
 
 import math
 
+import numpy as np
+
 WHEEL_RED_ANGLE = math.radians(104.0)
 LIFT_RANGE, GAMMA_RANGE, GAIN_RANGE = 0.25, 0.5, 0.5
 
@@ -20,50 +22,161 @@ def hex_to_rgb(value):
     return ((v >> 16 & 255) / 255.0, (v >> 8 & 255) / 255.0, (v & 255) / 255.0)
 
 
+# --------------------------------------------------------------------------- keyframes (mirrors static/js/keys.js)
+
+def curve(name, x):
+    """Ease curve 0..1 -> 0..1. Works on floats and numpy arrays."""
+    x = np.clip(x, 0.0, 1.0)
+    if name == "ease_in":
+        return x * x
+    if name == "ease_out":
+        return 2 * x - x * x
+    if name == "s_curve":
+        return 3 * x * x - 2 * x ** 3
+    if name == "slow":
+        return x ** 3
+    if name == "fast":
+        return 1 - (1 - x) ** 3
+    if name == "hold":
+        return np.where(x >= 1, 1.0, 0.0) if isinstance(x, np.ndarray) else (1.0 if x >= 1 else 0.0)
+    return x
+
+
+def _curve_int(name, u):
+    u = np.clip(u, 0.0, 1.0)
+    if name == "ease_in":
+        return u ** 3 / 3
+    if name == "ease_out":
+        return u * u - u ** 3 / 3
+    if name == "s_curve":
+        return u ** 3 - u ** 4 / 2
+    if name == "slow":
+        return u ** 4 / 4
+    if name == "fast":
+        return u - (1 - (1 - u) ** 4) / 4
+    if name == "hold":
+        return u * 0.0
+    return u * u / 2
+
+
+def _sorted_keys(keys):
+    return sorted(keys or [], key=lambda k: float(k["t"]))
+
+
+def _seg_value(k0, k1, x):
+    r0, r1 = (k0.get("r") or (0.0, 1.0))
+    e = k0.get("ease") or "linear"
+    d = float(curve(e, r1)) - float(curve(e, r0))
+    if abs(d) < 1e-12:
+        return x * 0.0 + float(k0["v"])
+    return float(k0["v"]) + (float(k1["v"]) - float(k0["v"])) * (curve(e, r0 + x * (r1 - r0)) - float(curve(e, r0))) / d
+
+
+def _seg_integral(k0, k1, u):
+    r0, r1 = (k0.get("r") or (0.0, 1.0))
+    e = k0.get("ease") or "linear"
+    w = r1 - r0
+    d = float(curve(e, r1)) - float(curve(e, r0))
+    v0, v1 = float(k0["v"]), float(k1["v"])
+    if abs(d) < 1e-12 or w < 1e-9:
+        return v0 * u
+    return v0 * u + (v1 - v0) / d * ((_curve_int(e, r0 + u * w) - float(_curve_int(e, r0))) / w - float(curve(e, r0)) * u)
+
+
+def key_values(keys, t, fallback=0.0):
+    """Keyframed value at time(s) t (seconds from the clip start); fallback when there are no keys."""
+    ks = _sorted_keys(keys)
+    scalar = not isinstance(t, np.ndarray)
+    t = np.asarray(t, dtype=np.float64)
+    if not ks:
+        out = np.full(t.shape, float(fallback))
+        return float(out) if scalar else out
+    out = np.full(t.shape, float(ks[0]["v"]))
+    out = np.where(t >= float(ks[-1]["t"]), float(ks[-1]["v"]), out)
+    for a, b in zip(ks, ks[1:]):
+        ta, tb = float(a["t"]), float(b["t"])
+        if tb - ta < 1e-9:
+            continue
+        mask = (t >= ta) & (t < tb)
+        if mask.any():
+            out = np.where(mask, _seg_value(a, b, (t - ta) / (tb - ta)), out)
+    return float(out) if scalar else out
+
+
+def key_integral(keys, t):
+    """Integral of the keyed value from 0 to t (constant before the first key and after the last)."""
+    ks = _sorted_keys(keys)
+    scalar = not isinstance(t, np.ndarray)
+    t = np.asarray(t, dtype=np.float64)
+    first, last = ks[0], ks[-1]
+    out = float(first["v"]) * np.minimum(t, max(0.0, float(first["t"])))
+    acc_t = max(0.0, float(first["t"]))
+    for a, b in zip(ks, ks[1:]):
+        ta, tb = float(a["t"]), float(b["t"])
+        length = tb - ta
+        if length <= 1e-9:
+            continue
+        s0 = max(acc_t, ta)
+        u0 = (s0 - ta) / length
+        u = np.clip((t - ta) / length, u0, 1.0)
+        out = out + np.where(t > s0, length * (_seg_integral(a, b, u) - _seg_integral(a, b, u0)), 0.0)
+        acc_t = max(acc_t, tb)
+    out = out + np.where(t > acc_t, float(last["v"]) * (t - acc_t), 0.0)
+    return float(out) if scalar else out
+
+
+def keys_of(clip, name):
+    return ((clip.get("keys") or {}).get(name)) or []
+
+
+def has_speed_keys(clip, media_kind=None):
+    return media_kind != "image" and bool(keys_of(clip, "speed"))
+
+
+def prop(clip, name, tau, fallback):
+    static = clip.get(name)
+    return key_values(keys_of(clip, name), tau, fallback if static is None else static)
+
+
 def clip_speeds(clip):
-    s0 = max(0.05, float(clip.get("speed") or 1.0))
-    ramp = clip.get("rampTo")
-    s1 = max(0.05, float(ramp)) if ramp not in (None, "", False) else s0
-    return s0, s1
+    s = max(0.01, float(clip.get("speed") or 1.0))
+    return s, s
 
 
 def clip_duration(clip, media_kind=None):
     length = max(0.0, float(clip["out"]) - float(clip["in"]))
     if media_kind == "image":
         return length
-    s0, s1 = clip_speeds(clip)
-    return length / s0 if abs(s1 - s0) < 1e-9 else 2.0 * length / (s0 + s1)
+    if has_speed_keys(clip, media_kind):
+        return max(0.0, float(clip.get("dur") or 0.0))
+    return length / clip_speeds(clip)[0]
 
 
 def source_time(clip, tau, media_kind=None):
-    """Source media time for a clip-local time tau (seconds from the clip start). Linear speed ramps integrate exactly."""
+    """Source media time for clip-local time(s) tau. Speed keyframes integrate exactly."""
     if media_kind == "image":
-        return 0.0
-    s0, s1 = clip_speeds(clip)
-    d = clip_duration(clip)
-    if tau < 0:
-        return float(clip["in"]) + s0 * tau
-    if tau > d:
-        return float(clip["out"]) + s1 * (tau - d)
-    return float(clip["in"]) + s0 * tau + ((s1 - s0) * tau * tau / (2.0 * d) if d > 0 else 0.0)
+        return tau * 0.0 if isinstance(tau, np.ndarray) else 0.0
+    if has_speed_keys(clip, media_kind):
+        return float(clip["in"]) + key_integral(keys_of(clip, "speed"), tau)
+    return float(clip["in"]) + clip_speeds(clip)[0] * tau
 
 
-def speed_at(clip, tau):
-    s0, s1 = clip_speeds(clip)
-    d = clip_duration(clip)
-    if d <= 0:
-        return s0
-    return s0 + (s1 - s0) * min(1.0, max(0.0, tau / d))
+def speed_at(clip, tau, media_kind=None):
+    if has_speed_keys(clip, media_kind):
+        return key_values(keys_of(clip, "speed"), tau)
+    return clip_speeds(clip)[0]
 
 
 def fade_factor(clip, tau, duration):
-    factor = 1.0
+    """Fade multiplier at clip time(s) tau, using the fade-in / fade-out curve shapes."""
+    factor = np.ones_like(np.asarray(tau, dtype=np.float64))
     fade_in, fade_out = float(clip.get("fadeIn") or 0), float(clip.get("fadeOut") or 0)
-    if fade_in > 0 and tau < fade_in:
-        factor *= max(0.0, tau / fade_in)
-    if fade_out > 0 and tau > duration - fade_out:
-        factor *= max(0.0, (duration - tau) / fade_out)
-    return factor
+    tau_arr = np.asarray(tau, dtype=np.float64)
+    if fade_in > 0:
+        factor = factor * np.where(tau_arr < fade_in, curve(clip.get("fadeInCurve") or "linear", tau_arr / fade_in), 1.0)
+    if fade_out > 0:
+        factor = factor * np.where(tau_arr > duration - fade_out, curve(clip.get("fadeOutCurve") or "linear", (duration - tau_arr) / fade_out), 1.0)
+    return float(factor) if not isinstance(tau, np.ndarray) else factor
 
 
 def audio_transition_gains(kind, p):
@@ -76,6 +189,8 @@ def audio_transition_gains(kind, p):
 
 
 def db_to_gain(db):
+    if isinstance(db, np.ndarray):
+        return np.where(db <= -60, 0.0, 10.0 ** (db / 20.0))
     db = float(db or 0)
     return 0.0 if db <= -60 else 10.0 ** (db / 20.0)
 

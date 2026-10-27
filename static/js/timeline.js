@@ -2,7 +2,8 @@
 // marquee, transitions, scrubbing, drag-and-drop from the media bin).
 import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
-import { clamp, dbToGain, el, showMenu, timecode } from "./util.js";
+import { clamp, dbToGain, gainToDb, el, showMenu, timecode } from "./util.js";
+import { curve } from "./keys.js";
 import { transitionLabel, isAudioTransition } from "./transitions.js";
 import { isNeutral } from "./grade.js";
 
@@ -271,6 +272,13 @@ export class Timeline {
       ctx.fillStyle = COLORS.playhead;
       ctx.beginPath(); ctx.moveTo(px - 6, 0); ctx.lineTo(px + 6, 0); ctx.lineTo(px + 6, 10); ctx.lineTo(px, 16); ctx.lineTo(px - 6, 10); ctx.fill();
     }
+    if (this.dragLabel) {
+      const { x, y, text } = this.dragLabel;
+      ctx.font = "11px Segoe UI, system-ui, sans-serif";
+      const w = ctx.measureText(text).width + 10;
+      ctx.fillStyle = "rgba(0,0,0,.8)"; ctx.fillRect(x + 12, y - 22, w, 18);
+      ctx.fillStyle = "#ffe14d"; ctx.fillText(text, x + 17, y - 19);
+    }
     this.rulerLabelEl.textContent = timecode(state.playhead, M.fps());
     this.syncScrollbar();
   }
@@ -345,7 +353,6 @@ export class Timeline {
       const wave = this.wave(item);
       if (wave && Array.isArray(wave.peaks) && wave.peaks.length) {
         const mid = top + headH + (h - headH) / 2, amp = (h - headH) / 2 - 2;
-        const gain = dbToGain(clip.volume || 0);
         const d = M.clipDur(clip);
         ctx.fillStyle = COLORS.wave;
         const xa = Math.max(Math.floor(x0), 0), xb = Math.min(Math.ceil(x1), this.width);
@@ -355,7 +362,7 @@ export class Timeline {
           if (ib <= ia) ib = ia + 1;
           let peak = 0;
           for (let i = Math.max(0, ia); i < Math.min(ib, wave.peaks.length); i++) peak = Math.max(peak, wave.peaks[i]);
-          const v = Math.min(1, peak / 255 * gain * M.fadeFactor(clip, clamp(ta, 0, d), d));
+          const v = Math.min(1, peak / 255 * dbToGain(M.prop(clip, "volume", clamp(ta, 0, d))) * M.fadeFactor(clip, clamp(ta, 0, d), d));
           const hh = Math.max(0.5, v * amp);
           ctx.fillRect(x, mid - hh, 1, hh * 2);
         }
@@ -366,7 +373,7 @@ export class Timeline {
     ctx.fillRect(x0, top, w, headH);
     const badges = [];
     if (clip.linkId) badges.push("🔗");
-    if (M.isRamped(clip)) badges.push(`${Math.round(M.speeds(clip)[0] * 100)}→${Math.round(M.speeds(clip)[1] * 100)}%`);
+    if (M.hasSpeedKeys(clip)) badges.push("⏱ ramp");
     else if (Math.abs((clip.speed || 1) - 1) > 1e-6 && item.kind !== "image") badges.push(`${Math.round(clip.speed * 100)}%`);
     if (row.kind === "video" && clip.grade && !isNeutral(clip.grade)) badges.push("CC");
     if (clip.parentId) badges.push("⤓");
@@ -376,16 +383,15 @@ export class Timeline {
     // fades
     const d = M.clipDur(clip);
     ctx.strokeStyle = "rgba(255,255,255,.75)"; ctx.fillStyle = "rgba(0,0,0,.35)"; ctx.lineWidth = 1;
-    if (clip.fadeIn > 0) {
-      const fx = x0 + clip.fadeIn * this.pps;
-      ctx.beginPath(); ctx.moveTo(x0, top + h); ctx.lineTo(fx, top + headH); ctx.lineTo(x0, top + headH); ctx.closePath(); ctx.fill();
-      ctx.beginPath(); ctx.moveTo(x0, top + h); ctx.lineTo(fx, top + headH); ctx.stroke();
-    }
-    if (clip.fadeOut > 0) {
-      const fx = x1 - clip.fadeOut * this.pps;
-      ctx.beginPath(); ctx.moveTo(x1, top + h); ctx.lineTo(fx, top + headH); ctx.lineTo(x1, top + headH); ctx.closePath(); ctx.fill();
-      ctx.beginPath(); ctx.moveTo(x1, top + h); ctx.lineTo(fx, top + headH); ctx.stroke();
-    }
+    const fadeShape = (xEdge, len, name, dir) => {
+      const pts = [];
+      for (let i = 0; i <= 16; i++) { const u = i / 16; pts.push([xEdge + dir * u * len * this.pps, top + h - (h - headH) * curve(name, u)]); }
+      ctx.beginPath(); ctx.moveTo(xEdge, top + headH); pts.forEach(([px, py]) => ctx.lineTo(px, py)); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); pts.forEach(([px, py], i) => i ? ctx.lineTo(px, py) : ctx.moveTo(px, py)); ctx.stroke();
+    };
+    if (clip.fadeIn > 0) fadeShape(x0, clip.fadeIn, clip.fadeInCurve || "linear", 1);
+    if (clip.fadeOut > 0) fadeShape(x1, clip.fadeOut, clip.fadeOutCurve || "linear", -1);
+    this.paintKeys(ctx, clip, row, x0, x1, top, h, headH, selected);
     if (item.missing) { ctx.fillStyle = "rgba(200,40,40,.55)"; ctx.fillRect(x0, top, w, h); ctx.fillStyle = "#fff"; ctx.fillText("Media offline", x0 + 4, top + headH + 4); }
     ctx.restore();
     // fade handles
@@ -423,6 +429,88 @@ export class Timeline {
     ctx.font = "11px Segoe UI, system-ui, sans-serif";
   }
 
+  // ---------------------------------------------------------------- keyframe lanes
+  // Which property's line a clip shows: chosen per clip (right-click > Show keyframes), else volume / opacity.
+  lane(clip, row) {
+    const kind = row ? row.kind : M.trackKind(clip.trackId);
+    const chosen = clip.lane;
+    if (chosen && M.KEYABLE[chosen] && (M.KEYABLE[chosen].kind === kind || M.KEYABLE[chosen].kind === "any")) {
+      if (chosen !== "speed" || M.kindOf(clip) !== "image") return chosen;
+    }
+    return kind === "audio" ? "volume" : "opacity";
+  }
+  laneGeo(row, ry) { const top = ry + 2 + 15 + 3, bottom = ry + row.h - 6; return { top, bottom, h: Math.max(4, bottom - top) }; }
+  laneLimits(name) {
+    const s = P().settings;
+    return { volume: [-60, 12], opacity: [0, 1], scale: [0, 20], speed: [0, 10], x: [-s.width, s.width], y: [-s.height, s.height] }[name];
+  }
+  laneNorm(name, v) {
+    const s = P().settings;
+    if (name === "volume") return Math.sqrt(dbToGain(v) / dbToGain(12));
+    if (name === "opacity") return clamp(v, 0, 1);
+    if (name === "scale" || name === "speed") return Math.max(0, v) / (Math.max(0, v) + 1);
+    if (name === "x") return clamp(0.5 + v / (2 * s.width), 0, 1);
+    if (name === "y") return clamp(0.5 - v / (2 * s.height), 0, 1);
+    return 0.5;
+  }
+  laneDenorm(name, f) {
+    const s = P().settings;
+    f = clamp(f, 0, 1);
+    if (name === "volume") return Math.round(clamp(gainToDb(f * f * dbToGain(12)), -60, 12) * 10) / 10;
+    if (name === "opacity") return Math.round(f * 1000) / 1000;
+    if (name === "scale" || name === "speed") return Math.round(Math.min(f, 0.995) / (1 - Math.min(f, 0.995)) * 1000) / 1000;
+    if (name === "x") return Math.round((f - 0.5) * 2 * s.width);
+    if (name === "y") return Math.round((0.5 - f) * 2 * s.height);
+    return 0;
+  }
+  laneY(name, v, geo) { return geo.bottom - this.laneNorm(name, v) * geo.h; }
+  laneValue(name, y, geo) { return this.laneDenorm(name, (geo.bottom - y) / geo.h); }
+  laneText(name, v) {
+    if (name === "volume") return v <= -60 ? "-∞ dB" : `${v > 0 ? "+" : ""}${v.toFixed(1)} dB`;
+    if (name === "opacity" || name === "scale" || name === "speed") return `${Math.round(v * 100)}%`;
+    return `${Math.round(v)} px`;
+  }
+
+  paintKeys(ctx, clip, row, x0, x1, top, h, headH, selected) {
+    const lane = this.lane(clip, row);
+    const geo = this.laneGeo(row, top - 2);
+    const ks = M.keysOf(clip, lane);
+    const hovered = this.hover && this.hover.clip && this.hover.clip.id === clip.id;
+    const visible = selected || hovered || ks.length || (lane === "volume" && (clip.volume || 0) !== 0) || (lane === "opacity" && (clip.opacity ?? 1) !== 1);
+    if (!visible || geo.h < 8) return;
+    const d = M.clipDur(clip);
+    ctx.strokeStyle = selected ? "rgba(255,225,77,.95)" : "rgba(255,225,77,.5)";
+    ctx.lineWidth = selected ? 1.5 : 1;
+    ctx.beginPath();
+    const xa = Math.max(x0, 0), xb = Math.min(x1, this.width);
+    for (let px = xa; px <= xb; px += 2) {
+      const tau = clamp(this.t(px) - clip.start, 0, d);
+      const py = this.laneY(lane, M.prop(clip, lane, tau), geo);
+      px === xa ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    for (const k of ks) {
+      const kx = this.x(clip.start + k.t), ky = this.laneY(lane, k.v, geo);
+      if (kx < -6 || kx > this.width + 6) continue;
+      ctx.fillStyle = selected ? "#ffe14d" : "rgba(255,225,77,.7)";
+      ctx.strokeStyle = "rgba(0,0,0,.7)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(kx, ky - 4.5); ctx.lineTo(kx + 4.5, ky); ctx.lineTo(kx, ky + 4.5); ctx.lineTo(kx - 4.5, ky); ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+    if (lane !== "volume" && lane !== "opacity" || selected) {
+      ctx.fillStyle = "rgba(255,225,77,.85)"; ctx.font = "10px Segoe UI, system-ui, sans-serif";
+      if (x1 - x0 > 80) ctx.fillText(M.KEYABLE[lane].label, Math.max(x0, 0) + 4, geo.top);
+      ctx.font = "11px Segoe UI, system-ui, sans-serif";
+    }
+    // small markers for other keyed properties
+    const others = Object.keys(M.KEYABLE).filter(n => n !== lane && M.keysOf(clip, n).length);
+    ctx.fillStyle = "rgba(255,160,60,.9)";
+    for (const n of others) for (const k of M.keysOf(clip, n)) {
+      const kx = this.x(clip.start + k.t);
+      if (kx < x0 || kx > x1) continue;
+      ctx.beginPath(); ctx.moveTo(kx, top + headH - 6); ctx.lineTo(kx + 3, top + headH - 3); ctx.lineTo(kx, top + headH); ctx.lineTo(kx - 3, top + headH - 3); ctx.closePath(); ctx.fill();
+    }
+  }
+
   // ---------------------------------------------------------------- hit testing
   hit(x, y) {
     if (y < RULER_H) return { area: "ruler", t: this.t(x) };
@@ -450,13 +538,29 @@ export class Timeline {
       const hx0 = x0 + (clip.fadeIn || 0) * this.pps, hx1 = x1 - (clip.fadeOut || 0) * this.pps;
       if (y < ry + 10 && w > 24 && Math.abs(x - hx0) < 6 && x >= x0 - 1) zone = "fadeIn";
       else if (y < ry + 10 && w > 24 && Math.abs(x - hx1) < 6 && x <= x1 + 1) zone = "fadeOut";
+      else if (Math.abs(x - x1) <= edge && Math.abs(x - x0) > edge) zone = "trimR";
       else if (Math.abs(x - x0) <= edge) zone = "trimL";
-      else if (Math.abs(x - x1) <= edge) zone = "trimR";
       else if (x < x0 || x > x1) continue;
-      const score = zone === "body" ? 1 : 0;
-      if (!best || score < best.score) best = { clip, zone, score };
+      let keyIndex = -1;
+      if (state.selection.has(clip.id) && !row.track.locked && state.tool === "select") {
+        const lane = this.lane(clip, row);
+        const geo = this.laneGeo(row, ry);
+        if (y >= geo.top - 5 && y <= geo.bottom + 5) {
+          const ks = M.keysOf(clip, lane);
+          ks.forEach((k, i) => {
+            const kx = this.x(clip.start + k.t), ky = this.laneY(lane, k.v, geo);
+            if (Math.abs(kx - x) <= 5 && Math.abs(ky - y) <= 5) { zone = "key"; keyIndex = i; }
+          });
+          if (zone !== "key" && zone === "body") {
+            const ly = this.laneY(lane, M.prop(clip, lane, clamp(t - clip.start, 0, M.clipDur(clip))), geo);
+            if (Math.abs(ly - y) <= 4) zone = "line";
+          }
+        }
+      }
+      const score = zone === "key" ? -1 : zone === "body" ? 1 : 0;
+      if (!best || score < best.score) best = { clip, zone, score, keyIndex };
     }
-    if (best) return { area: "clip", row, t, clip: best.clip, zone: best.zone };
+    if (best) return { area: "clip", row, t, clip: best.clip, zone: best.zone, keyIndex: best.keyIndex, lane: this.lane(best.clip, row) };
     return { area: "row", row, t };
   }
 
@@ -519,6 +623,29 @@ export class Timeline {
       if (h.row.track.locked) return;
       if (h.zone === "fadeIn" || h.zone === "fadeOut") {
         this.drag = { ...base, mode: "fade", clipId: clip.id, which: h.zone, snapData: M.snapshot() };
+        return;
+      }
+      if (h.zone === "line" && base.ctrl) {
+        const tau = M.snapFrame(clamp(h.t - clip.start, 0, M.clipDur(clip)));
+        M.edit("Add keyframe", () => M.setKeyAt(clip.id, h.lane, tau, M.prop(clip, h.lane, tau)));
+        const live = M.getClip(clip.id);
+        const index = live ? M.keyIndexAt(live, h.lane, tau) : -1;
+        if (index >= 0) this.drag = { ...base, mode: "key", clipId: clip.id, lane: h.lane, index, row: h.row, snapData: M.snapshot() };
+        return;
+      }
+      if (h.zone === "key") {
+        this.drag = { ...base, mode: "key", clipId: clip.id, lane: h.lane, index: h.keyIndex, row: h.row, snapData: M.snapshot() };
+        return;
+      }
+      if (h.zone === "line") {
+        const tau = clamp(h.t - clip.start, 0, M.clipDur(clip));
+        const ks = M.keysOf(clip, h.lane);
+        let indices = [];
+        if (ks.length) {
+          const j = ks.findIndex((k, i) => ks[i + 1] && k.t <= tau && tau <= ks[i + 1].t);
+          indices = j >= 0 ? [j, j + 1] : [tau < ks[0].t ? 0 : ks.length - 1];
+        }
+        this.drag = { ...base, mode: "line", clipId: clip.id, lane: h.lane, indices, row: h.row, startValue: M.prop(clip, h.lane, tau), snapData: M.snapshot() };
         return;
       }
       if (h.zone === "trimL" || h.zone === "trimR") {
@@ -627,6 +754,25 @@ export class Timeline {
         if (d.which === "fadeIn") clip.fadeIn = M.snapFrame(clamp(this.t(x) - clip.start, 0, dur - (clip.fadeOut || 0)));
         else clip.fadeOut = M.snapFrame(clamp(M.clipEnd(clip) - this.t(x), 0, dur - (clip.fadeIn || 0)));
       }
+    } else if (d.mode === "key" || d.mode === "line") {
+      const clip = M.getClip(d.clipId);
+      const row = this.rows().find(r => r.track.id === (clip && clip.trackId));
+      if (clip && row) {
+        const geo = this.laneGeo(row, this.rowY(row));
+        const value = this.laneValue(d.lane, y, geo);
+        if (d.mode === "key") {
+          const tau = e.shiftKey ? null : M.snapFrame(this.t(x) - clip.start);
+          M.moveKey(clip.id, d.lane, d.index, tau, value);
+        } else if (d.indices.length) {
+          M.offsetKeys(clip.id, d.lane, d.indices, value - d.startValue, this.laneLimits(d.lane));
+        } else if (d.lane === "speed") {
+          M.setSpeed([clip.id], Math.max(0.01, value));
+        } else {
+          clip[d.lane] = value;
+        }
+        const live = M.getClip(d.clipId);
+        this.dragLabel = { x, y, text: this.laneText(d.lane, d.mode === "key" ? (M.keysOf(live, d.lane)[d.index] || {}).v ?? value : value) };
+      }
     } else if (d.mode === "trdur") {
       const tr = P().transitions.find(t => t.id === d.trId);
       const info = tr && M.transitionInfo(tr);
@@ -638,6 +784,7 @@ export class Timeline {
   up(e) {
     const d = this.drag;
     this.drag = null;
+    this.dragLabel = null;
     this.snapLine = null;
     this.marquee = null;
     if (d && d.mode === "move" && !d.moved && d.deferredSelect) M.select([d.clipId]);
@@ -658,7 +805,7 @@ export class Timeline {
     if (state.tool === "range") return "text";
     if (h.area === "ruler") return "col-resize";
     if (h.area === "transition") return h.zone === "body" ? "pointer" : "ew-resize";
-    if (h.area === "clip") return { trimL: "w-resize", trimR: "e-resize", fadeIn: "nesw-resize", fadeOut: "nwse-resize" }[h.zone] || "grab";
+    if (h.area === "clip") return { trimL: "w-resize", trimR: "e-resize", fadeIn: "nesw-resize", fadeOut: "nwse-resize", key: "move", line: "ns-resize" }[h.zone] || "grab";
     return "default";
   }
 

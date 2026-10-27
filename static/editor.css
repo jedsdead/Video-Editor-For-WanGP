@@ -216,3 +216,14 @@ textarea { resize: vertical; width: 100%; user-select: text; }
 .takeover-box p { color: var(--muted); }
 .shortcuts { display: grid; grid-template-columns: 170px 1fr; gap: 4px 14px; font-size: 12px; }
 .shortcuts kbd { font-family: var(--mono); background: var(--panel3); border: 1px solid var(--border2); border-radius: 3px; padding: 0 5px; font-size: 11px; }
+
+/* keyframe controls */
+.field.keyed { grid-template-columns: 80px 1fr 56px auto; }
+.kctl { display: inline-flex; gap: 1px; }
+.kbtn { padding: 0 4px; height: 20px; min-width: 18px; font-size: 10px; line-height: 1; background: var(--panel3); color: var(--muted); }
+.kbtn.keyed { color: #c9b25a; }
+.kbtn.on { color: #ffe14d; background: #4a4220; border-color: #8a7a2a; }
+.kbtn:disabled { opacity: .3; }
+.keyease { margin-top: -2px; }
+.keyease label { color: var(--dim) !important; padding-left: 8px; }
+canvas.speedgraph { width: 100%; height: 56px; display: block; border-radius: 4px; margin: 6px 0; cursor: pointer; }

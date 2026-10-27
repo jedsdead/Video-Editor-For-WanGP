@@ -1,7 +1,7 @@
 {
   "name": "Video Editor",
   "author": "jedsdeadbaby",
-  "version": "0.1",
+  "version": "0.2",
   "type": "app",
   "description": "A multi-track video editor inside WanGP: magnetic or free timeline, blade and range tools, transitions, colour wheels, scopes, audio mixer, speed ramps with optical flow (RIFE) and export.",
   "date": "2026-10-27",

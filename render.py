@@ -224,6 +224,14 @@ class Compositor:
         self.D = torch.sqrt(((self.X - 0.5) * aspect) ** 2 + (self.Y - 0.5) ** 2) / math.sqrt((aspect * 0.5) ** 2 + 0.25)
         self.luma = torch.tensor([0.2126, 0.7152, 0.0722], device=device).view(3, 1, 1)
 
+    def resize(self, img, width, height):
+        if img.shape[1] == height and img.shape[2] == width:
+            return img
+        import torch.nn.functional as F
+        width, height = max(1, int(round(width))), max(1, int(round(height)))
+        smaller = width < img.shape[2]
+        return F.interpolate(img.unsqueeze(0), size=(height, width), mode="bilinear", align_corners=False, antialias=smaller)[0]
+
     def to_tensor(self, frame):
         return self.torch.from_numpy(frame).to(self.device).permute(2, 0, 1).float().div_(255.0)
 
@@ -534,12 +542,16 @@ class ExportJob:
         sources = {}
         rife = {"model": None, "failed": False}
         grades = {cid: T.grade_params(c.get("grade")) for cid, c in tl.clips.items()}
+        decode_scale = {}
 
         def source_for(clip):
             src = sources.get(clip["id"])
             if src is None:
                 item = tl.media[clip["mediaId"]]
-                w, h = fit_size(item.get("width") or tl.width, item.get("height") or tl.height, tl.width, tl.height, float(clip.get("scale") or 1))
+                # Decode at the largest size the clip reaches (scale may be keyframed), resize per frame when needed.
+                scales = [float(clip.get("scale") if clip.get("scale") is not None else 1)] + [float(k["v"]) for k in T.keys_of(clip, "scale")]
+                decode_scale[clip["id"]] = min(8.0, max(0.05, max(scales)))
+                w, h = fit_size(item.get("width") or tl.width, item.get("height") or tl.height, tl.width, tl.height, decode_scale[clip["id"]])
                 if item["kind"] == "image":
                     src = StillSource(item["path"], w, h)
                 else:
@@ -582,10 +594,17 @@ class ExportJob:
             else:
                 img = comp.grade(img, grades[clip["id"]])
             duration = tl.durations[clip["id"]]
-            alpha = float(clip.get("opacity") if clip.get("opacity") is not None else 1.0)
-            alpha *= T.fade_factor(clip, min(max(tau, 0.0), duration), duration)
-            return comp.layer(img, float(clip.get("x") or 0) * tl.width / max(1, self._project_w(tl)),
-                              float(clip.get("y") or 0) * tl.height / max(1, self._project_h(tl)), alpha)
+            kt = min(max(tau, 0.0), duration)
+            scale = max(0.0, T.prop(clip, "scale", kt, 1.0))
+            base = decode_scale.get(clip["id"], 1.0)
+            if abs(scale - base) > 1e-4:
+                if scale <= 1e-4:
+                    return None
+                img = comp.resize(img, img.shape[2] * scale / base, img.shape[1] * scale / base)
+            alpha = min(1.0, max(0.0, T.prop(clip, "opacity", kt, 1.0)))
+            alpha *= T.fade_factor(clip, kt, duration)
+            return comp.layer(img, T.prop(clip, "x", kt, 0.0) * tl.width / max(1, self._project_w(tl)),
+                              T.prop(clip, "y", kt, 0.0) * tl.height / max(1, self._project_h(tl)), alpha)
 
         track_clips = {t["id"]: sorted([c for c in tl.clips.values() if c["trackId"] == t["id"]], key=lambda c: float(c["start"]))
                        for t in tl.video_tracks}
@@ -705,31 +724,29 @@ class ExportJob:
                 count = min(total - i0, int(round((e - s) * SAMPLE_RATE)))
                 if count <= 0:
                     continue
-                s0, s1 = T.clip_speeds(clip)
+                s0, _ = T.clip_speeds(clip)
+                keyed_speed = T.has_speed_keys(clip, item["kind"])
                 src_a, src_b = T.source_time(clip, s - cs), T.source_time(clip, e - cs)
-                if abs(s1 - s0) < 1e-9:
+                taus = (s - cs) + np.arange(count, dtype=np.float64) / SAMPLE_RATE
+                if not keyed_speed:
                     seg = self._decode_audio(item["path"], src_a, src_b, tempo=s0)
                     seg = seg[:, :count]
                     if seg.shape[1] < count:
                         seg = np.pad(seg, ((0, 0), (0, count - seg.shape[1])))
                 else:
-                    raw = self._decode_audio(item["path"], src_a, src_b, tempo=1.0)
-                    taus = (s - cs) + np.arange(count, dtype=np.float64) / SAMPLE_RATE
-                    d = duration
-                    src_times = np.where(taus < 0, float(clip["in"]) + s0 * taus,
-                                np.where(taus > d, float(clip["out"]) + s1 * (taus - d),
-                                         float(clip["in"]) + s0 * taus + (s1 - s0) * taus * taus / (2 * d)))
+                    # Varispeed: resample along the speed curve (pitch follows speed, like tape).
+                    src_times = T.source_time(clip, taus)
+                    lo_src, hi_src = float(src_times.min()), float(src_times.max())
+                    raw = self._decode_audio(item["path"], lo_src, hi_src + 2.0 / SAMPLE_RATE, tempo=1.0)
+                    src_a = lo_src
                     pos = (src_times - src_a) * SAMPLE_RATE
                     idx = np.arange(raw.shape[1])
                     seg = np.stack([np.interp(pos, idx, raw[ch], left=0.0, right=0.0) for ch in range(2)]).astype(np.float32) if raw.shape[1] else np.zeros((2, count), np.float32)
-                taus = (s - cs) + np.arange(count, dtype=np.float64) / SAMPLE_RATE
-                gain = np.full(count, T.db_to_gain(clip.get("volume")), dtype=np.float64)
-                fade_in, fade_out = float(clip.get("fadeIn") or 0), float(clip.get("fadeOut") or 0)
                 inside = np.clip(taus, 0, duration)
-                if fade_in > 0:
-                    gain *= np.clip(inside / fade_in, 0, 1)
-                if fade_out > 0:
-                    gain *= np.clip((duration - inside) / fade_out, 0, 1)
+                gain = T.db_to_gain(np.asarray(T.prop(clip, "volume", inside, 0.0), dtype=np.float64)) * T.fade_factor(clip, inside, duration)
+                if keyed_speed:
+                    # Fade out as the clip approaches a freeze instead of leaving a held (DC) sample.
+                    gain = gain * np.clip(np.asarray(T.speed_at(clip, inside)) / 0.1, 0, 1)
                 for tr in audio_transitions:
                     times = s + np.arange(count) / SAMPLE_RATE
                     lo, hi = tr["cut"] - tr["duration"] / 2, tr["cut"] + tr["duration"] / 2

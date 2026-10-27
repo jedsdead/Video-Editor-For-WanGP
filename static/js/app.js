@@ -13,6 +13,7 @@ import { ScopesPanel } from "./scopes.js";
 import { MixerPanel } from "./mixer.js";
 import { TransitionsPanel } from "./transitionspanel.js";
 import { openExportDialog } from "./exportdialog.js";
+import { CURVES, FADE_CURVES } from "./keys.js";
 
 const $ = (id) => document.getElementById(id);
 const app = { status: {} };
@@ -278,7 +279,58 @@ function openMenu(btn) {
   btn.classList.add("open");
 }
 
+function laneItems(clip, row) {
+  const kind = row.kind;
+  const current = app.timeline.lane(clip, row);
+  const items = [{ head: "Show keyframes for" }];
+  for (const [name, def] of Object.entries(M.KEYABLE)) {
+    if (!(def.kind === kind || def.kind === "any")) continue;
+    if (name === "speed" && M.kindOf(clip) === "image") continue;
+    const n = M.keysOf(clip, name).length;
+    items.push({ label: `${def.label}${n ? `  (${n})` : ""}`, check: current === name,
+      action: () => { const c = M.getClip(clip.id); if (c) { c.lane = name; bus.emit("change"); } } });
+  }
+  return items;
+}
+
 function contextMenu(x, y, hit) {
+  if (hit.area === "clip" && hit.zone === "key") {
+    const clip = hit.clip, lane = hit.lane, index = hit.keyIndex;
+    const key = M.keysOf(clip, lane)[index];
+    if (!key) return;
+    showMenu(x, y, [
+      { head: `${M.KEYABLE[lane].label} keyframe · ease to next` },
+      ...CURVES.map(([id, label]) => ({ label, check: (key.ease || "linear") === id, action: () => M.edit("Keyframe ease", () => M.setKeyEase(clip.id, lane, index, id)) })),
+      "-",
+      { label: "Go to keyframe", action: () => { app.playback.pause(); app.playback.seek(clip.start + key.t); } },
+      { label: "Delete keyframe", action: () => M.edit("Delete keyframe", () => M.removeKey(clip.id, lane, index)) },
+    ]);
+    return;
+  }
+  if (hit.area === "clip" && (hit.zone === "fadeIn" || hit.zone === "fadeOut")) {
+    const clip = hit.clip, which = hit.zone, field = which === "fadeIn" ? "fadeInCurve" : "fadeOutCurve";
+    showMenu(x, y, [
+      { head: which === "fadeIn" ? "Fade in shape" : "Fade out shape" },
+      ...FADE_CURVES.map(([id, label]) => ({ label, check: (clip[field] || "linear") === id, action: () => M.edit("Fade shape", () => {
+        for (const c of [M.getClip(clip.id), ...(state.linked ? M.partners(clip) : [])]) if (c) c[field] = id;
+      }) })),
+      "-",
+      { label: "Remove fade", action: () => M.edit("Remove fade", () => { const c = M.getClip(clip.id); if (c) c[which] = 0; }) },
+    ]);
+    return;
+  }
+  if (hit.area === "clip" && hit.zone === "line") {
+    const clip = hit.clip, lane = hit.lane;
+    const tau = M.snapFrame(Math.max(0, Math.min(M.clipDur(clip), hit.t - clip.start)));
+    showMenu(x, y, [
+      { label: "Add keyframe here", kbd: "Ctrl+click", action: () => M.edit("Add keyframe", () => M.setKeyAt(clip.id, lane, tau, M.prop(clip, lane, tau))) },
+      { label: `Clear ${M.KEYABLE[lane].label.toLowerCase()} keyframes`, disabled: !M.keysOf(clip, lane).length,
+        action: () => M.edit("Clear keyframes", () => M.clearKeys(clip.id, lane, M.prop(clip, lane, Math.max(0, Math.min(M.clipDur(clip), state.playhead - clip.start))))) },
+      "-",
+      ...laneItems(clip, hit.row),
+    ]);
+    return;
+  }
   if (hit.area === "clip") {
     const clip = hit.clip;
     showMenu(x, y, [
@@ -290,12 +342,14 @@ function contextMenu(x, y, hit) {
       { label: "Copy", action: () => copy() },
       { label: clip.linkId ? "Unlink" : "Link selected", action: linkToggle },
       "-",
-      { label: "Reset speed to 100%", disabled: M.kindOf(clip) === "image", action: () => M.edit("Reset speed", () => M.setSpeed([...state.selection], 1, null)) },
+      { label: "Reset speed to 100%", disabled: M.kindOf(clip) === "image", action: () => M.edit("Reset speed", () => M.setSpeed([...state.selection], 1)) },
       hit.row.kind === "video" ? { label: "Copy grade", action: copyGrade } : null,
       hit.row.kind === "video" ? { label: "Paste grade", action: pasteGrade } : null,
       "-",
       { label: "Show in media bin", action: () => { state.selectedMedia = clip.mediaId; app.docks.show("media"); bus.emit("media"); } },
       { label: "Properties", action: () => app.docks.show("inspector") },
+      "-",
+      ...laneItems(clip, hit.row),
     ].filter(Boolean));
   } else if (hit.area === "transition") {
     showMenu(x, y, [

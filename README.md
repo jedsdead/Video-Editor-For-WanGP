@@ -2,7 +2,7 @@
 
 A multi-track video editor that runs as a plugin inside [WanGP](https://github.com/deepbeepmeep/Wan2GP), in its own tab. Cut your generations together, grade them, mix the audio and export, without leaving WanGP.
 
-**Version 0.1** · by jedsdeadbaby · MIT licence
+**Version 0.2** · by jedsdeadbaby · MIT licence
 
 ## Features
 
@@ -12,8 +12,15 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - **Select (V)**, **Blade (B)** (Shift-click cuts every track) and **Range (R)** tools. In a range, Del removes it and Shift+Del ripples the rest of the timeline up.
 - Snapping (S), marquee and Ctrl/Shift multi-select, copy and paste, in/out points, and full undo and redo.
 
+**Keyframes**
+- Keyframe volume, opacity, scale, position and speed. Each keyframe eases to the next with Linear, Ease in, Ease out, S-curve, Fast start, Slow start or Hold.
+- Clips show a line for one property (volume on audio, opacity on video; right-click a clip > *Show keyframes for* to switch). Select the clip, then Ctrl+click the line to add a keyframe, drag points to move them, drag the line to raise or lower a section, and right-click a point for its ease or to delete it.
+- In the Inspector, ◆ adds or removes a keyframe at the playhead and ◀ ▶ jump between them. Once a property has keyframes, changing it adds one automatically.
+- Fades have shapes too: right-click a fade handle, or use the Inspector.
+
 **Speed**
-- A constant speed or a smooth ramp per clip. Blade a clip to chain several ramps.
+- A constant speed, or a speed curve with keyframes that can go anywhere from 0% (a freeze frame) to 1000%. Presets: *Ramp to stop*, *Ease to slow-mo* and *Speed up*, starting at the playhead. A graph in the Inspector shows the curve.
+- Ramps keep the clip's length and change how much of the source it uses. Linked audio follows the same curve.
 - In-between frames on export: nearest frame, frame blend, or optical flow using WanGP's built-in RIFE v4.26 model. This also smooths 16 fps WanGP clips in a 24 or 30 fps project.
 
 **Transitions**
@@ -104,7 +111,7 @@ The editor is a web page served by WanGP through the plugin web-app API and show
 ## Roadmap
 
 - **Regenerate a shot:** pick a clip and regenerate it in WanGP from its saved prompt and settings, then drop the result back in place.
-- LUT import, keyframed volume and opacity, titles.
+- Track-level volume automation, keyframed colour, LUT import, titles.
 
 ## Licence
 
