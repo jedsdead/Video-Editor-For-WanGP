@@ -272,3 +272,10 @@ canvas.speedgraph { width: 100%; height: 56px; display: block; border-radius: 4p
 
 /* title generator tile */
 .media-item.title .thumb { background: linear-gradient(135deg, #5a3a1a, #2e2012); }
+
+/* tonal (Final Cut style) wheels */
+.wheels.zones { grid-template-columns: repeat(2, 1fr); gap: 10px 8px; }
+.wheels.zones .wheel canvas { max-width: 110px; }
+.zslider { display: grid; grid-template-columns: 14px 1fr 38px; gap: 4px; align-items: center; width: 100%; max-width: 150px; font-size: 11px; color: var(--muted); }
+.zslider input[type=range] { width: 100%; }
+.zslider .wval { text-align: right; }

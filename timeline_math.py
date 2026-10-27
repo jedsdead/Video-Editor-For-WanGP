@@ -7,6 +7,8 @@ import numpy as np
 
 WHEEL_RED_ANGLE = math.radians(104.0)
 LIFT_RANGE, GAMMA_RANGE, GAIN_RANGE = 0.25, 0.5, 0.5
+ZONE_COLOR, ZONE_BRIGHT = 0.25, 0.5
+ZONES = ("master", "shadows", "mids", "highs")
 
 VIDEO_TRANSITIONS = ("dissolve", "wipe", "slide", "iris", "clock", "blinds", "barn")
 AUDIO_TRANSITIONS = ("a_power", "a_linear", "a_dip")
@@ -235,8 +237,22 @@ def grade_params(grade):
         "contrast": 1.0 + float(grade.get("contrast") or 0),
         "saturation": float(grade.get("saturation") if grade.get("saturation") is not None else 1.0),
     }
+    params["style"] = 1 if grade.get("style") == "zones" else 0
+    zones_neutral = True
+    if params["style"] == 1:
+        offsets, sats = [], []
+        for z in ZONES:
+            zone = grade.get(z) or {}
+            d, _ = _wheel(zone, ZONE_COLOR)
+            offsets.append([v + ZONE_BRIGHT * float(zone.get("bright") or 0) for v in d])
+            sats.append(max(0.0, float(zone.get("sat") if zone.get("sat") is not None else 1.0)))
+        lo = min(0.96, max(0.02, float(grade.get("zoneLow") if grade.get("zoneLow") is not None else 0.33)))
+        hi = min(0.98, max(lo + 0.02, float(grade.get("zoneHigh") if grade.get("zoneHigh") is not None else 0.67)))
+        params.update(zone_off=offsets, zone_sat=sats, zone_lo=lo, zone_hi=hi, lift=[0.0] * 3, gain=[1.0] * 3, gamma=[1.0] * 3)
+        zones_neutral = all(abs(v) < 1e-6 for o in offsets for v in o) and all(abs(v - 1) < 1e-6 for v in sats)
     neutral = (abs(params["exposure"] - 1) < 1e-6 and all(abs(v - 1) < 1e-6 for v in params["wb"] + params["gain"] + params["gamma"])
-               and all(abs(v) < 1e-6 for v in params["lift"]) and abs(params["contrast"] - 1) < 1e-6 and abs(params["saturation"] - 1) < 1e-6)
+               and all(abs(v) < 1e-6 for v in params["lift"]) and abs(params["contrast"] - 1) < 1e-6 and abs(params["saturation"] - 1) < 1e-6
+               and zones_neutral)
     return None if neutral else params
 
 
@@ -257,7 +273,8 @@ _LEGACY = {
 
 
 GRADE_FIELDS = ("lift.x", "lift.y", "lift.master", "gamma.x", "gamma.y", "gamma.master", "gain.x", "gain.y", "gain.master",
-                "exposure", "contrast", "saturation", "temperature", "tint", "lutMix")
+                "exposure", "contrast", "saturation", "temperature", "tint", "lutMix",
+                *[f"{z}.{f}" for z in ("master", "shadows", "mids", "highs") for f in ("x", "y", "bright", "sat")], "zoneLow", "zoneHigh")
 
 
 def has_grade_keys(clip):

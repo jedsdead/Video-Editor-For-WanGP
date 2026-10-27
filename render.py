@@ -306,8 +306,22 @@ class Compositor:
         torch = self.torch
         v = lambda values: torch.tensor(values, device=self.device, dtype=torch.float32).view(3, 1, 1)
         c = img * (params["exposure"]) * v(params["wb"])
-        c = c * v(params["gain"]) + v(params["lift"]) * (1.0 - c)
-        c = torch.clamp(c, min=0.0) ** (1.0 / v(params["gamma"]))
+        if params.get("style") == 1:
+            # tonal wheels (same zone weights as the WebGL shader)
+            L = (c * self.luma).sum(0, keepdim=True).clamp(0.0, 1.0)
+            lo, hi = params["zone_lo"], params["zone_hi"]
+            w = max(0.02, min(0.2, (hi - lo) * 0.5))
+            ws = 1.0 - self._smooth(lo - w, lo + w, L)
+            wh = self._smooth(hi - w, hi + w, L)
+            wm = (1.0 - ws - wh).clamp(0.0, 1.0)
+            off = params["zone_off"]
+            c = c + v(off[0]) + ws * v(off[1]) + wm * v(off[2]) + wh * v(off[3])
+            sat = params["zone_sat"]
+            l2 = (c * self.luma).sum(0, keepdim=True)
+            c = l2 + (c - l2) * (sat[0] * (1.0 + ws * (sat[1] - 1.0) + wm * (sat[2] - 1.0) + wh * (sat[3] - 1.0)))
+        else:
+            c = c * v(params["gain"]) + v(params["lift"]) * (1.0 - c)
+            c = torch.clamp(c, min=0.0) ** (1.0 / v(params["gamma"]))
         c = (c - 0.5) * params["contrast"] + 0.5
         luma = (c * self.luma).sum(0, keepdim=True)
         c = luma + (c - luma) * params["saturation"]

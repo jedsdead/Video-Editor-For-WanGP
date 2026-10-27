@@ -12,11 +12,15 @@ export const DEFAULT_STILL = 5;
 
 export function defaultGrade() {
   return { enabled: true, lift: { x: 0, y: 0, master: 0 }, gamma: { x: 0, y: 0, master: 0 }, gain: { x: 0, y: 0, master: 0 },
-           exposure: 0, contrast: 0, saturation: 1, temperature: 0, tint: 0, lut: null, lutMix: 1 };
+           exposure: 0, contrast: 0, saturation: 1, temperature: 0, tint: 0, lut: null, lutMix: 1,
+           // Final Cut style tonal wheels (used when style is "zones")
+           style: "lgg", master: zone(), shadows: zone(), mids: zone(), highs: zone(), zoneLow: 0.33, zoneHigh: 0.67 };
 }
+function zone() { return { x: 0, y: 0, bright: 0, sat: 1 }; }
 // Numeric grade fields that can be keyframed; each is stored as its own key lane "grade:<field>".
 export const GRADE_FIELDS = ["lift.x", "lift.y", "lift.master", "gamma.x", "gamma.y", "gamma.master", "gain.x", "gain.y", "gain.master",
-                             "exposure", "contrast", "saturation", "temperature", "tint", "lutMix"];
+                             "exposure", "contrast", "saturation", "temperature", "tint", "lutMix",
+                             ...["master", "shadows", "mids", "highs"].flatMap(z => [`${z}.x`, `${z}.y`, `${z}.bright`, `${z}.sat`]), "zoneLow", "zoneHigh"];
 
 export function defaultFx() {
   return { eq: { on: false, low: { f: 120, g: 0 }, mid: { f: 1000, g: 0, q: 1 }, high: { f: 8000, g: 0 } },
@@ -117,7 +121,7 @@ function setPath(obj, path, value) {
 export const hasGradeKeys = (clip) => GRADE_FIELDS.some(f => hasKeys(clip, "grade:" + f));
 // The grade in effect at clip time tau (keyframed fields interpolated, the rest static).
 export function gradeAt(clip, tau) {
-  const base = { ...defaultGrade(), ...(clip.grade || {}) };
+  const base = mergeGrade(clip.grade);
   if (!hasGradeKeys(clip)) return base;
   const g = JSON.parse(JSON.stringify(base));
   for (const f of GRADE_FIELDS) {
@@ -125,6 +129,14 @@ export function gradeAt(clip, tau) {
     if (ks.length) setPath(g, f, keyValue(ks, tau));
   }
   return g;
+}
+// A grade with every field present (older projects lack the zone wheels).
+export function mergeGrade(g) {
+  const d = defaultGrade();
+  g = g || {};
+  const out = { ...d, ...g };
+  for (const k of ["lift", "gamma", "gain", "master", "shadows", "mids", "highs"]) out[k] = { ...d[k], ...(g[k] || {}) };
+  return out;
 }
 export function gradeFieldValue(grade, field) { const v = getPath(grade, field); return typeof v === "number" ? v : getPath(defaultGrade(), field); }
 export { setPath as setGradePath };
@@ -805,7 +817,7 @@ export function setGradeAt(clipId, tau, grade, { addKey = false } = {}) {
   const keyed = hasGradeKeys(clip);
   if (!keyed && !addKey) { clip.grade = JSON.parse(JSON.stringify(grade)); return; }
   tau = snapFrame(clamp(tau, 0, clipDur(clip)));
-  clip.grade = { ...(clip.grade || defaultGrade()), enabled: grade.enabled, lut: grade.lut ?? null };
+  clip.grade = { ...mergeGrade(clip.grade), enabled: grade.enabled, lut: grade.lut ?? null, style: grade.style || "lgg" };
   for (const f of GRADE_FIELDS) storeKeys(clip, "grade:" + f, KeyOps.set(keysOf(clip, "grade:" + f), tau, gradeFieldValue(grade, f)));
 }
 export function removeGradeKeyAt(clipId, tau) {
@@ -1070,7 +1082,7 @@ export function normalizeProject(project) {
     delete c.rampTo;
     if (project.tracks.find(t => t.id === c.trackId)?.kind === "video") {
       c.opacity ??= 1; c.scale ??= 1; c.x ??= 0; c.y ??= 0; c.rotation ??= 0; c.cropL ??= 0; c.cropR ??= 0; c.cropT ??= 0; c.cropB ??= 0;
-      c.grade = { ...defaultGrade(), ...(c.grade || {}) };
+      c.grade = mergeGrade(c.grade);
       if (project.media[c.mediaId]?.kind === "title") c.title = mergeTitle(c.title);
     } else c.volume ??= 0;
   }

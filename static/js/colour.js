@@ -3,10 +3,11 @@
 import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { api, el, toast, clamp } from "./util.js";
-import { ColorWheel } from "./grade.js";
+import { ColorWheel, ZONES } from "./grade.js";
 import { CURVES } from "./keys.js";
 
 const WHEELS = [["lift", "Lift", -0.5, 0.5], ["gamma", "Gamma", -0.8, 0.8], ["gain", "Gain", -0.8, 0.8]];
+const ZONE_LABELS = { master: "Master", shadows: "Shadows", mids: "Midtones", highs: "Highlights" };
 const SLIDERS = [["exposure", "Exposure", -3, 3, 0.01, 0], ["contrast", "Contrast", -1, 1, 0.01, 0], ["saturation", "Saturation", 0, 2, 0.01, 1],
                  ["temperature", "Temperature", -1, 1, 0.01, 0], ["tint", "Tint", -1, 1, 0.01, 0]];
 
@@ -29,6 +30,39 @@ export class ColourPanel {
       this.masters[key] = { input: master, val };
       wheelRow.append(el("div.wheel", {}, el("span.wlabel", { title: "Drag to tint. Shift-drag for fine control. Double-click to reset." }, label), canvas, master, val));
     }
+    // tonal (Final Cut style) wheels
+    this.zoneWheels = {};
+    const zoneGrid = el("div.wheels.zones");
+    for (const z of ZONES) {
+      const canvas = el("canvas");
+      const bright = el("input", { type: "range", min: -1, max: 1, step: 0.005, title: `${ZONE_LABELS[z]} brightness. Double-click to reset.` });
+      const sat = el("input", { type: "range", min: 0, max: 2, step: 0.01, title: `${ZONE_LABELS[z]} saturation. Double-click to reset.` });
+      const bVal = el("span.wval"), sVal = el("span.wval");
+      bright.addEventListener("input", () => this.apply(`${z}-bright`, (g) => { g[z] = { ...g[z], bright: parseFloat(bright.value) }; }));
+      bright.addEventListener("dblclick", () => this.apply(`${z}-bright`, (g) => { g[z] = { ...g[z], bright: 0 }; }));
+      sat.addEventListener("input", () => this.apply(`${z}-sat`, (g) => { g[z] = { ...g[z], sat: parseFloat(sat.value) }; }));
+      sat.addEventListener("dblclick", () => this.apply(`${z}-sat`, (g) => { g[z] = { ...g[z], sat: 1 }; }));
+      const wheel = new ColorWheel(canvas, { onChange: (v) => this.apply(`${z}-wheel`, (g) => { g[z] = { ...g[z], x: v.x, y: v.y }; }) });
+      this.zoneWheels[z] = { wheel, bright, sat, bVal, sVal };
+      zoneGrid.append(el("div.wheel", {}, el("span.wlabel", { title: "Drag to tint this tonal range. Shift-drag for fine control. Double-click to reset." }, ZONE_LABELS[z]), canvas,
+        el("div.zslider", {}, el("span", { title: "Brightness" }, "☀"), bright, bVal),
+        el("div.zslider", {}, el("span", { title: "Saturation" }, "◐"), sat, sVal)));
+    }
+    this.zoneLow = el("input", { type: "range", min: 0.05, max: 0.6, step: 0.01, title: "Where shadows hand over to midtones" });
+    this.zoneHigh = el("input", { type: "range", min: 0.4, max: 0.95, step: 0.01, title: "Where midtones hand over to highlights" });
+    this.zoneLowVal = el("span.val"); this.zoneHighVal = el("span.val");
+    this.zoneLow.addEventListener("input", () => this.apply("zoneLow", (g) => { g.zoneLow = Math.min(parseFloat(this.zoneLow.value), (g.zoneHigh ?? 0.67) - 0.05); }));
+    this.zoneHigh.addEventListener("input", () => this.apply("zoneHigh", (g) => { g.zoneHigh = Math.max(parseFloat(this.zoneHigh.value), (g.zoneLow ?? 0.33) + 0.05); }));
+    this.zoneLow.addEventListener("dblclick", () => this.apply("zoneLow", (g) => { g.zoneLow = 0.33; }));
+    this.zoneHigh.addEventListener("dblclick", () => this.apply("zoneHigh", (g) => { g.zoneHigh = 0.67; }));
+    this.zonesBox = el("div", {}, zoneGrid,
+      el("div.field", { style: { marginTop: "8px" } }, el("label", {}, "Shadows to"), this.zoneLow, this.zoneLowVal),
+      el("div.field", {}, el("label", {}, "Highlights from"), this.zoneHigh, this.zoneHighVal));
+    this.lggBox = el("div", {}, wheelRow);
+    this.styleSelect = el("select", { title: "Lift / Gamma / Gain works on the whole image like Resolve's primaries. Shadows / Midtones / Highlights gives each tonal range its own colour, brightness and saturation, like Final Cut. Each clip keeps the values of both, and only the selected style is applied.",
+      onchange: () => this.apply("style", (g) => { g.style = this.styleSelect.value; }) },
+      el("option", { value: "lgg" }, "Lift / Gamma / Gain"), el("option", { value: "zones" }, "Shadows / Midtones / Highlights"));
+
     const sliderBox = el("div");
     for (const [key, label, lo, hi, step, dflt] of SLIDERS) {
       const input = el("input", { type: "range", min: lo, max: hi, step });
@@ -66,7 +100,8 @@ export class ColourPanel {
         el("button.small", { onclick: () => this.reset() }, "Reset")),
       el("div.btnrow.gradekeys", { style: { marginBottom: "8px", alignItems: "center" } },
         el("span.dim", {}, "Keyframes"), el("span.kctl", {}, this.kPrev, this.kDiamond, this.kNext), this.kEase, this.kClear, this.keyNote),
-      wheelRow, el("div", { style: { height: "10px" } }), sliderBox,
+      el("div.field.wide", { style: { marginBottom: "8px" } }, el("label", {}, "Wheels"), this.styleSelect),
+      this.lggBox, this.zonesBox, el("div", { style: { height: "10px" } }), sliderBox,
       el("div.insp-section", { style: { marginTop: "8px" } }, el("h4", {}, "LUT"),
         el("div.field.wide", {}, el("label", {}, "LUT"), this.lutSelect),
         el("div.field", {}, el("label", {}, "Mix"), this.lutMix, this.lutMixVal),
@@ -155,13 +190,29 @@ export class ColourPanel {
     this.controls.hidden = targets.length === 0;
     if (!targets.length) return;
     const c = targets[0];
-    const g = { ...M.defaultGrade(), ...this.gradeOf(c) };
+    const g = M.mergeGrade(this.gradeOf(c));
     for (const [key] of WHEELS) {
       const w = g[key] || {};
       if (!this.wheels[key].dragging) this.wheels[key].set({ x: w.x || 0, y: w.y || 0 });
       if (document.activeElement !== this.masters[key].input) this.masters[key].input.value = w.master || 0;
       this.masters[key].val.textContent = `${(w.master || 0) >= 0 ? "+" : ""}${(w.master || 0).toFixed(2)}`;
     }
+    const zones = g.style === "zones";
+    if (document.activeElement !== this.styleSelect) this.styleSelect.value = zones ? "zones" : "lgg";
+    this.lggBox.hidden = zones;
+    this.zonesBox.hidden = !zones;
+    for (const z of ZONES) {
+      const zw = this.zoneWheels[z], v = g[z] || {};
+      zw.wheel.set({ x: v.x || 0, y: v.y || 0 });
+      if (document.activeElement !== zw.bright) zw.bright.value = v.bright || 0;
+      if (document.activeElement !== zw.sat) zw.sat.value = v.sat ?? 1;
+      zw.bVal.textContent = `${(v.bright || 0) >= 0 ? "+" : ""}${(v.bright || 0).toFixed(2)}`;
+      zw.sVal.textContent = `${Math.round((v.sat ?? 1) * 100)}%`;
+    }
+    if (document.activeElement !== this.zoneLow) this.zoneLow.value = g.zoneLow ?? 0.33;
+    if (document.activeElement !== this.zoneHigh) this.zoneHigh.value = g.zoneHigh ?? 0.67;
+    this.zoneLowVal.textContent = `${Math.round((g.zoneLow ?? 0.33) * 100)}%`;
+    this.zoneHighVal.textContent = `${Math.round((g.zoneHigh ?? 0.67) * 100)}%`;
     for (const [key] of SLIDERS) {
       const s = this.sliders[key];
       if (document.activeElement !== s.input) s.input.value = g[key];

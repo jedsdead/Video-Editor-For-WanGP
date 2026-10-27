@@ -3,6 +3,9 @@ import { clamp } from "./util.js";
 
 const RED_ANGLE = 104 * Math.PI / 180;
 const RANGES = { lift: 0.25, gamma: 0.5, gain: 0.5 };
+// Tonal ("Final Cut style") wheels: colour push and brightness are offsets, saturation multiplies.
+export const ZONE_COLOR = 0.25, ZONE_BRIGHT = 0.5;
+export const ZONES = ["master", "shadows", "mids", "highs"];
 
 function wheelVector(wheel, scale) {
   const x = wheel?.x || 0, y = wheel?.y || 0;
@@ -23,8 +26,17 @@ export function gradeUniforms(grade) {
     lift, gain, gammaInv: gamma.map(g => 1 / g), contrast: 1 + (grade.contrast || 0),
     saturation: grade.saturation ?? 1,
   };
+  u.style = grade.style === "zones" ? 1 : 0;
+  if (u.style === 1) {
+    u.zoneOff = ZONES.map(z => wheelVector(grade[z], ZONE_COLOR).map(v => v + ZONE_BRIGHT * (grade[z]?.bright || 0)));
+    u.zoneSat = ZONES.map(z => Math.max(0, grade[z]?.sat ?? 1));
+    u.zoneLo = clamp(grade.zoneLow ?? 0.33, 0.02, 0.96);
+    u.zoneHi = clamp(grade.zoneHigh ?? 0.67, u.zoneLo + 0.02, 0.98);
+    u.lift = [0, 0, 0]; u.gain = [1, 1, 1]; u.gammaInv = [1, 1, 1];
+  }
+  const zonesNeutral = u.style !== 1 || (u.zoneOff.every(o => o.every(v => Math.abs(v) < 1e-6)) && u.zoneSat.every(v => Math.abs(v - 1) < 1e-6));
   const neutral = Math.abs(u.exposure - 1) < 1e-6 && [...u.wb, ...u.gain, ...u.gammaInv].every(v => Math.abs(v - 1) < 1e-6)
-    && u.lift.every(v => Math.abs(v) < 1e-6) && Math.abs(u.contrast - 1) < 1e-6 && Math.abs(u.saturation - 1) < 1e-6;
+    && u.lift.every(v => Math.abs(v) < 1e-6) && Math.abs(u.contrast - 1) < 1e-6 && Math.abs(u.saturation - 1) < 1e-6 && zonesNeutral;
   return neutral ? null : u;
 }
 

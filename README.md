@@ -2,7 +2,7 @@
 
 A multi-track video editor that runs as a plugin inside [WanGP](https://github.com/deepbeepmeep/Wan2GP), in its own tab. Cut your generations together, grade them, mix the audio and export, without leaving WanGP.
 
-**Version 0.3** · by jedsdeadbaby · MIT licence
+**Version 0.4** · by jedsdeadbaby · MIT licence
 
 ## Features
 
@@ -42,7 +42,11 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - Three audio crossfades: equal power, linear, dip.
 
 **Colour and scopes**
-- Lift, gamma and gain wheels with master sliders, plus exposure, contrast, saturation, temperature and tint.
+- Two wheel styles per clip:
+  - **Lift / Gamma / Gain** (Resolve-style primaries) with master sliders.
+  - **Shadows / Midtones / Highlights** (Final Cut style): a Master wheel plus one per tonal range, each with its own colour, brightness and saturation, and adjustable range boundaries.
+  Each clip keeps the values of both styles, and only the selected style is applied, so switching loses nothing.
+- Exposure, contrast, saturation, temperature and tint.
 - **LUTs:** import `.cube` 3D LUTs and apply one per clip with a mix amount.
 - **Grade keyframes:** ◆ in the Colour panel keys the whole grade at the playhead, with an ease to the next keyframe.
 - Bypass, and copy and paste a grade between clips.

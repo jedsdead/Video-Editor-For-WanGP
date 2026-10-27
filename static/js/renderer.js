@@ -29,14 +29,31 @@ uniform float uAlpha;
 uniform bool uGrade;
 uniform float uExposure, uContrast, uSat;
 uniform vec3 uWB, uLift, uGain, uGammaInv;
+uniform int uStyle;
+uniform vec3 uZoneOff[4];
+uniform vec4 uZoneSat;
+uniform float uZoneLo, uZoneHi;
 out vec4 o;
 void main() {
   vec4 t = texture(uTex, vUv);
   vec3 c = t.rgb;
   if (uGrade) {
     c = c * uExposure * uWB;
-    c = c * uGain + uLift * (1.0 - c);
-    c = pow(max(c, vec3(0.0)), uGammaInv);
+    if (uStyle == 1) {
+      // tonal wheels: soft luminance zones for shadows / midtones / highlights, plus a master wheel
+      float L = clamp(dot(c, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+      float w = max(0.02, min(0.2, (uZoneHi - uZoneLo) * 0.5));
+      float ws = 1.0 - smoothstep(uZoneLo - w, uZoneLo + w, L);
+      float wh = smoothstep(uZoneHi - w, uZoneHi + w, L);
+      float wm = clamp(1.0 - ws - wh, 0.0, 1.0);
+      c += uZoneOff[0] + ws * uZoneOff[1] + wm * uZoneOff[2] + wh * uZoneOff[3];
+      float l2 = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      float zs = uZoneSat.x * (1.0 + ws * (uZoneSat.y - 1.0) + wm * (uZoneSat.z - 1.0) + wh * (uZoneSat.w - 1.0));
+      c = l2 + (c - l2) * zs;
+    } else {
+      c = c * uGain + uLift * (1.0 - c);
+      c = pow(max(c, vec3(0.0)), uGammaInv);
+    }
     c = (c - 0.5) * uContrast + 0.5;
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
     c = l + (c - l) * uSat;
@@ -217,6 +234,13 @@ export class Renderer {
       gl.uniform3f(u.uLift, ...g.lift);
       gl.uniform3f(u.uGain, ...g.gain);
       gl.uniform3f(u.uGammaInv, ...g.gammaInv);
+      gl.uniform1i(u.uStyle, g.style || 0);
+      if (g.style === 1) {
+        gl.uniform3fv(u["uZoneOff[0]"], new Float32Array(g.zoneOff.flat()));
+        gl.uniform4f(u.uZoneSat, ...g.zoneSat);
+        gl.uniform1f(u.uZoneLo, g.zoneLo);
+        gl.uniform1f(u.uZoneHi, g.zoneHi);
+      }
     }
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     return true;
