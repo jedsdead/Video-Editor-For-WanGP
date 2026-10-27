@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Editor</title>
+<link rel="stylesheet" href="static/editor.css?v=__V__">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <nav class="menus">
+      <button class="menu-btn" data-menu="file">File</button>
+      <button class="menu-btn" data-menu="edit">Edit</button>
+      <button class="menu-btn" data-menu="view">View</button>
+      <button class="menu-btn" data-menu="help">Help</button>
+    </nav>
+    <div class="toolgroup" id="tools">
+      <button class="tool" data-tool="select" title="Select tool (V)"><svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 1.5L16 20l-2.5 1-3-7.5L5 18z"/></svg></button>
+      <button class="tool" data-tool="blade" title="Blade tool (B) — click a clip to cut, Shift+click cuts every track"><svg viewBox="0 0 24 24"><path d="M14 3l7 7-9 9H8v-4zM4 21l4-4"/></svg></button>
+      <button class="tool" data-tool="range" title="Range tool (R) — drag across tracks to select a time range"><svg viewBox="0 0 24 24"><path d="M3 5h2v14H3zM19 5h2v14h-2zM7 11h10v2H7z"/></svg></button>
+    </div>
+    <div class="toolgroup">
+      <button class="toggle" id="tglSnap" title="Snapping (S)"><svg viewBox="0 0 24 24"><path d="M6 3h4v9a2 2 0 004 0V3h4v9a6 6 0 01-12 0zM6 3h4v3H6zM14 3h4v3h-4z"/></svg><span>Snap</span></button>
+      <button class="toggle" id="tglMagnetic" title="Magnetic timeline (M) — V1 closes gaps and pushes clips aside; clips above connect to it"><svg viewBox="0 0 24 24"><path d="M4 4h5v8a3 3 0 006 0V4h5v8a8 8 0 01-16 0z"/></svg><span>Magnetic</span></button>
+      <button class="toggle" id="tglLink" title="Linked selection (Ctrl+Shift+L) — video and its audio move together"><svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/></svg><span>Link</span></button>
+    </div>
+    <div class="toolgroup">
+      <button class="icon" id="btnUndo" title="Undo (Ctrl+Z)"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3"/></svg></button>
+      <button class="icon" id="btnRedo" title="Redo (Ctrl+Shift+Z)"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5M20 9H10a6 6 0 000 12h3"/></svg></button>
+    </div>
+    <div id="projectTitle" title="Click to rename the project"></div>
+    <div class="spacer"></div>
+    <span id="saveState"></span>
+    <button id="btnExport" class="primary">Export</button>
+  </header>
+
+  <div id="workspace">
+    <div id="upper">
+      <aside class="dock" id="dock-left"></aside>
+      <div class="splitter v" data-split="left"></div>
+      <section id="viewer">
+        <div id="viewerStage"><canvas id="previewCanvas"></canvas><div id="viewerMsg"></div></div>
+        <div id="transport">
+          <span id="tcCurrent" class="timecode">00:00:00:00</span>
+          <div class="transport-buttons">
+            <button class="icon" id="btnStart" title="Go to start (Home)"><svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
+            <button class="icon" id="btnPrevFrame" title="Previous frame (←)"><svg viewBox="0 0 24 24"><path d="M15 5v14L6 12z"/></svg></button>
+            <button class="icon big" id="btnPlay" title="Play / Pause (Space)"><svg viewBox="0 0 24 24" id="playIcon"><path d="M7 4v16l13-8z"/></svg></button>
+            <button class="icon" id="btnNextFrame" title="Next frame (→)"><svg viewBox="0 0 24 24"><path d="M9 5v14l9-7z"/></svg></button>
+            <button class="icon" id="btnEnd" title="Go to end (End)"><svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
+            <button class="toggle small" id="tglLoop" title="Loop playback (in/out or whole timeline)">Loop</button>
+          </div>
+          <span id="tcDuration" class="timecode dim">00:00:00:00</span>
+          <button class="icon" id="btnFullscreen" title="Full-screen viewer"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+        </div>
+      </section>
+      <div class="splitter v" data-split="right"></div>
+      <aside class="dock" id="dock-right"></aside>
+    </div>
+    <div class="splitter h" data-split="timeline"></div>
+    <div id="lower">
+      <section id="timelineArea">
+        <div id="tlToolbar">
+          <button class="small" id="btnAddVideoTrack" title="Add a video track">+ Video track</button>
+          <button class="small" id="btnAddAudioTrack" title="Add an audio track">+ Audio track</button>
+          <span class="sep"></span>
+          <span id="tlInfo" class="dim"></span>
+          <div class="spacer"></div>
+          <button class="icon" id="btnZoomOut" title="Zoom out (-)"><svg viewBox="0 0 24 24"><path d="M5 11h14v2H5z"/></svg></button>
+          <input type="range" id="zoomSlider" min="0" max="1000" value="400" title="Timeline zoom">
+          <button class="icon" id="btnZoomIn" title="Zoom in (+)"><svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg></button>
+          <button class="small" id="btnZoomFit" title="Fit timeline (\)">Fit</button>
+        </div>
+        <div id="tlBody">
+          <div id="trackHeaders"><div id="trackHeadersInner"></div></div>
+          <div id="tlCanvasWrap"><canvas id="tlCanvas"></canvas></div>
+        </div>
+        <div id="tlScrollbar"><div id="tlScrollInner"></div></div>
+      </section>
+      <div class="splitter v" data-split="bottom"></div>
+      <aside class="dock" id="dock-bottom"></aside>
+    </div>
+  </div>
+
+  <div id="takeover" hidden>
+    <div class="takeover-box">
+      <h2>Editing in another window</h2>
+      <p>This project is open in another editor window, so this one is paused to keep the two from overwriting each other.</p>
+      <button class="primary" id="btnTakeBack">Edit here instead</button>
+    </div>
+  </div>
+  <div id="menuLayer"></div>
+  <div id="modalLayer"></div>
+  <div id="toasts"></div>
+</div>
+<script type="module" src="static/js/app.js?v=__V__"></script>
+</body>
+</html>
