@@ -2,7 +2,7 @@
 
 A multi-track video editor that runs as a plugin inside [WanGP](https://github.com/deepbeepmeep/Wan2GP), in its own tab. Cut your generations together, grade them, mix the audio and export, without leaving WanGP.
 
-**Version 0.6** · by jedsdeadbaby · MIT licence
+**Version 0.7** · by jedsdeadbaby · MIT licence
 
 ## Features
 
@@ -69,6 +69,17 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - **Track volume automation:** press **A** on an audio track header to show a volume line across the whole track, then Ctrl+click to add points.
 - **Loudness meter** on the master (EBU R128 momentary, short-term and integrated LUFS).
 - Clip volume keyframes and fade handles.
+
+**Regenerate shots**
+- Right-click a WanGP clip or shot: **Re-generate shot with new seed**, **with same seed**, or **Regenerate / extend shot**, also in the Inspector.
+- **Settings:** the clip's own saved settings, or the Media Generator's current settings (the model and settings in the Video Generator tab when you last switched to the editor).
+- **Prompt:** built for the shot from the original prompt. It keeps the subject definitions and other sections and uses only that shot's text, renumbered as Shot 1 and retimed to start at 00:00. You can edit it before queuing.
+- **Start / end image:** none, the shot's own first frame, the previous shot's last frame, or the next shot's first frame (when the model supports them).
+- **Audio:** keep the shot's audio, so dialogue stays identical and the new picture lip-syncs to it, or generate new audio.
+- **Length:** the shot's length (shots shorter than the model's minimum are generated at the minimum and trimmed) or longer. **Extend** continues the shot from its last frames.
+- Regenerations join WanGP's main queue, so they show in its queue and progress bar. Progress shows on the clip and in the Inspector.
+- **Takes:** each result is added as a take on its clip, with the original kept as take 1. Switch takes in the Inspector or the clip menu. A take with new audio switches the linked audio too.
+- The same seed gives a new result, not the original shot, because the prompt and length differ.
 
 **WanGP integration**
 - Browse WanGP's output folders and import files in place, with nothing copied.
@@ -146,7 +157,6 @@ The editor is a web page served by WanGP through the plugin web-app API and show
 
 ## Roadmap
 
-- **Regenerate a shot:** right-click a shot to regenerate it with the same or a new seed, from its saved settings or the current Media Generator settings, optionally from a start frame; new results arrive as takes. Plus *Extend shot* (continue from its last frames) and *Regenerate longer*.
 - Multicam editing, nested sequences, audio noise reduction.
 
 ## Licence

@@ -5,6 +5,7 @@ import { api, el, toast, timecode, shortTime, clamp } from "./util.js";
 import { CURVES, FADE_CURVES } from "./keys.js";
 import { FONT_FALLBACK } from "./titles.js";
 import { EFFECTS, EFFECT_ORDER, defaultEffectParams } from "./effects.js";
+import { openRegenDialog, canRegenerate } from "./regen.js";
 import { FAMILIES, AUDIO_TRANSITIONS, DISSOLVE_STYLES, IRIS_SHAPES, ANGLE_PRESETS, DEFAULT_PARAMS, MAX_BORDER, isAudioTransition, hasEdge } from "./transitions.js";
 
 const RES_PRESETS = [[1280, 720], [1920, 1080], [3840, 2160], [832, 480], [480, 832], [720, 1280], [1080, 1920], [1024, 1024], [2560, 1080]];
@@ -31,7 +32,7 @@ export class Inspector {
 
   signature() {
     if (!P()) return "";
-    const clips = M.selectedClips().map(c => `${c.id}:${c.trackId}:${(c.effects || []).map(f => f.id).join(".")}`).join(",");
+    const clips = M.selectedClips().map(c => `${c.id}:${c.trackId}:${(c.effects || []).map(f => f.id).join(".")}:${c.takeIndex || 0}/${c.takes?.length || 0}`).join(",");
     return `${clips}|${state.selTransition}|${state.selectedMedia}|${P().tracks.length}`;
   }
 
@@ -39,6 +40,8 @@ export class Inspector {
     if (!P()) return;
     this.lastSig = this.signature();
     this.refreshers = [];
+    for (const fn of this.cleanups || []) fn();
+    this.cleanups = [];
     this.body.innerHTML = "";
     const clips = M.selectedClips();
     if (state.selTransition) { this.renderTransition(); return; }
@@ -110,6 +113,8 @@ export class Inspector {
     // a shot and its linked audio share the same shot details: show them once
     const shotClip = clips.find(c => c.shotInfo && M.trackKind(c.trackId) === "video") || clips.find(c => c.shotInfo);
     if (shotClip && clips.every(c => c.mediaId === shotClip.mediaId && c.shotInfo?.index === shotClip.shotInfo.index)) this.renderShot(shotClip);
+    const regenClip = clips.length === 1 || (clips.length === 2 && clips[0].linkId && clips[0].linkId === clips[1].linkId) ? clips.find(c => canRegenerate(c)) : null;
+    if (regenClip) this.renderRegen(regenClip);
 
     if (video.length) {
       const pw = P().settings.width, ph = P().settings.height;
@@ -271,7 +276,6 @@ export class Inspector {
         el("div.prompt-box", {}, s.text),
         el("div.btnrow", {}, el("button.small", { onclick: () => navigator.clipboard?.writeText(s.text).then(() => toast("Shot text copied")) }, "Copy shot text")));
     }
-    parts.push(el("div.dim", { style: { fontSize: "11px", marginTop: "6px" } }, "Regenerating a shot from these details is coming in a later version."));
     this.section("Shot", ...parts);
   }
 
@@ -370,6 +374,45 @@ export class Inspector {
       holder.append(card);
     });
     if (effects.length) holder.append(el("div.dim", { style: { fontSize: "11px", marginTop: "4px" } }, "Effects run top to bottom, after the colour grade. Sliders keyframe with ◆ like any other property."));
+  }
+
+  // ---------------------------------------------------------------- regeneration & takes
+  renderRegen(clip) {
+    const live = () => M.getClip(clip.id) || clip;
+    const jobsBox = el("div.rgjobs");
+    const drawJobs = () => {
+      jobsBox.innerHTML = "";
+      for (const job of this.app.regen.forClip(clip.id)) {
+        const pct = Math.round((job.progress || 0) * 100);
+        const text = job.status === "error" ? `Failed: ${job.error || job.message}` : job.status === "queued" ? "Waiting in WanGP's queue…" : `${pct}% · ${job.message || "Generating…"}`;
+        jobsBox.append(el(`div.rgjob.${job.status}`, {},
+          el("div.rgbar", {}, el("div", { style: { width: `${job.status === "error" ? 100 : pct}%` } })),
+          el("div.rgjobline", {}, el("span", {}, `${job.mode === "extend" ? "Extending" : "Regenerating"} · seed ${job.seed}`), el("span.dim", {}, text),
+            job.status === "error" ? el("button.small", { onclick: () => this.app.regen.dismiss(job.id) }, "Clear")
+              : el("button.small", { onclick: () => this.app.regen.cancel(job.id) }, "Cancel"))));
+      }
+    };
+    drawJobs();
+    this.cleanups.push(bus.on("regen-jobs", drawJobs));
+    const takes = live().takes || [];
+    const rows = takes.map((t, i) => {
+      const active = (live().takeIndex || 0) === i;
+      return el(`div.take${active ? ".active" : ""}`, { onclick: () => { if (!active) M.edit("Switch take", () => M.setTake(clip.id, i)); } },
+        el("span.takeno", {}, String(i + 1)),
+        el("span.takelabel", {}, t.label, t.seed != null ? el("span.dim", {}, ` · seed ${t.seed}`) : null,
+          i > 0 ? el("span.dim", {}, ` · ${t.audio === "keep" ? "original audio" : "new audio"}`) : null),
+        el("span.dim", {}, `${Math.abs(t.out - t.in).toFixed(1)}s`),
+        i > 0 ? el("button.small.kbtn", { title: "Remove this take from the clip (the file stays in the Media panel)",
+          onclick: (e) => { e.stopPropagation(); M.edit("Remove take", () => M.removeTake(clip.id, i)); } }, "✕") : null);
+    });
+    this.section("Regenerate",
+      el("div.btnrow", {},
+        el("button.small", { onclick: () => openRegenDialog(this.app, clip.id, "new") }, "New seed…"),
+        el("button.small", { onclick: () => openRegenDialog(this.app, clip.id, "same") }, "Same seed…"),
+        el("button.small", { onclick: () => openRegenDialog(this.app, clip.id) }, "Extend…")),
+      jobsBox,
+      takes.length ? el("div.takes", {}, el("div.dim", { style: { fontSize: "11px", margin: "6px 0 4px" } }, "Takes (click to use one):"), ...rows) : null,
+      el("div.dim", { style: { fontSize: "11px", marginTop: "6px" } }, "Regenerations run in WanGP's queue and come back as takes on this clip; the original is always take 1."));
   }
 
   // ---------------------------------------------------------------- titles
@@ -489,7 +532,6 @@ export class Inspector {
     if (rows.length) holder.append(el("div.kv", { style: { marginTop: "6px" } }, rows.flatMap(([k, v]) => [el("span", {}, k), el("span", {}, String(v))])));
     holder.append(el("div.btnrow", {}, prompt ? el("button.small", { onclick: () => navigator.clipboard?.writeText(prompt).then(() => toast("Prompt copied")) }, "Copy prompt") : null,
       el("button.small", { onclick: () => navigator.clipboard?.writeText(JSON.stringify(meta, null, 2)).then(() => toast("Settings copied as JSON")) }, "Copy all settings")));
-    holder.append(el("div.dim", { style: { fontSize: "11px", marginTop: "6px" } }, "Regenerating a shot from these settings is planned for version 2."));
   }
 
   // ---------------------------------------------------------------- transition

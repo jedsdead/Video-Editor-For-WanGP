@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from . import luts as L
 from . import media as M
 from . import render as R
+from . import regen as RG
 from . import shots as SH
 from . import titles as TT
 
@@ -37,7 +38,7 @@ def _safe_name(name, default="Untitled"):
 
 
 class EditorService:
-    def __init__(self, get_config):
+    def __init__(self, get_config, host=None):
         self.get_config = get_config
         config = get_config() or {}
         self.save_path = os.path.abspath(config.get("save_path") or "outputs")
@@ -53,10 +54,11 @@ class EditorService:
         self.jobs = {}
         self.export_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="video_editor_export")
         self.lock = threading.Lock()
+        self.regen = RG.RegenService(self.registry, self.data_root, host or RG.NoHost())
 
 
-def create_app(get_config):
-    service = EditorService(get_config)
+def create_app(get_config, host=None):
+    service = EditorService(get_config, host)
     app = FastAPI(title="WanGP Video Editor", docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", NoCacheStaticFiles(directory=STATIC), name="static")
 
@@ -232,6 +234,58 @@ def create_app(get_config):
             return {}
         with open(path, "r", encoding="utf-8") as handle:
             return json.load(handle)
+
+    @app.get("/api/media/{media_id}/frame")
+    def media_frame(media_id: str, t: float = 0.0):
+        """One frame of the original file as a JPEG (start / end image previews)."""
+        item = _item(media_id)
+        if item["kind"] not in ("video", "image") or not os.path.isfile(item["path"]):
+            raise HTTPException(404, "No picture")
+        folder = os.path.join(service.temp_dir, "frames")
+        os.makedirs(folder, exist_ok=True)
+        out = os.path.join(folder, f"{media_id}_{int(round(t * 1000))}.jpg")
+        if not os.path.isfile(out):
+            try:
+                RG.extract_frame(item["path"], t, out)
+            except Exception as error:
+                raise HTTPException(500, str(error))
+        return FileResponse(out, headers={"Cache-Control": "max-age=86400"})
+
+    # ------------------------------------------------------------------ regeneration
+    @app.get("/api/regen/status")
+    def regen_status():
+        return service.regen.status()
+
+    @app.post("/api/regen/prepare")
+    def regen_prepare(payload: dict = Body(...)):
+        try:
+            return service.regen.prepare(payload)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+
+    @app.post("/api/regen/submit")
+    def regen_submit(payload: dict = Body(...)):
+        try:
+            return service.regen.submit(payload)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+
+    @app.get("/api/regen/jobs")
+    def regen_jobs(project: str = None):
+        return {"jobs": service.regen.list(project)}
+
+    @app.post("/api/regen/jobs/{job_id}/cancel")
+    def regen_cancel(job_id: str):
+        service.regen.cancel(job_id)
+        return {"ok": True}
+
+    @app.post("/api/regen/jobs/{job_id}/dismiss")
+    def regen_dismiss(job_id: str):
+        try:
+            service.regen.dismiss(job_id)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+        return {"ok": True}
 
     # ------------------------------------------------------------------ LUTs and fonts
     @app.get("/api/luts")

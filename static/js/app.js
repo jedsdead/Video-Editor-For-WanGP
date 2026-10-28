@@ -18,6 +18,7 @@ import { CURVES, FADE_CURVES } from "./keys.js";
 import { TransformOverlay } from "./transform.js";
 import { MarkersPanel } from "./markers.js";
 import { openShotDetect } from "./shotdetect.js";
+import { RegenJobs, openRegenDialog, canRegenerate } from "./regen.js";
 
 const $ = (id) => document.getElementById(id);
 const app = { status: {} };
@@ -257,6 +258,21 @@ function prepareReverse(item) {
 }
 app.prepareReverse = prepareReverse;
 
+// Regeneration and takes in the clip menu.
+function regenItems(clip, row) {
+  if (row.kind !== "video" || !canRegenerate(clip)) return [];
+  const items = ["-", { head: "Regenerate" },
+    { label: "Re-generate shot with new seed…", action: () => openRegenDialog(app, clip.id, "new") },
+    { label: "Re-generate shot with same seed…", action: () => openRegenDialog(app, clip.id, "same") },
+    { label: "Regenerate / extend shot…", action: () => openRegenDialog(app, clip.id) }];
+  if (clip.takes?.length) {
+    items.push({ head: "Takes" });
+    clip.takes.forEach((t, i) => items.push({ label: `${i + 1}. ${t.label}${t.seed != null ? ` (seed ${t.seed})` : ""}`, check: (clip.takeIndex || 0) === i,
+      action: () => M.edit("Switch take", () => M.setTake(clip.id, i)) }));
+  }
+  return items;
+}
+
 // Effects clipboard: the whole effect chain (with its keyframes) of one clip, pasted onto others (added after theirs).
 function copyEffects() {
   const clip = M.selectedClips().find(c => M.trackKind(c.trackId) === "video" && (c.effects || []).length);
@@ -472,6 +488,7 @@ function contextMenu(x, y, hit) {
       { label: clip.reverse ? "Play forwards" : "Reverse", kbd: "Shift+R", disabled: M.isStill(clip), action: toggleReverse },
       hit.row.kind === "video" ? { label: "Freeze frame at playhead", kbd: "Shift+F", disabled: M.isStill(clip), action: freezeFrame } : null,
       hit.row.kind === "video" ? { label: "Detect shots…", kbd: "Shift+D", disabled: M.isStill(clip), action: () => openShotDetect(app, clip.id) } : null,
+      ...regenItems(clip, hit.row),
       hit.row.kind === "video" ? { label: "Copy grade", action: copyGrade } : null,
       hit.row.kind === "video" ? { label: "Paste grade", action: pasteGrade } : null,
       hit.row.kind === "video" ? { label: "Copy effects", disabled: !(clip.effects || []).length, action: copyEffects } : null,
@@ -606,6 +623,8 @@ async function main() {
   app.mixer = new MixerPanel(app);
   app.transitions = new TransitionsPanel(app);
   app.effects = new EffectsPanel(app);
+  app.regen = new RegenJobs(app);
+  bus.on("regen-jobs", () => app.timeline && app.timeline.draw());
   app.markers = new MarkersPanel(app);
   app.docks = new Docks([
     { id: "media", title: "Media", node: app.bin.node, dock: "left" },

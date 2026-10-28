@@ -972,6 +972,72 @@ export function splitIntoShots(clipId, cuts, shots = []) {
   return videoPieces;
 }
 
+// ------------------------------------------------------------------ takes (regenerated versions of a shot)
+
+// The original material of a clip: its first take when it has takes, else the clip itself.
+export function originalOf(clip) {
+  const t = clip.takes && clip.takes[0];
+  const src = t || clip;
+  return { mediaId: src.mediaId, in: Math.min(src.in, src.out), out: Math.max(src.in, src.out) };
+}
+const alignedPartners = (clip) => partners(clip).filter(p => Math.abs(p.start - clip.start) < 1e-3);
+
+// Add a take to a clip and switch to it. take: {mediaId, length (seconds of usable footage), label, seed, audio: "keep"|"new", jobId}
+export function addTake(clipId, take) {
+  const clip = getClip(clipId);
+  if (!clip) return null;
+  if (!clip.takes || !clip.takes.length) {
+    clip.takes = [{ id: uid("tk"), mediaId: clip.mediaId, in: clip.in, out: clip.out, label: "Original",
+                    partners: alignedPartners(clip).map(p => ({ id: p.id, mediaId: p.mediaId, in: p.in, out: p.out })) }];
+    clip.takeIndex = 0;
+  }
+  const entry = { id: uid("tk"), mediaId: take.mediaId, in: 0, out: Math.max(frameDur(), take.length), label: take.label || `Take ${clip.takes.length + 1}`,
+                  seed: take.seed ?? null, audio: take.audio || "new", jobId: take.jobId || null, created: Date.now() };
+  clip.takes.push(entry);
+  setTake(clipId, clip.takes.length - 1);
+  return entry;
+}
+
+// Show take `index` in the clip (and its linked audio when that take brought new audio).
+export function setTake(clipId, index) {
+  const clip = getClip(clipId);
+  if (!clip || !clip.takes || !clip.takes[index]) return;
+  const take = clip.takes[index];
+  const oldEnd = clipEnd(clip);
+  const before = alignedPartners(clip);
+  clip.mediaId = take.mediaId;
+  if (clip.reverse) { clip.out = take.out; clip.in = take.in; } else { clip.in = take.in; clip.out = take.out; }
+  if (hasSpeedKeys(clip)) syncSpeedOut(clip);
+  clip.takeIndex = index;
+  const original = clip.takes[0].partners || [];
+  for (const p of before) {
+    const o = original.find(x => x.id === p.id);
+    if (index > 0 && take.audio === "new") { p.mediaId = take.mediaId; p.in = take.in; p.out = take.out; }
+    else if (o) { p.mediaId = o.mediaId; p.in = o.in; p.out = o.out; }
+    p.speed = clip.speed;
+    if (hasSpeedKeys(clip)) { p.keys = { ...(p.keys || {}), speed: JSON.parse(JSON.stringify(clip.keys.speed)) }; p.dur = clip.dur; }
+  }
+  afterLengthChange([{ clip, oldEnd }]);
+}
+
+export function removeTake(clipId, index) {
+  const clip = getClip(clipId);
+  if (!clip || !clip.takes || index <= 0 || !clip.takes[index]) return;
+  const active = clip.takeIndex || 0;
+  clip.takes.splice(index, 1);
+  if (active === index) setTake(clipId, 0);
+  else if (active > index) clip.takeIndex = active - 1;
+  if (clip.takes.length === 1 && (clip.takeIndex || 0) === 0) { delete clip.takes; delete clip.takeIndex; }
+}
+
+// Neighbouring clips on the same track that touch this one (for previous / next shot frames).
+export function touchingNeighbours(clip) {
+  const list = clipsOn(clip.trackId);
+  const tol = frameDur() * 0.6;
+  return { prev: list.find(c => c.id !== clip.id && Math.abs(clipEnd(c) - clip.start) < tol) || null,
+           next: list.find(c => c.id !== clip.id && Math.abs(c.start - clipEnd(clip)) < tol) || null };
+}
+
 // ------------------------------------------------------------------ reverse, freeze frame, markers
 
 export function setReverse(ids, on) {

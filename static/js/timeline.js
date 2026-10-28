@@ -441,6 +441,9 @@ export class Timeline {
     if (clip.parentId) badges.push("⤓");
     if (clip.reverse) badges.push("◀◀");
     if ((clip.effects || []).some(f => f.on !== false)) badges.push("fx");
+    if (clip.takes?.length > 1) badges.push(`T${(clip.takeIndex || 0) + 1}/${clip.takes.length}`);
+    const job = window.veApp?.regen?.forClip(clip.id).find(j => j.status !== "error");
+    if (job) badges.push(job.status === "queued" ? "⟳ queued" : `⟳ ${Math.round((job.progress || 0) * 100)}%`);
     ctx.fillStyle = "#e9ecf2";
     const label = `${badges.join(" ")}${badges.length ? "  " : ""}${clip.name || item.name || "clip"}`;
     ctx.fillText(label, Math.max(x0, 0) + 4, top + 2);

@@ -4,12 +4,12 @@ The browser picks cuts from the scores with the user's sensitivity, and snaps pr
 
 import json
 import os
-import re
 import subprocess
 
 import numpy as np
 
 from . import media as M
+from .regen import parse_prompt
 
 THUMB_W, THUMB_H = 96, 54
 SCORES_VERSION = 1
@@ -61,9 +61,6 @@ def cut_scores(path, fps, duration, cancel=None):
 
 # --------------------------------------------------------------------------- prompt shot lists
 
-_WINDOW = re.compile(r"\[/duration=([\d.]+)s([^\]]*)\]")
-_SHOT = re.compile(r"\[Shot\s+(\d+)\]")
-_AT = re.compile(r"\bAt\s+(\d+):(\d+(?:\.\d+)?)")
 
 
 def prompt_shots(meta, fps):
@@ -73,38 +70,13 @@ def prompt_shots(meta, fps):
     prompt = str((meta or {}).get("prompt") or "")
     if "[Shot" not in prompt:
         return [], []
-    fps = fps or 24.0
-    default_overlap = float((meta or {}).get("sliding_window_overlap") or 0)
-    marks = list(_WINDOW.finditer(prompt))
-    if marks:
-        blocks = []
-        for i, m in enumerate(marks):
-            end = marks[i + 1].start() if i + 1 < len(marks) else len(prompt)
-            overlap = re.search(r"/overlap=(\d+)", m.group(2))
-            blocks.append({"duration": float(m.group(1)), "overlap": float(overlap.group(1)) if overlap else default_overlap,
-                           "text": prompt[m.end():end]})
-    else:
-        blocks = [{"duration": None, "overlap": 0.0, "text": prompt}]
     shots, cuts = [], []
-    window_start = 0.0
-    for w, block in enumerate(blocks):
-        if w > 0:
-            prev = blocks[w - 1]
-            window_start += (prev["duration"] or 0) - block["overlap"] / fps
-        found = list(_SHOT.finditer(block["text"]))
-        for i, m in enumerate(found):
-            end = found[i + 1].start() if i + 1 < len(found) else len(block["text"])
-            text = block["text"][m.start():end].strip()
-            text = text.split("\n<")[0].strip()          # stop before trailing tag blocks
-            number = int(m.group(1))
-            at = _AT.search(text[:160])
-            offset = int(at.group(1)) * 60 + float(at.group(2)) if at else (0.0 if number == 1 else None)
-            if offset is None:
-                continue
-            start = window_start + offset
-            shots.append({"window": w + 1, "shot": number, "start": round(start, 4), "text": text})
-            if number > 1 or (w == 0 and offset > 0):
-                cuts.append({"t": round(start, 4), "window": w + 1, "shot": number})
+    for block in parse_prompt(prompt, fps or 24.0, float((meta or {}).get("sliding_window_overlap") or 0)):
+        for s in block["shots"]:
+            start = round(s["start"], 4)
+            shots.append({"window": s["window"], "shot": s["shot"], "start": start, "text": f"[Shot {s['shot']}] {s['body']}"})
+            if s["shot"] > 1 or (s["window"] == 1 and s["offset"] > 0):
+                cuts.append({"t": start, "window": s["window"], "shot": s["shot"]})
     shots.sort(key=lambda s: s["start"])
     for i, s in enumerate(shots):
         s["end"] = shots[i + 1]["start"] if i + 1 < len(shots) else None

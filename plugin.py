@@ -11,14 +11,28 @@ class VideoEditorPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Video Editor"
-        self.version = "0.6"
+        self.version = "0.7"
         self.description = ("Multi-track video editor: magnetic or free timeline, blade and range tools, transitions, "
                             "colour wheels, scopes, audio mixer, speed ramps with optical flow and export.")
 
     def setup_ui(self):
         self.request_global("server_config")
+        for name in ("get_model_def", "get_model_name", "collect_current_model_settings_with_media"):
+            self.request_global(name)
         self.add_tab(tab_id="video_editor", label="Video Editor", component_constructor=self.create_ui)
         self.register_web_app(WEB_PATH, self.create_web_app)
+
+    def _host(self):
+        if getattr(self, "_wangp_host", None) is None:
+            from .host import WanGPHost
+            self._wangp_host = WanGPHost(self)
+        return self._wangp_host
+
+    def on_tab_select(self, state):
+        try:
+            self._host().capture(state)
+        except Exception as error:
+            print(f"[Video Editor] {error}")
 
     def _config(self):
         return getattr(self, "server_config", None) or {}
@@ -32,4 +46,4 @@ class VideoEditorPlugin(WAN2GPPlugin):
 
     def create_web_app(self):
         from .server import create_app
-        return create_app(self._config)
+        return create_app(self._config, host=self._host())
