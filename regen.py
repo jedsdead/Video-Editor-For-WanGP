@@ -149,6 +149,48 @@ def shot_prompt(prompt, fps, a, b, default_overlap=0.0):
     return (text[:first_span] + middle + suffix).strip(), [{"window": s["window"], "shot": s["shot"], "start": s["start"]} for s in selected]
 
 
+_SLASH = re.compile(r"\[\s*/[^\]]*\]")
+
+
+def strip_window_commands(prompt):
+    """A prompt without WanGP's sliding-window commands ([/duration=...], [/loras_mult=...] ...): a final render is
+    one window, and the clips' LoRAs may not be loaded."""
+    return re.sub(r"\n{3,}", "\n\n", _SLASH.sub("", str(prompt or ""))).strip()
+
+
+def stretch_prompt(entries, fps):
+    """One prompt for a stretch of clips: the first clip's prompt around a shot list that runs through every clip,
+    each clip's shots (for the part of it the timeline shows) retimed to where they fall in the stretch.
+    entries: [(prompt, source_start, source_end, offset_seconds)]. Falls back to the first prompt without a shot list."""
+    frame, shots, seen = None, [], set()
+    for prompt, a, b, offset in entries:
+        if not prompt:
+            continue
+        text, selected = shot_prompt(strip_window_commands(prompt), fps, a, b)
+        if not selected:
+            continue
+        block = parse_prompt(text, fps)[0]
+        if not block["shots"]:
+            continue
+        if frame is None:
+            frame = (text[:block["shots"][0]["span"][0]], text[block["shots"][-1]["span"][1]:])
+        for j, shot in enumerate(block["shots"]):
+            body = _AT.sub(lambda m: f"At {fmt_time(_seconds(m) + offset)}", shot["body"].strip())
+            if j == 0 and offset > 0.05:
+                body = f"At {fmt_time(offset)}, " + body[:1].lower() + body[1:]
+            key = re.sub(r"\s+", " ", _CAMERA_CUT.sub("", _AT.sub("", _CUT_LEAD.sub("", shot["body"])).strip())).strip().lower()
+            if key in seen:
+                continue     # the same shot described again (a window overlap, or a clip and its extension)
+            seen.add(key)
+            shots.append(body)
+    if frame is None:
+        first = next((p for p, *_ in entries if p), "")
+        return strip_window_commands(first)
+    middle = "\n".join(f"[Shot {k + 1}] {body}" for k, body in enumerate(shots))
+    suffix = frame[1] if frame[1].startswith("\n") else "\n" + frame[1].lstrip(" ")
+    return (frame[0] + middle + suffix).strip()
+
+
 def allowed_frames(n, model_def):
     """The smallest frame count the model accepts that is >= n."""
     minimum = int(model_def.get("frames_minimum", 5) or 5)
@@ -844,7 +886,8 @@ class RegenService:
             n = int(round((b - a) * fps))
             if n <= 0:
                 continue
-            parts.append({"clipId": c.get("clipId"), "path": item["path"], "start": a, "frames": n, "offset": frames})
+            parts.append({"clipId": c.get("clipId"), "path": item["path"], "start": a, "frames": n, "offset": frames,
+                          "prompt": (self._meta(item) or {}).get("prompt") or "", "end": b})
             frames += n
         if frames < 5:
             raise ValueError("The stretch is too short to render")
@@ -858,7 +901,8 @@ class RegenService:
         width, height = width // 32 * 32, height // 32 * 32
         strength = float(req.get("strength") if req.get("strength") is not None else (meta.get("switch_threshold") or 0.6))
         steps2 = int(req.get("steps") or meta.get("num_inference_steps2") or 3)
-        prompt = str(req.get("prompt") or "").strip() or str(meta.get("prompt") or "")
+        prompt = strip_window_commands(req.get("prompt")) or stretch_prompt(
+            [(p["prompt"], p["start"], p["end"], p["offset"] / fps) for p in parts], fps)
         return {"settings": settings, "model_def": model_def, "fps": fps, "parts": parts, "frames": frames, "total": total,
                 "width": width, "height": height, "strength": max(0.05, min(1.0, strength)), "steps": max(1, steps2),
                 "vae_x2": bool(req.get("vaeX2")), "prompt": prompt, "refmods": refmods, "meta": meta}
