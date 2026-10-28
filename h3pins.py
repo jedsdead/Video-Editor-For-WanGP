@@ -60,7 +60,14 @@ _GEN = contextvars.ContextVar("video_editor_h3_generate", default=None)   # set 
 _ACTIVE = contextvars.ContextVar("video_editor_h3_active", default=frozenset())   # our wrappers on the call stack
 _NAMESPACE = None
 _HOOKS = {}
-_STATE = {"installed": False, "problems": [], "saved": 0, "pinned": 0, "last": ""}
+_STATE = {"installed": False, "problems": [], "saved": 0, "pinned": 0, "last": "",
+          # how far each generation got through the capture, so a missing sidecar can be traced to its step
+          "trace": {"jobs": 0, "generate": 0, "decode": 0, "captured": 0, "save_video": 0, "fingerprinted": 0, "recorded": 0,
+                    "finish": 0, "matched": 0}}
+
+
+def _count(step):
+    _STATE["trace"][step] = _STATE["trace"].get(step, 0) + 1
 _LOCK = threading.Lock()
 STORE = None
 
@@ -585,6 +592,7 @@ def _impl_generate(self, original, *args, **kwargs):
         return original(self, *args, **kwargs)
     ensure_on_top()
     job = _JOB.get()
+    _count("generate")
     window_no = kwargs.get("window_no")
     record = {"window_no": window_no, "fps": float(kwargs.get("fps") or 24), "video": None, "audio": None, "p1": None,
               "fp": None, "continuation": kwargs.get("input_video") is not None and int(kwargs.get("prefix_frames_count") or 0) > 0,
@@ -758,11 +766,13 @@ def fix_tail_positions(layout, values, anchors, audio_anchors, video_tails, audi
 def _impl_video_decode(self, inner, latents, *args, **kwargs):
     decoded = inner(self, latents, *args, **kwargs)
     record = _GEN.get()
+    _count("decode")
     if record is not None and _JOB.get() is not None:
         try:
             record["video"] = latents.detach().to("cpu", copy=True).to(dtype=_half())[0]
             frames = decoded[0] if hasattr(decoded, "dim") and decoded.dim() == 5 else decoded
             record["fp"] = fingerprints(frames)
+            _count("captured")
         except Exception as error:
             record["video"] = None
             _log(f"latents not kept for this window: {error!r}")
@@ -827,6 +837,7 @@ def _wrap_generate_media(original):
         plugin_data = kwargs.get("plugin_data")
         spec = plugin_data.get(PLUGIN_KEY) if isinstance(plugin_data, dict) else None
         job = {"spec": spec if isinstance(spec, dict) else None, "windows": [], "bytes": 0, "final_fp": None, "saves": []}
+        _count("jobs")
         token = _JOB.set(job)
         try:
             return original(*args, **kwargs)
@@ -840,12 +851,14 @@ def _wrap_save_video(original):
     @functools.wraps(original)
     def save_video(*args, **kwargs):
         job = _JOB.get()
+        _count("save_video")
         if job is not None and job["windows"]:
             try:
                 values = _bind(original, args, kwargs)
                 tensor = values.get("tensor")
                 if tensor is not None and hasattr(tensor, "dim") and tensor.dim() in (4, 5):
                     job["final_fp"] = fingerprints(tensor)
+                    _count("fingerprinted")
             except Exception as error:
                 job["final_fp"] = None
                 _log(f"could not fingerprint the saved video: {error!r}")
@@ -866,6 +879,7 @@ def _wrap_record_file_metadata(original):
                     path = path[-1] if isinstance(path, list) and path else path
                     if isinstance(path, str) and path:
                         job["saves"].append((os.path.abspath(path), job["final_fp"], values.get("configs") or {}))
+                        _count("recorded")
             except Exception as error:
                 _log(f"latents not saved: {error!r}")
         return result
@@ -874,7 +888,10 @@ def _wrap_record_file_metadata(original):
 
 def _finish(job):
     """Write the sidecar for the job's final file (the last one recorded)."""
+    _count("finish")
     if not job["saves"] or not job["windows"] or STORE is None:
+        if job["windows"] and not job["saves"]:
+            _log("latents not saved: the generation's video file was not seen being recorded")
         return
     path, file_fp, configs = job["saves"][-1]
     if not os.path.isfile(path):
@@ -896,6 +913,7 @@ def _finish(job):
         if not windows:
             _log(f"latents not saved for {os.path.basename(path)}: its frames could not be matched to the generation")
             return
+        _count("matched")
         sha = sha256_file(path)
         manifest = {"format": "video_editor_h3_v1", "sha": sha, "video_path": path, "video_name": os.path.basename(path),
                     "fps": job["windows"][0]["fps"], "file_frames": int(len(file_fp)), "windows": windows,
@@ -1068,4 +1086,4 @@ def install(plugin, data_root):
 
 def status():
     return {"installed": _STATE["installed"], "problems": list(_STATE["problems"]), "saved": _STATE["saved"],
-            "pinned": _STATE["pinned"], "last": _STATE["last"], "store": STORE.stats() if STORE else None}
+            "pinned": _STATE["pinned"], "last": _STATE["last"], "trace": dict(_STATE["trace"]), "store": STORE.stats() if STORE else None}
