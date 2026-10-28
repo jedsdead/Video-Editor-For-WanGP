@@ -231,6 +231,18 @@ export function srcTime(clip, tau) {
   if (isStill(clip)) return 0;
   return clip.reverse ? clip.out - consumed(clip, tau) : clip.in + consumed(clip, tau);
 }
+// Level-lock gains [r, g, b] for the frame a clip shows at clip time tau, or null (see compose.level_lock).
+export function levelAt(clip, tau) {
+  const L = clip.level;
+  if (!L || L.on === false || L.mediaId !== clip.mediaId || isStill(clip)) return null;
+  const src = srcTime(clip, tau);
+  for (const part of [L.open, L.close]) {
+    if (!part || !part.gains) continue;
+    const i = Math.round((src - part.src0) * (part.fps || 24));
+    if (i >= 0 && i < part.gains.length) return part.gains[i];
+  }
+  return null;
+}
 // Clip time needed to consume `length` seconds of source.
 export function tauForLength(clip, length) {
   if (hasSpeedKeys(clip)) return K.solveIntegral(keysOf(clip, "speed"), length);
@@ -282,11 +294,17 @@ export function timelineEnd() {
   return end;
 }
 
+// Where a transition sits on its cut: centred (default), ending at the cut (it uses only the incoming clip's
+// footage before its in-point) or starting at it (only the outgoing clip's footage after its out-point).
+export const TRANSITION_ALIGN = [["center", "Centred on the cut"], ["end", "Ending at the cut"], ["start", "Starting at the cut"]];
+export function alignBefore(tr) { return tr.align === "end" ? 1 : tr.align === "start" ? 0 : 0.5; }
+
 export function transitionInfo(tr) {
   const a = getClip(tr.a), b = getClip(tr.b);
   if (!a || !b) return null;
   const cut = clipEnd(a);
-  return { a, b, cut, lo: cut - tr.duration / 2, hi: cut + tr.duration / 2 };
+  const before = tr.duration * alignBefore(tr);
+  return { a, b, cut, lo: cut - before, hi: cut + tr.duration - before };
 }
 
 export function clipWindow(clip) {
@@ -1187,12 +1205,13 @@ export function findCut(trackId, time, tolerance) {
   return best;
 }
 
-export function addTransition(trackId, a, b, presetId, duration) {
+export function addTransition(trackId, a, b, presetId, duration, align = "center") {
   const max = Math.max(frameDur(), Math.min(clipDur(a), clipDur(b)));
   duration = clamp(snapFrame(duration) || frameDur(), frameDur(), max);
   P().transitions = P().transitions.filter(t => !(t.a === a.id && t.b === b.id));
   const { type, params } = presetTransition(presetId);
   const tr = { id: uid("t"), trackId, a: a.id, b: b.id, type, params, duration, feather: false, border: 0, borderColor: "#ffffff" };
+  if (align !== "center") tr.align = align;
   P().transitions.push(tr);
   return tr;
 }
@@ -1214,11 +1233,11 @@ export function transitionHandles(tr) {
   const info = transitionInfo(tr);
   if (!info) return null;
   const { a, b } = info;
-  const half = tr.duration / 2;
+  const neededB = tr.duration * alignBefore(tr), neededA = tr.duration - neededB;
   const endSpeed = speedAt(a, clipDur(a)), startSpeed = speedAt(b, 0);
   const spareA = isStill(a) || endSpeed <= 1e-6 ? Infinity : sourceRoom(a).after / endSpeed;
   const spareB = isStill(b) || startSpeed <= 1e-6 ? Infinity : sourceRoom(b).before / startSpeed;
-  return { needed: half, spareA, spareB };
+  return { needed: Math.max(neededA, neededB), neededA, neededB, spareA, spareB };
 }
 
 // ------------------------------------------------------------------ clipboard

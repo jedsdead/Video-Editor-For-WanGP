@@ -33,7 +33,7 @@ export class Inspector {
 
   signature() {
     if (!P()) return "";
-    const clips = M.selectedClips().map(c => `${c.id}:${c.trackId}:${(c.effects || []).map(f => f.id).join(".")}:${c.takeIndex || 0}/${c.takes?.length || 0}`).join(",");
+    const clips = M.selectedClips().map(c => `${c.id}:${c.trackId}:${(c.effects || []).map(f => f.id).join(".")}:${c.takeIndex || 0}/${c.takes?.length || 0}:${c.seam?.at || 0}:${c.level ? `${c.level.on !== false}${c.level.mediaId}${!!c.level.open}${!!c.level.close}` : ""}`).join(",");
     return `${clips}|${state.selTransition}|${state.selectedMedia}|${P().tracks.length}`;
   }
 
@@ -429,13 +429,21 @@ export class Inspector {
           el("button.small", { title: "Generate this again with a new seed; the result is added as another take", onclick: () => rerollFor(this.app, live()) }, "Reroll…"),
           el("button.small", { title: "Play 2s either side of the join into this clip", onclick: () => previewJoin(live().start) }, "▶ Join in"),
           el("button.small", { title: "Play 2s either side of the join out of this clip", onclick: () => previewJoin(M.clipEnd(live())) }, "▶ Join out"),
-          el("button.small", { title: "Measure the joins again", onclick: () => this.app.regen.rateSeams(clip.id) }, "Re-measure")));
+          el("button.small", { title: "Measure the joins (and the level lock) again", onclick: () => { this.app.regen.rateSeams(clip.id); if (live().level?.on !== false) this.app.regen.lockLevels(clip.id); } }, "Re-measure")));
+      const lv = live().level;
+      const lockBox = el("input", { type: "checkbox", checked: !!lv && lv.on !== false, onchange: (e) => {
+        if (e.target.checked && (!lv || lv.mediaId !== live().mediaId)) { M.edit("Level lock", () => { const l = live(); l.level = { ...(l.level || {}), on: true }; }); this.app.regen.lockLevels(clip.id); }
+        else M.edit("Level lock", () => { const l = live(); l.level = { ...(l.level || {}), on: e.target.checked }; });
+      } });
+      const describe = (part, m, what) => !m ? null : part ? `${what} ${m.step >= 0 ? "+" : ""}${m.step.toFixed(1)} levels` : `${what} fine`;
+      const lvText = !lv ? "off" : lv.mediaId !== live().mediaId ? "measuring…" : [describe(lv.open, lv.measured?.open, "opening"), describe(lv.close, lv.measured?.close, "closing")].filter(Boolean).join(", ") || "nothing to correct";
+      parts.push(el("label.rrow", { title: "Gains the clip's first (and last) ~12 frames onto the level of the footage it joins, fading back to no change" }, lockBox, el("span", {}, `Level lock · ${lvText}`)));
       if (!live().seam) this.app.regen.rateSeams(clip.id);
     }
     const takes = live().takes || [];
     const rows = takes.map((t, i) => {
       const active = (live().takeIndex || 0) === i;
-      return el(`div.take${active ? ".active" : ""}`, { onclick: () => { if (!active) M.edit("Switch take", () => M.setTake(clip.id, i)); this.app.regen.rateSeams(clip.id); } },
+      return el(`div.take${active ? ".active" : ""}`, { onclick: () => { if (!active) M.edit("Switch take", () => M.setTake(clip.id, i)); this.app.regen.rateSeams(clip.id); if (live().gen && live().level?.on !== false) this.app.regen.lockLevels(clip.id); } },
         el("span.takeno", {}, String(i + 1)),
         el("span.takelabel", {}, t.label, t.seed != null ? el("span.dim", {}, ` · seed ${t.seed}`) : null,
           i > 0 ? el("span.dim", {}, ` · ${t.audio === "keep" ? "original audio" : "new audio"}`) : null),
@@ -445,7 +453,7 @@ export class Inspector {
     });
     if (takes.length) parts.push(el("div.takes", {}, el("div.dim", { style: { fontSize: "11px", margin: "6px 0 4px" } }, "Takes (click to use one):"), ...rows));
     parts.push(el("div.dim", { style: { fontSize: "11px", marginTop: "6px", lineHeight: "1.45" } },
-      "Generations run in WanGP's queue. Neighbouring clips' frames are pinned in as fixed context (latent grade when WanGP saved their latents) and trimmed off the result, so the new footage continues out of or into them. Generating the same slot again adds a take."));
+      "Generations run in WanGP's queue. The clip before is handed to H3 as motion context (or pinned inside the run), and the clip after is pinned at the run's end and trimmed off, so the new footage continues out of and into them; latent grade when saved latents exist. Generating the same slot again adds a take."));
     this.section("Generate", ...parts);
   }
 
@@ -588,9 +596,9 @@ export class Inspector {
       const h = M.transitionHandles(live());
       if (!h) { warn.textContent = ""; return; }
       const parts = [];
-      if (h.spareA + 1e-3 < h.needed) parts.push(`the outgoing clip has ${h.spareA.toFixed(2)}s of extra footage`);
-      if (h.spareB + 1e-3 < h.needed) parts.push(`the incoming clip has ${h.spareB.toFixed(2)}s before its in-point`);
-      warn.textContent = parts.length ? `The transition needs ${h.needed.toFixed(2)}s on each side, but ${parts.join(" and ")}; the first/last frame is held for the rest.` : "";
+      if (h.spareA + 1e-3 < h.neededA) parts.push(`the outgoing clip has ${h.spareA.toFixed(2)}s of extra footage (it needs ${h.neededA.toFixed(2)}s)`);
+      if (h.spareB + 1e-3 < h.neededB) parts.push(`the incoming clip has ${h.spareB.toFixed(2)}s before its in-point (it needs ${h.neededB.toFixed(2)}s)`);
+      warn.textContent = parts.length ? `${parts.join(" and ")[0].toUpperCase()}${parts.join(" and ").slice(1)}; the first/last frame is held for the rest.` : "";
     };
     updateWarn();
     this.refreshers.push(updateWarn);
@@ -630,6 +638,8 @@ export class Inspector {
     this.section(audio ? "Audio transition" : "Video transition",
       el("div.field.wide", {}, el("label", {}, "Type"), select),
       ...controls,
+      el("div.field.wide", {}, el("label", {}, "Position"), el("select", { onchange: (e) => M.edit("Transition position", () => { const t = live(); if (e.target.value === "center") delete t.align; else t.align = e.target.value; }) },
+        M.TRANSITION_ALIGN.map(([v, l]) => el("option", { value: v, selected: v === (tr.align || "center") }, l)))),
       this.numberField("Duration (s)", { get: () => live().duration, set: (v) => { live().duration = v; }, min: M.frameDur(), max: 30, step: 1 / M.fps() }),
       warn,
       el("div.btnrow", {}, el("button.small.danger", { onclick: () => M.edit("Delete transition", () => { P().transitions = P().transitions.filter(t => t.id !== tr.id); }) }, "Delete transition")));

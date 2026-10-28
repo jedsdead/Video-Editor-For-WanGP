@@ -921,7 +921,8 @@ export class Timeline {
     } else if (d.mode === "trdur") {
       const tr = P().transitions.find(t => t.id === d.trId);
       const info = tr && M.transitionInfo(tr);
-      if (info) tr.duration = Math.max(M.frameDur(), M.snapFrame(2 * Math.abs(this.t(x) - info.cut)));
+      const f = tr && M.alignBefore(tr);
+      if (info) tr.duration = Math.max(M.frameDur(), M.snapFrame(Math.abs(this.t(x) - info.cut) / (f === 0.5 ? 0.5 : 1)));
     }
     M.finalize();
   }

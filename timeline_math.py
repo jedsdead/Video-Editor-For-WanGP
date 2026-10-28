@@ -165,6 +165,22 @@ def consumed(clip, tau, media_kind=None):
     return clip_speeds(clip)[0] * tau
 
 
+def level_at(clip, tau, media_kind=None):
+    """Level-lock gains [r, g, b] for the frame a clip shows at clip time tau, or None (see compose.level_lock)."""
+    level = clip.get("level") or {}
+    if not level or level.get("on") is False or level.get("mediaId") != clip.get("mediaId") or is_still(media_kind):
+        return None
+    src = float(source_time(clip, tau, media_kind))
+    for part in (level.get("open"), level.get("close")):
+        gains = (part or {}).get("gains")
+        if not gains:
+            continue
+        i = int(round((src - float(part["src0"])) * float(part.get("fps") or 24)))
+        if 0 <= i < len(gains):
+            return gains[i]
+    return None
+
+
 def source_time(clip, tau, media_kind=None):
     """Source media time for clip-local time(s) tau. Speed keyframes integrate exactly; reversed clips run out -> in."""
     if is_still(media_kind):

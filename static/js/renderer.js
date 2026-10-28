@@ -27,6 +27,7 @@ uniform sampler3D uLut;
 uniform bool uLutOn;
 uniform float uLutMix, uLutSize;
 uniform float uAlpha;
+uniform vec3 uLevel;
 uniform bool uPremul;
 uniform bool uGrade;
 uniform float uExposure, uContrast, uSat;
@@ -39,7 +40,7 @@ out vec4 o;
 void main() {
   vec4 t = texture(uTex, vUv);
   if (uPremul) { o = t * uAlpha; return; }   // an already premultiplied effect buffer
-  vec3 c = t.rgb;
+  vec3 c = clamp(t.rgb * uLevel, 0.0, 1.0);   // level lock (1,1,1 when off)
   if (uGrade) {
     c = c * uExposure * uWB;
     if (uStyle == 1) {
@@ -261,6 +262,7 @@ export class Renderer {
     gl.uniform1f(u.uLutSize, (lut || this.emptyLut).size);
     gl.activeTexture(gl.TEXTURE0);
     gl.uniform1f(u.uAlpha, item.alpha);
+    gl.uniform3f(u.uLevel, ...(item.level || [1, 1, 1]));
     const g = item.premul ? null : item.grade;
     gl.uniform1i(u.uGrade, g ? 1 : 0);
     if (g) {

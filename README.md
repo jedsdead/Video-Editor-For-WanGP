@@ -50,6 +50,7 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - **Iris:** circle, oval, diamond, square, cross (+), X, triangle, each reversible.
 - **Clock wipe**, **Venetian blinds** and **Barn door**.
 - Every edge-based transition has **Feather**, or a hard edge with a coloured **Border**.
+- A transition can be centred on its cut, end at it or start at it (Inspector → Position).
 - Three audio crossfades: equal power, linear, dip.
 
 **Colour and scopes**
@@ -87,6 +88,8 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - **Continuing out of a clip** uses **motion context** by default: its last 17, 34 or 51 frames are handed to H3 as history, the way Wan2GP continues a sliding window (and Latent Carry carries latents), so the run starts at the cut. **Pinned frames inside the run** is the alternative: the frames are regenerated inside the run and trimmed off.
 - **Running into a clip** (Prepend, Bridge, Fill, Replace) pins the next clip's first 22, 39 or 56 frames at the end of the run and trims them off, so the new footage arrives exactly on them. H3 has no future-context slot, so this side is always pinned inside the run. Pins can carry their audio too.
 - **Latent grade:** the editor installs a small add-on into WanGP that saves each H3 generation's latents beside the video. Pins taken from those latents skip a decode/encode round trip, for the cleanest joins. That needs the cut on H3's 17-frame grid, so a cut may move by up to 16 frames; tick **Keep my exact cuts** to use pixel grade instead. If **H3 Latent Carry** is installed, the latents it saves with each video (the last 56 frames) are used too, so extending a clip from its end gets latent grade even for videos made before the editor's add-on. Clips without saved latents from either use pixel grade.
+- **Level lock** (on by default): a continuation tends to open at a slightly different brightness from the clip it continues, for about 12 frames. The editor measures each generated join and gains those frames per channel onto where the earlier clip was heading, fading back to no change (and the mirror image where a run arrives on a clip). Toggle it per clip in the Inspector.
+- **Blend the joins** (pinned frames inside the run): the new clip's own rendering of the neighbour's frames is crossfaded with the neighbour, so the switch between the two renderings is gradual. The crossfades are ordinary transitions positioned to end (or start) at the cut, so you can change or delete them.
 - **Seam verdicts:** each join is rated seamless, soft bump or hard cut, shown as coloured bars on the timeline and in the Inspector, with ▶ buttons to play across a join.
 - **Takes and lineage:** generating the same slot again (or **Reroll**) adds a take. Generated clips show what they came from.
 - **Live preview** of the generation in the Inspector while WanGP works.
@@ -106,6 +109,7 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - **Loudness normalisation** to -14, -16, -23 or -24 LUFS with a -1 dBFS peak limiter. Every export reports its measured loudness.
 - The whole timeline, in/out points or a range selection.
 - Rendered on the GPU from the original files.
+- **De-click:** hard audio cuts get a 5 ms taper either side so the waveform never jumps; joins where the audio carries straight on, or a transition covers the cut, are left alone.
 
 **Layout**
 - Media, Transitions, Effects, Markers, Inspector, Colour, Scopes and Mixer panels can each be moved to the left, right or bottom dock, **floated** as a movable, resizable window, or hidden.

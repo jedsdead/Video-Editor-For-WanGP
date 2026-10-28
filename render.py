@@ -31,6 +31,10 @@ CODECS = {
 SAMPLE_RATE = 48000
 
 
+
+DECLICK_SAMPLES = int(round(0.005 * SAMPLE_RATE))      # 5 ms: 10 ms across a cut is below an audible gap
+DECLICK_RAMP = (np.cos(np.linspace(0.0, np.pi / 2.0, DECLICK_SAMPLES)) ** 2) if DECLICK_SAMPLES > 1 else np.ones(1)
+
 class Cancelled(Exception):
     pass
 
@@ -79,7 +83,9 @@ class Timeline:
             if abs(cut - float(b["start"])) > 0.5 / self.fps:
                 continue
             duration = max(1.0 / self.fps, float(tr.get("duration") or 1.0))
-            self.transitions.append({**tr, "cut": cut, "duration": duration, "trackId": a["trackId"]})
+            before = duration * {"end": 1.0, "start": 0.0}.get(tr.get("align"), 0.5)
+            self.transitions.append({**tr, "cut": cut, "duration": duration, "trackId": a["trackId"],
+                                     "lo": cut - before, "hi": cut - before + duration})
 
     def kind(self, clip):
         return (self.media.get(clip["mediaId"]) or {}).get("kind")
@@ -90,9 +96,9 @@ class Timeline:
         end = start + self.durations[clip["id"]]
         for tr in self.transitions:
             if tr["a"] == clip["id"]:
-                end = max(end, tr["cut"] + tr["duration"] / 2)
+                end = max(end, tr["hi"])
             if tr["b"] == clip["id"]:
-                start = min(start, tr["cut"] - tr["duration"] / 2)
+                start = min(start, tr["lo"])
         return start, end
 
     def end_time(self):
@@ -777,6 +783,10 @@ class ExportJob:
             grade = T.grade_at(clip, kt) if keyed else (clip.get("grade") or {})
             params = T.grade_params(grade) if keyed else grades[clip["id"]]
             rgb = img[:3] if img.shape[0] == 4 else img
+            level = T.level_at(clip, tau, tl.kind(clip))
+            if level is not None:
+                # level lock: a source correction, so it goes before the clip's own grade
+                rgb = (rgb * torch.tensor(level, dtype=rgb.dtype, device=rgb.device).view(3, 1, 1)).clamp(0, 1)
             rgb = apply_lut(comp.grade(rgb, params), grade)
             img = self._cat(rgb, img[3:4]) if img.shape[0] == 4 else rgb
             if FX.active(clip):
@@ -828,14 +838,14 @@ class ExportJob:
                 if track.get("hidden"):
                     continue
                 active_tr = next((tr for tr in track_transitions[track["id"]]
-                                  if tr["cut"] - tr["duration"] / 2 <= t < tr["cut"] + tr["duration"] / 2), None)
+                                  if tr["lo"] <= t < tr["hi"]), None)
                 if active_tr is not None:
                     a = clip_layer(tl.clips[active_tr["a"]], t)
                     b = clip_layer(tl.clips[active_tr["b"]], t)
                     if a is None or b is None:
                         layer = a if b is None else b
                     else:
-                        p = (t - (active_tr["cut"] - active_tr["duration"] / 2)) / active_tr["duration"]
+                        p = (t - active_tr["lo"]) / active_tr["duration"]
                         layer = comp.transition(active_tr, a, b, p)
                     layers = [layer] if layer is not None else []
                 else:
@@ -973,6 +983,32 @@ class ExportJob:
             handle.setframerate(SAMPLE_RATE)
             handle.writeframes(pcm.tobytes())
 
+    @staticmethod
+    def _needs_declick(tl, clip, edge, audio_transitions):
+        """Whether a clip's head/tail is a hard cut in its audio (see _mix_audio)."""
+        if any(tr["b" if edge == "head" else "a"] == clip["id"] for tr in audio_transitions):
+            return False
+        here = float(clip["start"]) if edge == "head" else float(clip["start"]) + tl.durations[clip["id"]]
+        tol = 0.5 / tl.fps
+        for other in tl.clips.values():
+            if other["id"] == clip["id"] or other["trackId"] != clip["trackId"]:
+                continue
+            o0 = float(other["start"])
+            o1 = o0 + tl.durations[other["id"]]
+            if not (abs(o1 - here) < tol if edge == "head" else abs(o0 - here) < tol):
+                continue
+            first, second = (other, clip) if edge == "head" else (clip, other)
+            if first["mediaId"] != second["mediaId"] or first.get("reverse") or second.get("reverse"):
+                return True
+            kind = tl.kind(first)
+            if T.has_speed_keys(first, kind) or T.has_speed_keys(second, kind):
+                return True
+            if abs(T.clip_speeds(first)[0] - T.clip_speeds(second)[0]) > 1e-6:
+                return True
+            gap = float(T.source_time(second, 0.0, kind)) - float(T.source_time(first, tl.durations[first["id"]], kind))
+            return abs(gap) > 1.5 / tl.fps          # the audio carries straight on: nothing to de-click
+        return True
+
     def _mix_audio(self, tl, start, end, out_path, loudness=None):
         total = int(round((end - start) * SAMPLE_RATE))
         mix = np.zeros((2, total), dtype=np.float32)
@@ -1023,7 +1059,7 @@ class ExportJob:
                     gain = gain * np.clip(np.asarray(T.speed_at(clip, inside)) / 0.1, 0, 1)
                 for tr in audio_transitions:
                     times = s + np.arange(count) / SAMPLE_RATE
-                    lo, hi = tr["cut"] - tr["duration"] / 2, tr["cut"] + tr["duration"] / 2
+                    lo, hi = tr["lo"], tr["hi"]
                     if tr["a"] == clip["id"] or tr["b"] == clip["id"]:
                         p = np.clip((times - lo) / tr["duration"], 0, 1)
                         within = (times >= lo) & (times < hi)
@@ -1034,6 +1070,13 @@ class ExportJob:
                         else:
                             curve = np.cos(p * np.pi / 2) if tr["a"] == clip["id"] else np.sin(p * np.pi / 2)
                         gain = np.where(within, gain * curve, gain)
+                # de-click: a 5 ms taper on each side of a hard audio cut, so the waveform never jumps between
+                # samples. Not where a transition already crosses the cut or the audio carries straight on.
+                taper = DECLICK_SAMPLES if count > 4 * DECLICK_SAMPLES else 0
+                if taper and abs(s - w0) < 0.5 / SAMPLE_RATE and self._needs_declick(tl, clip, "head", audio_transitions):
+                    gain[:taper] *= DECLICK_RAMP[::-1]
+                if taper and abs(e - w1) < 0.5 / SAMPLE_RATE and self._needs_declick(tl, clip, "tail", audio_transitions):
+                    gain[-taper:] *= DECLICK_RAMP
                 buffer[:, i0:i0 + count] += seg * gain.astype(np.float32)
             buffer = self._apply_fx(buffer, track.get("fx"))
             buffer *= T.db_to_gain(track.get("volume"))

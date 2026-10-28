@@ -4,7 +4,7 @@
 // Audio graph per track:  clips -> input -> EQ low/mid/high -> compressor -> makeup -> fader(+automation, mute) -> pan -> master in
 // Master:                 master in -> EQ -> compressor -> makeup -> master fader -> speakers (+ meters and LUFS)
 // render.py applies the same EQ/compressor (via ffmpeg) and the same fader, automation and pan maths on export.
-import { state, P, bus, clipsOn, videoTracks, audioTracks, clipDur, srcTime, speedAt, fadeFactor, isRamped, transitionInfo,
+import { state, P, bus, levelAt, clipsOn, videoTracks, audioTracks, clipDur, srcTime, speedAt, fadeFactor, isRamped, transitionInfo,
          mediaOf, timelineEnd, getClip, audioTransitionGains, fps, clipWindow, prop, gradeAt, hasGradeKeys,
          trackGainDb, effectParamsAt, GENERATOR_KINDS } from "./model.js";
 import { gradeUniforms } from "./grade.js";
@@ -466,6 +466,7 @@ export class Playback {
     const geo = this.geometry(clip, kt, sw, sh);
     const alpha = clamp(prop(clip, "opacity", kt), 0, 1) * fadeFactor(clip, kt, d);
     return { type: "clip", clip, source: entry.el, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, full: geo.full, alpha,
+             level: levelAt(clip, t - clip.start),
              ...this.gradeFor(clip, kt), effects: this.effectsFor(clip, kt, t) };
   }
 

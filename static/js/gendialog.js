@@ -110,6 +110,8 @@ export async function openGenerate(app, mode, where) {
   const pinsBox = el("div.gpins");
   const keepCut = el("input", { type: "checkbox", checked: !!prefs.keepCut });
   const carryAudio = el("input", { type: "checkbox", checked: prefs.carryAudio !== false });
+  const crossfade = el("input", { type: "checkbox", checked: prefs.crossfade !== false });
+  const levelLock = el("input", { type: "checkbox", checked: prefs.levelLock !== false });
   const srcClip = radio("g_src", "clip", fresh ? (settingsItem ? `The same settings as “${s.near.name}”` : "A neighbouring clip's settings (none here)") : settingsItem ? "The clip's settings" : "The clip's settings (not a WanGP clip)", !!settingsItem && !prefs.useCurrent, { disabled: !settingsItem });
   const srcCurrent = radio("g_src", "current", status.current ? `Current Media Generator settings (${status.current.name})` : "Current Media Generator settings (open the Video Generator tab first)",
     !settingsItem || !!prefs.useCurrent || fresh, { disabled: !status.current });
@@ -132,7 +134,9 @@ export async function openGenerate(app, mode, where) {
       s.left ? el("div", { style: { margin: "6px 0 2px" } }, modeSel) : null, s.left ? modeNote : null,
       pinsBox,
       el("label.rrow", {}, keepCut, el("span", {}, "Keep my exact cuts (pixel grade instead of moving a cut onto H3's grid)")),
-      el("label.rrow", {}, carryAudio, el("span", {}, "Carry the pinned audio too"))),
+      el("label.rrow", {}, carryAudio, el("span", {}, "Carry the pinned audio too")),
+      el("label.rrow", {}, levelLock, el("span", {}, "Level lock: match the new footage's brightness and colour to the clip it joins, over the ~12 frames where continuations step")),
+      el("label.rrow", {}, crossfade, el("span", {}, "Blend the joins: crossfade across the frames both sides rendered (pinned frames inside the run only)"))),
     field(fresh ? "Length" : "New footage", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seconds, el("span.dim", {}, "seconds")), lengthNote),
     field("Settings", srcClip.row, srcCurrent.row, modelNote),
     field("Seed", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seedSel, seedInput)),
@@ -151,7 +155,7 @@ export async function openGenerate(app, mode, where) {
     right: s.right ? { clipId: s.right.id, mediaId: s.right.mediaId, cut: startSource(s.right), pixel: keepCut.checked, audio: carryAudio.checked } : null,
     replaceId: s.replace?.id || null,
     gap: s.gap ? { start: s.gap.start, end: Number.isFinite(s.gap.end) ? s.gap.end : null } : null,
-    window: parseInt(windowSel.value, 10), pinMode: modeSel.value, newSeconds: clamp(parseFloat(seconds.value) || 3, 0.2, 30),
+    window: parseInt(windowSel.value, 10), pinMode: modeSel.value, crossfade: crossfade.checked, levelLock: levelLock.checked, newSeconds: clamp(parseFloat(seconds.value) || 3, 0.2, 30),
     useCurrent: srcCurrent.input.checked, settingsFrom: settingsItem?.id || (s.left || s.right)?.mediaId || null, promptRange,
     at: s.at ?? null, targetId: s.target?.id || null,
   });
@@ -203,7 +207,7 @@ export async function openGenerate(app, mode, where) {
       if (!Number.isFinite(seed) || seed < 0) { error.textContent = "Enter a seed of 0 or more"; return; }
     }
     const req = { ...request(), seed, prompt: promptBox.value };
-    savePrefs({ window: req.window, pinMode: req.pinMode, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
+    savePrefs({ window: req.window, pinMode: req.pinMode, crossfade: req.crossfade, levelLock: req.levelLock, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
       freshSeconds: fresh && !s.target ? req.newSeconds : prefs.freshSeconds, keepCut: keepCut.checked, carryAudio: carryAudio.checked,
       useCurrent: req.useCurrent, seed: seedSel.value === "custom" ? "custom" : "new", customSeed: seedInput.value });
     go.disabled = true;

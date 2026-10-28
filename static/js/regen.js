@@ -132,14 +132,71 @@ export class RegenJobs {
         target = clips[0];
       });
       if (target) {
-        M.select([target.id]);
+        const tid = target.id;
+        M.edit("Blend the joins", () => this.crossfadeJoins(job, M.getClip(tid)), { coalesceKey: `xf-${job.id}` });
+        M.select([tid]);
         toast(`${job.mode[0].toUpperCase() + job.mode.slice(1)} added${placedNote} · seed ${job.seed}`);
-        this.rateSeams(target.id);
+        this.rateSeams(tid);
+        if (job.request?.levelLock !== false) this.lockLevels(tid);
+        else M.edit("Level lock", () => { const l = M.getClip(tid); if (l) delete l.level; });
       }
     }
     try { await api(`api/regen/jobs/${job.id}/dismiss`, { method: "POST" }); } catch (_) { /* kept for next time */ }
     this.jobs = this.jobs.filter(j => j.id !== job.id);
     bus.emit("regen-jobs");
+  }
+
+  // Crossfade a join across the frames both sides rendered: a pin inside the run is the new clip's own rendering of
+  // the neighbour's frames (trimmed off), so dissolving from the neighbour into it hides the step between the two
+  // renderings. Ends at the cut on the way in, starts at it on the way out, so nothing moves. Linear, because the two
+  // sides show the same moment. Motion-context pins leave no overlap (only the join frame), so they get none.
+  crossfadeJoins(job, clip) {
+    if (!clip) return;
+    const { prev, next } = M.touchingNeighbours(clip);
+    const on = job.request?.crossfade !== false;
+    const pinOf = (place) => (job.pins || []).find(p => p.place === place);
+    const audioOf = (c) => M.partners(c).find(x => M.trackKind(x.trackId) === "audio");
+    const join = (a, b, seconds, align) => {
+      const pairs = [[a, b, "dissolve"]];
+      const aa = audioOf(a), ab = audioOf(b);
+      if (aa && ab && aa.trackId === ab.trackId && Math.abs(M.clipEnd(aa) - ab.start) < M.frameDur() / 2) pairs.push([aa, ab, "a_linear"]);
+      for (const [x, y, preset] of pairs) {
+        P().transitions = P().transitions.filter(t => !(t.a === x.id && t.b === y.id && t.auto));
+        if (on && seconds >= M.frameDur() * 2) {
+          const tr = M.addTransition(x.trackId, x, y, preset, seconds, align);
+          tr.auto = "crossfade";
+        }
+      }
+    };
+    const before = pinOf("before"), after = pinOf("after");
+    if (prev && job.left && prev.id === job.left.clipId) join(prev, clip, before && before.kind !== "motion" ? job.trimHead || 0 : 0, "end");
+    if (next && job.right && next.id === job.right.clipId) join(clip, next, after ? job.trimTail || 0 : 0, "start");
+  }
+
+  // Level lock: gain a generated clip's opening (and closing, where it runs into a clip) onto the level of the
+  // footage it joins, for the ~12 frames where a continuation's level steps. Recorded against the clip's media and
+  // source times, so moving or trimming the clip keeps it, and switching takes drops it.
+  async lockLevels(clipId) {
+    const clip = M.getClip(clipId);
+    if (!clip || clip.reverse || M.trackKind(clip.trackId) !== "video") return;
+    // only the joins the generation was made to meet (its lineage), never a hard cut into an unrelated clip
+    const { prev: p0, next: n0 } = M.touchingNeighbours(clip);
+    const g = clip.gen || {};
+    const prev = p0 && g.parent === p0.id ? p0 : null, next = n0 && g.child === n0.id ? n0 : null;
+    const ask = async (a, b, correct) => {
+      if (!a || !b || a.reverse || b.reverse || M.isStill(a) || M.isStill(b)) return null;
+      try {
+        return await api("api/gen/levellock", { method: "POST", body: { a: { mediaId: a.mediaId, end: Math.max(a.in, a.out) }, b: { mediaId: b.mediaId, start: Math.min(b.in, b.out) }, correct } });
+      } catch (_) { return null; }
+    };
+    const open = await ask(prev, clip, "b"), close = await ask(clip, next, "a");
+    const live = M.getClip(clipId);
+    if (!live || live.mediaId !== clip.mediaId) return;
+    M.edit("Level lock", () => {
+      const l = M.getClip(clipId);
+      l.level = { mediaId: l.mediaId, on: l.level?.on !== false, open: open?.gains ? open : null, close: close?.gains ? close : null,
+                  measured: { open: open && { step: open.step, swing: open.swing, noise: open.noise }, close: close && { step: close.step, swing: close.swing, noise: close.noise } } };
+    }, { coalesceKey: `lv-${clipId}` });
   }
 
   // Measure how the clip joins the clips touching it (seamless / soft bump / hard cut).

@@ -300,6 +300,13 @@ def create_app(get_config, host=None):
         except (ValueError, KeyError) as error:
             raise HTTPException(400, str(error))
 
+    @app.post("/api/gen/levellock")
+    def gen_level_lock(payload: dict = Body(...)):
+        try:
+            return service.regen.level_lock(payload)
+        except (ValueError, KeyError) as error:
+            raise HTTPException(400, str(error))
+
     @app.get("/api/regen/jobs/{job_id}/preview")
     def regen_preview(job_id: str):
         path, kind = service.regen.preview_path(job_id)
