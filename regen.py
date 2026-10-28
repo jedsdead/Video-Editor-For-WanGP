@@ -306,8 +306,8 @@ class RegenService:
         self.handles = {}
         self.lock = threading.Lock()
         self._sha_cache = {}
-        from .h3pins import LatentStore
-        self.latents = LatentStore(os.path.join(data_root, "latents"))
+        from .h3pins import open_store
+        self.latents = open_store(data_root)     # the editor's sidecars, plus Latent Carry's when it is installed
         self._load()
 
     # ---- persistence: finished jobs survive a reload of the editor (and of WanGP) until the editor applies them
@@ -542,6 +542,8 @@ class RegenService:
             except Exception:
                 manifest = None
         aligned = (C.align_before_pin if place == "before" else C.align_after_pin)(manifest, cut, frames)
+        if aligned["grade"] == "latent" and aligned.get("source") == "latent_carry":
+            aligned["reason"] = "saved by Latent Carry"
         if side.get("pixel") and aligned["grade"] == "latent" and aligned["shift"]:
             aligned = {"start": cut - frames if place == "before" else cut, "cut": cut, "grade": "pixel", "shift": 0, "reason": "kept your cut"}
         if aligned["grade"] != "latent" and abs(src_fps - gen_fps) >= 1e-3:

@@ -155,8 +155,8 @@ export async function openGenerate(app, mode, where) {
     const who = p.place === "before" ? "Previous clip" : "Next clip";
     const fps = info?.fps || 24;
     const grade = p.grade === "latent" ? el("span.grade.latent", {}, "latent grade") : el("span.grade.pixel", {}, "pixel grade");
-    const extra = p.grade === "latent" && p.shift ? ` · the cut moves ${(p.shift / fps).toFixed(2)}s ${p.place === "before" ? "earlier" : "later"} onto H3's grid`
-      : p.reason ? ` · ${p.reason}` : "";
+    const extra = (p.grade === "latent" && p.shift ? ` · the cut moves ${(p.shift / fps).toFixed(2)}s ${p.place === "before" ? "earlier" : "later"} onto H3's grid` : "")
+      + (p.reason ? ` · ${p.reason}` : "");
     return el("div.gpin", {}, el("b", {}, `${who}: `), `${p.frames} frames, `, grade, extra);
   };
 

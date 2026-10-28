@@ -56,7 +56,7 @@ def align_before_pin(manifest, cut, frames):
     exact = {"start": cut - frames, "cut": cut, "grade": "pixel", "shift": 0, "reason": ""}
     windows = (manifest or {}).get("windows") or []
     if not windows:
-        exact["reason"] = "no saved latents for this clip"
+        exact["reason"] = "no saved latents for this clip (from the editor's add-on or Latent Carry)"
         return exact
     best = None
     for w in windows:
@@ -69,7 +69,7 @@ def align_before_pin(manifest, cut, frames):
             continue
         shift = cut - (start + frames)
         if best is None or shift < best["shift"]:
-            best = {"start": start, "cut": start + frames, "grade": "latent", "shift": shift, "reason": ""}
+            best = {"start": start, "cut": start + frames, "grade": "latent", "shift": shift, "reason": "", "source": w.get("source", "editor")}
     if best is None:
         exact["reason"] = "the cut is not inside one saved window"
         return exact
@@ -97,7 +97,7 @@ def align_after_pin(manifest, cut, frames):
         if shift < 0:
             continue
         if best is None or shift < best["shift"]:
-            best = {"start": start, "cut": start, "grade": "latent", "shift": shift, "reason": ""}
+            best = {"start": start, "cut": start, "grade": "latent", "shift": shift, "reason": "", "source": w.get("source", "editor")}
     if best is None:
         exact["reason"] = "the cut is not inside one saved window"
         return exact

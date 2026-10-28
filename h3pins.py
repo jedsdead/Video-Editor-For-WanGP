@@ -37,6 +37,7 @@ import inspect
 import json
 import math
 import os
+import struct
 import subprocess
 import sys
 import threading
@@ -49,6 +50,7 @@ VERSION = "1.0"
 PLUGIN_KEY = "video_editor"                 # plugin_data key the editor's tasks carry
 GRID = 17                                   # pixel frames per VAE clip
 LATENTS_PER_CLIP = 5
+AUDIO_LATENT_FPS = 40                       # H3 audio latents per second
 FP_SIZE = (18, 32)                          # fingerprint height, width
 MAX_CAPTURE_BYTES = 3 * 1024 ** 3           # never hold more than this many latent bytes for one job
 _MARK = "_video_editor_h3pins"
@@ -206,6 +208,152 @@ class LatentStore:
         return {"count": len(files), "bytes": sum(os.path.getsize(os.path.join(self.root, n)) for n in files)}
 
 
+# --------------------------------------------------------------------------- Latent Carry's saved latents
+
+CARRY_FORMAT = "wan2gp.h3-latent-carry"
+CARRY_VERSION = "1"
+
+
+def find_carry_root(plugins_dir=None):
+    """The latents folder of an installed H3 Latent Carry plugin (found by its store format, not its folder name)."""
+    plugins_dir = plugins_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        names = sorted(os.listdir(plugins_dir))
+    except OSError:
+        return None
+    for name in names:
+        store_py = os.path.join(plugins_dir, name, "store.py")
+        try:
+            with open(store_py, "r", encoding="utf-8", errors="ignore") as handle:
+                if CARRY_FORMAT in handle.read():
+                    return os.path.join(plugins_dir, name, "latents")
+        except OSError:
+            continue
+    return None
+
+
+def read_safetensors_header(path):
+    with open(path, "rb") as handle:
+        size = struct.unpack("<Q", handle.read(8))[0]
+        if size > 16 * 1024 ** 2:
+            raise ValueError("implausible safetensors header")
+        return json.loads(handle.read(size))
+
+
+def carry_window(header):
+    """Where a Latent Carry entry's latents sit in its video, as one of this add-on's manifest windows, or (None, reason).
+
+    An entry holds the last T latents of the job's final window (phase-aligned, so the slice starts on H3's 17-frame
+    grid) and the last A audio latents, both ending where the file ends."""
+    meta = header.get("__metadata__") or {}
+    if meta.get("format") != CARRY_FORMAT or meta.get("version") != CARRY_VERSION:
+        return None, "unsupported Latent Carry entry"
+    info = json.loads(meta.get("manifest") or "{}")
+    if "differ from the decoded window" in str(info.get("exported_differs") or ""):
+        return None, "the saved file's frames differ from its latents"
+    video = (header.get("video") or {}).get("shape") or []
+    if len(video) != 5:
+        return None, "unexpected latent shape"
+    total, count = int(info.get("total_latents") or 0), int(video[2])
+    file_frames, discard = int(info.get("frames") or 0), int(info.get("discard_last_frames") or 0)
+    if total < count or (total - count) % LATENTS_PER_CLIP or (count - 2) % LATENTS_PER_CLIP or (total - 2) % LATENTS_PER_CLIP:
+        return None, "the saved latents are not on H3's grid"
+    window_frames = 5 + GRID * ((total - 2) // LATENTS_PER_CLIP)
+    slice_start = (total - count) // LATENTS_PER_CLIP * GRID
+    offset = file_frames + discard - window_frames + slice_start
+    valid = window_frames - slice_start - discard
+    if offset < 0 or valid < 5:
+        return None, "the saved latents don't line up with the file"
+    fps = float(info.get("fps") or 24)
+    audio = (header.get("audio") or {}).get("shape")
+    p1 = (header.get("video_p1") or {}).get("shape")
+    window = {"offset": offset, "valid": valid, "frames": valid, "latents": count, "latent_hw": list(video[-2:]),
+              "p1_hw": list(p1[-2:]) if p1 else None, "audio_ok": bool(audio), "source": "latent_carry",
+              # the saved audio ends where the file ends; its first latent sits this many frames after `offset`
+              "audio_origin": (file_frames - int(audio[-1]) * fps / AUDIO_LATENT_FPS - offset) if audio else 0.0}
+    return window, ""
+
+
+class CarryStore:
+    """Read-only view of H3 Latent Carry's store (<root>/<sha>.safetensors)."""
+
+    def __init__(self, root):
+        self.root = root
+        self._cache = {}
+
+    def path(self, sha):
+        return os.path.join(self.root, f"{sha}.safetensors")
+
+    def manifest(self, sha):
+        path = self.path(sha)
+        try:
+            stamp = os.path.getmtime(path)
+        except OSError:
+            return None
+        hit = self._cache.get(sha)
+        if hit and hit[0] == stamp:
+            return hit[1]
+        try:
+            window, reason = carry_window(read_safetensors_header(path))
+        except Exception as error:
+            window, reason = None, repr(error)
+        result = {"windows": [window]} if window else None
+        if not window:
+            _log(f"Latent Carry entry {sha[:12]} not usable: {reason}")
+        self._cache[sha] = (stamp, result)
+        return result
+
+    def load(self, sha):
+        manifest = self.manifest(sha)
+        if not manifest:
+            return None
+        from safetensors.torch import load_file
+        tensors = load_file(self.path(sha))
+        w = manifest["windows"][0]
+        return {"windows": [{"video": tensors["video"][0], "p1": tensors["video_p1"][0] if "video_p1" in tensors else None,
+                             "audio": tensors["audio"][0] if "audio" in tensors else None, "audio_ok": w["audio_ok"],
+                             "audio_origin": w["audio_origin"]}]}
+
+
+class CombinedStore:
+    """The editor's own sidecars first, then Latent Carry's (when it is installed): windows from both, in that order."""
+
+    def __init__(self, own, carry=None):
+        self.own, self.carry = own, carry
+
+    def manifest(self, sha):
+        mine = self.own.manifest(sha)
+        theirs = self.carry.manifest(sha) if self.carry else None
+        if not mine and not theirs:
+            return None
+        out = dict(mine or {})
+        out["windows"] = list((mine or {}).get("windows") or []) + list((theirs or {}).get("windows") or [])
+        return out
+
+    def load(self, sha):
+        mine = self.own.load(sha) if self.own.manifest(sha) else None
+        theirs = self.carry.load(sha) if self.carry and self.carry.manifest(sha) else None
+        if mine is None and theirs is None:
+            return None
+        return {"windows": list((mine or {}).get("windows") or []) + list((theirs or {}).get("windows") or [])}
+
+    def has(self, sha):
+        return bool(self.manifest(sha))
+
+    def save(self, *args, **kwargs):
+        return self.own.save(*args, **kwargs)
+
+    def stats(self):
+        stats = dict(self.own.stats())
+        stats["latent_carry"] = self.carry.root if self.carry else None
+        return stats
+
+
+def open_store(data_root):
+    carry_root = find_carry_root()
+    return CombinedStore(LatentStore(os.path.join(data_root, "latents")), CarryStore(carry_root) if carry_root and os.path.isdir(carry_root) else None)
+
+
 # --------------------------------------------------------------------------- pin resolution
 
 def find_window(manifest, start, frames):
@@ -335,17 +483,17 @@ def _plan_pins(pipeline, spec, kwargs):
         if saved is not None:
             entry = saved["windows"][window["index"]]
             lat0 = window["rel"] // GRID * LATENTS_PER_CLIP
-            full = entry["video"][:, :, lat0:lat0 + n].float()
+            full = entry["video"][:, lat0:lat0 + n].float()            # stored [C, T, h, w]
             per_stage = []
             for si, (lh, lw) in enumerate(plan.stages):
                 if tuple(full.shape[-2:]) == (lh, lw):
                     per_stage.append(full.unsqueeze(0))
                 elif entry.get("p1") is not None and tuple(entry["p1"].shape[-2:]) == (lh, lw):
-                    per_stage.append(entry["p1"][:, :, lat0:lat0 + n].float().unsqueeze(0))
+                    per_stage.append(entry["p1"][:, lat0:lat0 + n].float().unsqueeze(0))
                 else:
                     per_stage.append(None)   # this stage is encoded from pixels below
             latents = per_stage
-            plan.notes.append(f"{pin['place']} pin: latent grade ({frames} frames)")
+            plan.notes.append(f"{pin['place']} pin: latent grade ({frames} frames{', from Latent Carry' if window.get('source') == 'latent_carry' else ''})")
         pixels = None
         stage_latents = []
         for si, (h, w) in enumerate(stages):
@@ -368,9 +516,10 @@ def _plan_pins(pipeline, spec, kwargs):
             sr = int(getattr(pm, "AUDIO_SAMPLE_RATE", 32000))
             audio_latents = None
             if saved is not None and entry.get("audio") is not None and entry.get("audio_ok"):
-                a0 = int(round(window["rel"] / fps * alf))
+                a0 = int(round((window["rel"] - float(entry.get("audio_origin") or 0.0)) / fps * alf))
                 count = int(round(frames / fps * alf))
-                audio_latents = entry["audio"][..., a0:a0 + count].float().unsqueeze(0)   # stored without the batch axis
+                if 0 <= a0 and a0 + count <= int(entry["audio"].shape[-1]):
+                    audio_latents = entry["audio"][..., a0:a0 + count].float().unsqueeze(0)   # stored without the batch axis
             if audio_latents is None:
                 wave = read_audio(path, start / src_fps, frames / fps, sr)
                 audio_latents = pipeline._encode_audio(pipeline._waveform(wave, sr))
@@ -811,7 +960,9 @@ def install(plugin, data_root):
     if _STATE["installed"]:
         return _STATE["problems"]
     _STATE["problems"] = []
-    STORE = LatentStore(os.path.join(data_root, "latents"))
+    STORE = open_store(data_root)
+    if STORE.carry:
+        _log(f"using H3 Latent Carry's saved latents too ({STORE.carry.root})")
     setter = getattr(plugin, "_set_wgp_global_func", None)
     namespace = getattr(setter, "__globals__", None)
     _HOOKS.update({"generate_media": _wrap_generate_media, "save_video": _wrap_save_video,
