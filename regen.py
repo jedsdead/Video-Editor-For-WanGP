@@ -608,6 +608,16 @@ class RegenService:
         src_fps = float(item.get("fps") or gen_fps)
         file_frames = int(round(float(item.get("duration") or 0) * src_fps))
         cut = int(round(float(side["cut"]) * src_fps))
+        # A file's last latent step (and first two) decode slightly differently from the same latents mid-file: the
+        # VAE has nothing after (or before) them. A cut right at the file's edge would join on those frames, so pull it
+        # off the edge and let the new footage cover them, as Latent Carry's Discard Last Frames 4 does between
+        # windows. Masked joins do this inside the held window instead; "keep my exact cuts" leaves the cut alone.
+        edge = 0
+        if kind in ("motion", "pinned") and not side.get("pixel"):
+            if place == "before" and cut > file_frames - HANDOVER_BEFORE:
+                edge, cut = cut - (file_frames - HANDOVER_BEFORE), file_frames - HANDOVER_BEFORE
+            elif place == "after" and cut < HANDOVER_AFTER:
+                edge, cut = HANDOVER_AFTER - cut, HANDOVER_AFTER
         available = cut if place == "before" else max(0, file_frames - cut)
         motion = kind == "motion" and place == "before"
         kind = "pinned" if kind == "motion" and not motion else kind
@@ -629,6 +639,10 @@ class RegenService:
             aligned = {"start": cut - frames if place == "before" else cut, "cut": cut, "grade": "pixel", "shift": 0, "reason": "kept your cut"}
         if aligned["grade"] != "latent" and abs(src_fps - gen_fps) >= 1e-3:
             aligned["reason"] = f"the clip is {src_fps:g} fps; pins are re-encoded at {gen_fps:g} fps"
+        if edge:
+            note = f"cut kept {edge} frame{'s' if edge > 1 else ''} off the file's {'end' if place == 'before' else 'start'} (the VAE's edge frames)"
+            aligned["reason"] = f"{aligned['reason']}; {note}" if aligned["reason"] else note
+            aligned["shift"] = int(aligned["shift"]) + edge
         return {"place": place, "mediaId": item["id"], "file": item["path"], "fps": src_fps, "frames": frames,
                 "start_frame": int(aligned["start"]), "cut_frame": int(aligned["cut"]), "cut": aligned["cut"] / src_fps,
                 "shift": int(aligned["shift"]), "grade": aligned["grade"], "reason": aligned["reason"],
