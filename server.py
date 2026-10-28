@@ -60,6 +60,7 @@ class EditorService:
 def create_app(get_config, host=None):
     service = EditorService(get_config, host)
     app = FastAPI(title="WanGP Video Editor", docs_url=None, redoc_url=None, openapi_url=None)
+    threading.Thread(target=R.detect_hw_codecs, daemon=True, name="video_editor_hw_codecs").start()
     app.mount("/static", NoCacheStaticFiles(directory=STATIC), name="static")
 
     @app.get("/", response_class=HTMLResponse)
@@ -85,6 +86,7 @@ def create_app(get_config, host=None):
             pass
         return {"data_root": service.data_root, "exports_dir": service.exports_dir, "device": device, "rife": rife,
                 "codecs": [{"id": key, "label": value["label"], "kind": value.get("kind", "video")} for key, value in R.CODECS.items()],
+                "codecsReady": R._HW_STATE["done"],
                 "fonts": TT.available_fonts(),
                 "roots": [{"label": "WanGP outputs", "path": service.save_path},
                           {"label": "WanGP image outputs", "path": service.image_save_path},
@@ -415,6 +417,7 @@ def create_app(get_config, host=None):
     @app.post("/api/export")
     def start_export(payload: dict = Body(...)):
         project, options = payload.get("project") or {}, payload.get("options") or {}
+        R.detect_hw_codecs()      # a hardware encoder picked before detection finished still resolves
         codec = R.CODECS.get(options.get("codec") or "h264", R.CODECS["h264"])
         base = _safe_name(options.get("filename") or project.get("name") or "export")
         out_path = os.path.join(service.exports_dir, base + codec["ext"])

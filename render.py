@@ -20,7 +20,6 @@ from . import fx as FX
 CODECS = {
     "h264": {"label": "H.264 (MP4)", "ext": ".mp4", "video": ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"], "crf": True, "audio": ["-c:a", "aac", "-b:a", "192k"]},
     "h265": {"label": "H.265 (MP4)", "ext": ".mp4", "video": ["-c:v", "libx265", "-preset", "medium", "-pix_fmt", "yuv420p", "-tag:v", "hvc1"], "crf": True, "audio": ["-c:a", "aac", "-b:a", "192k"]},
-    "h264_nvenc": {"label": "H.264 NVENC (MP4, fast)", "ext": ".mp4", "video": ["-c:v", "h264_nvenc", "-preset", "p5", "-pix_fmt", "yuv420p"], "cq": True, "audio": ["-c:a", "aac", "-b:a", "192k"]},
     "prores": {"label": "ProRes 422 HQ (MOV)", "ext": ".mov", "video": ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"], "audio": ["-c:a", "pcm_s16le"]},
     "wav": {"label": "Audio only: WAV", "ext": ".wav", "kind": "audio", "audio": ["-c:a", "pcm_s16le"]},
     "mp3": {"label": "Audio only: MP3 320 kbps", "ext": ".mp3", "kind": "audio", "audio": ["-c:a", "libmp3lame", "-b:a", "320k"]},
@@ -29,6 +28,82 @@ CODECS = {
     "jpg": {"label": "Still frame: JPEG (at the playhead)", "ext": ".jpg", "kind": "still"},
 }
 SAMPLE_RATE = 48000
+
+# Hardware encoders, offered only where a test encode works (ffmpeg lists them whether or not the machine has the GPU
+# and driver). Options adapted from the Video Compressor plugin's encoder table.
+_AAC = ["-c:a", "aac", "-b:a", "192k"]
+HW_CODECS = {
+    "h264_nvenc": ("H.264 NVENC (NVIDIA, fast)", "nvenc"), "hevc_nvenc": ("H.265 NVENC (NVIDIA, fast)", "nvenc"),
+    "h264_amf": ("H.264 AMF (AMD, fast)", "amf"), "hevc_amf": ("H.265 AMF (AMD, fast)", "amf"),
+    "h264_qsv": ("H.264 Quick Sync (Intel, fast)", "qsv"), "hevc_qsv": ("H.265 Quick Sync (Intel, fast)", "qsv"),
+    "h264_vaapi": ("H.264 VAAPI (AMD / Intel, Linux, fast)", "vaapi"), "hevc_vaapi": ("H.265 VAAPI (AMD / Intel, Linux, fast)", "vaapi"),
+    "h264_videotoolbox": ("H.264 VideoToolbox (Apple, fast)", "videotoolbox"), "hevc_videotoolbox": ("H.265 VideoToolbox (Apple, fast)", "videotoolbox"),
+}
+
+
+def vaapi_device():
+    for index in range(128, 136):
+        path = f"/dev/dri/renderD{index}"
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def hw_codec(encoder, family):
+    """The CODECS entry for a hardware encoder: input options (before -i), output options, and a quality function
+    mapping the export's CRF-like quality (lower is better) to the encoder's own constant-quality options."""
+    pre, video = [], ["-c:v", encoder]
+    if family == "nvenc":
+        video += ["-preset", "p5", "-tune", "hq", "-pix_fmt", "yuv420p"]
+        quality = lambda q: ["-rc", "vbr", "-cq", str(q), "-b:v", "0"]
+    elif family == "amf":
+        video += ["-quality", "quality", "-pix_fmt", "nv12"]
+        quality = lambda q: ["-rc", "cqp", "-qp_i", str(q), "-qp_p", str(q), *(["-qp_b", str(q)] if encoder.startswith("h264") else [])]
+    elif family == "qsv":
+        video += ["-preset", "medium", "-pix_fmt", "nv12"]
+        quality = lambda q: ["-global_quality", str(max(1, q))]
+    elif family == "vaapi":
+        device = vaapi_device()
+        pre = ["-vaapi_device", device] if device else []
+        video += ["-vf", "format=nv12,hwupload"]
+        quality = lambda q: ["-rc_mode", "CQP", "-qp", str(q)]
+    else:   # videotoolbox: 1-100, higher is better
+        video += ["-pix_fmt", "yuv420p"]
+        quality = lambda q: ["-q:v", str(max(1, min(100, round(100 - 1.6 * q))))]
+    if encoder.startswith("hevc"):
+        video += ["-tag:v", "hvc1"]
+    return {"label": HW_CODECS[encoder][0], "ext": ".mp4", "pre": pre, "video": video, "quality": quality, "audio": _AAC, "hw": True}
+
+
+_HW_STATE = {"done": False, "lock": threading.Lock()}
+
+
+def detect_hw_codecs():
+    """Test-encode a few frames with each hardware encoder ffmpeg lists; add the ones that work to CODECS."""
+    global CODECS
+    with _HW_STATE["lock"]:
+        if _HW_STATE["done"]:
+            return
+        try:
+            listing = M.run([M.ffmpeg_path(), "-hide_banner", "-encoders"], timeout=30).stdout
+        except Exception:
+            listing = ""
+        found = {}
+        for encoder, (_, family) in HW_CODECS.items():
+            if f" {encoder} " not in listing or (family == "vaapi" and vaapi_device() is None):
+                continue
+            codec = hw_codec(encoder, family)
+            args = [M.ffmpeg_path(), "-hide_banner", "-v", "error", *codec["pre"], "-f", "lavfi", "-i", "testsrc2=s=256x256:r=24:d=0.25",
+                    *codec["video"], *codec["quality"](20), "-frames:v", "4", "-f", "null", "-"]
+            try:
+                if M.run(args, timeout=45).returncode == 0:
+                    found[encoder] = codec
+            except Exception:
+                pass
+        # keep the menu order: software first, then the working hardware encoders, then ProRes and the rest
+        items = list(CODECS.items())
+        CODECS = dict(items[:2] + list(found.items()) + items[2:])
+        _HW_STATE["done"] = True
 
 
 
@@ -635,7 +710,7 @@ class ExportJob:
                 self._remove(audio_path)
             return
 
-        args = [M.ffmpeg_path(), "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{tl.width}x{tl.height}",
+        args = [M.ffmpeg_path(), "-y", "-v", "error", *codec.get("pre", []), "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{tl.width}x{tl.height}",
                 "-framerate", f"{tl.fps}", "-i", "-"]
         if audio_path:
             args += ["-i", audio_path, "-map", "0:v:0", "-map", "1:a:0"]
@@ -643,8 +718,8 @@ class ExportJob:
         quality = int(opts.get("quality") or 18)
         if codec.get("crf"):
             args += ["-crf", str(quality)]
-        if codec.get("cq"):
-            args += ["-rc", "vbr", "-cq", str(quality), "-b:v", "0"]
+        if codec.get("quality"):
+            args += codec["quality"](quality)
         if audio_path:
             args += codec["audio"]
         args += ["-t", f"{frames / tl.fps:.6f}"]

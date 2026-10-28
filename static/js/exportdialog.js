@@ -5,7 +5,9 @@ import { api, el, modal, toast, timecode, clamp } from "./util.js";
 
 const HEIGHTS = [["project", "Project size"], [480, "480p"], [720, "720p"], [1080, "1080p"], [1440, "1440p"], [2160, "2160p (4K)"]];
 
-export function openExportDialog(app) {
+export async function openExportDialog(app) {
+  // hardware encoders are found in the background after start-up: pick them up if the status predates that
+  if (app.status && !app.status.codecsReady) app.status = await api("api/status").catch(() => app.status);
   const p = P();
   if (!p.clips.length) { toast("The timeline is empty", "warn"); return; }
   const saved = p.exportDefaults || {};

@@ -105,7 +105,7 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - Clips that WanGP generated show their prompt, seed and settings in the Inspector, and after shot detection, each shot's own text.
 
 **Export**
-- H.264, H.265, H.264 NVENC or ProRes 422 HQ, at any resolution and frame rate.
+- H.264, H.265 or ProRes 422 HQ, at any resolution and frame rate. Fast hardware H.264 / H.265 (NVIDIA NVENC, AMD AMF, Intel Quick Sync, VAAPI on Linux, Apple VideoToolbox) is offered when a test encode shows it works on your machine.
 - **Audio only** (WAV, MP3 or AAC) and **still frame** (PNG or JPEG at the playhead).
 - **Loudness normalisation** to -14, -16, -23 or -24 LUFS with a -1 dBFS peak limiter. Every export reports its measured loudness.
 - The whole timeline, in/out points or a range selection.
