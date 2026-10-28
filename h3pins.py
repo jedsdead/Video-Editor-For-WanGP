@@ -1084,6 +1084,21 @@ def install(plugin, data_root):
     return _STATE["problems"]
 
 
+def _hook_report():
+    """For each binding we patch: is our wrapper the outermost (True), somewhere in the chain ("inner"), or gone (False)."""
+    out = {}
+    try:
+        for key, (owner, attr) in _OWNERS.items():
+            current = getattr(owner, attr, None)
+            out[key] = True if getattr(current, _MARK, False) else ("inner" if _is_ours(current) else False)
+        for name in _HOOKS:
+            current = (_NAMESPACE or {}).get(name)
+            out[name] = True if getattr(current, _MARK, False) else ("inner" if _is_ours(current) else False)
+    except Exception as error:
+        out["error"] = repr(error)
+    return out
+
+
 def status():
     return {"installed": _STATE["installed"], "problems": list(_STATE["problems"]), "saved": _STATE["saved"],
-            "pinned": _STATE["pinned"], "last": _STATE["last"], "trace": dict(_STATE["trace"]), "store": STORE.stats() if STORE else None}
+            "pinned": _STATE["pinned"], "last": _STATE["last"], "trace": dict(_STATE["trace"]), "hooks": _hook_report(), "store": STORE.stats() if STORE else None}
