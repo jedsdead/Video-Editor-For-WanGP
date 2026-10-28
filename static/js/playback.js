@@ -38,6 +38,9 @@ export class Playback {
     bus.on("change", () => { this.dirty = true; });
     bus.on("project", () => { this.resetPool(); this.dirty = true; this.resetLoudness(); });
     bus.on("media-updated", (id) => this.dropMedia(id));
+    // the WebGL context came back after the GPU was reset: every video element is rebuilt too (their decoders were
+    // reset with it), then the frame is drawn again
+    this.renderer.onRestore = () => { this.resetPool(); this.layout(); this.dirty = true; };
     new ResizeObserver(() => this.layout()).observe(stage);
     document.addEventListener("visibilitychange", () => { if (document.hidden) this.pause(); });
     requestAnimationFrame((t) => this.tick(t));
@@ -320,6 +323,9 @@ export class Playback {
     if (!item) return null;
     const rev = kind === "video" && this.reversedReady(clip);
     if (entry && (entry.mediaId !== clip.mediaId || entry.kind !== kind || entry.rev !== rev)) { this.dispose(clip.id); entry = null; }
+    // a media element whose decoder failed (it happens after a GPU reset) never recovers by itself: rebuild it,
+    // at most every 2 s so a file that really is broken doesn't thrash
+    if (entry && entry.el.error && performance.now() - (entry.created || 0) > 2000) { this.dispose(clip.id); entry = null; }
     if (!entry) {
       let el;
       if (kind === "title" || kind === "solid" || kind === "gradient") el = document.createElement("canvas");
@@ -331,9 +337,10 @@ export class Playback {
         if (kind === "video") el.muted = true;
         el.addEventListener("seeked", () => { this.dirty = true; });
         el.addEventListener("loadeddata", () => { this.dirty = true; });
+        el.addEventListener("error", () => { this.dirty = true; });
       }
       if (el.tagName !== "CANVAS") el.src = this.url(item, rev);
-      entry = { el, kind, rev, mediaId: clip.mediaId, used: performance.now(), trackId: null };
+      entry = { el, kind, rev, mediaId: clip.mediaId, used: performance.now(), created: performance.now(), trackId: null };
       this.pool.set(clip.id, entry);
       if (kind === "audio") this.connectAudio(entry);
     }

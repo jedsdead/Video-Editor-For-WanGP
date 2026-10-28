@@ -121,6 +121,20 @@ export class Renderer {
     const gl = canvas.getContext("webgl2", { premultipliedAlpha: true, preserveDrawingBuffer: true, alpha: false, antialias: false });
     if (!gl) throw new Error("WebGL2 is not available in this browser");
     this.gl = gl;
+    this.onRestore = null;
+    // A heavy GPU job (WanGP decoding a generation) can make the browser drop the WebGL context, which leaves the
+    // viewer black until it is rebuilt: keep the context restorable and rebuild everything on restore.
+    canvas.addEventListener("webglcontextlost", (e) => { e.preventDefault(); this.lost = true; });
+    canvas.addEventListener("webglcontextrestored", () => {
+      this.lost = false;
+      this.init();
+      if (this.onRestore) this.onRestore();
+    });
+    this.init();
+  }
+
+  init() {
+    const gl = this.gl;
     this.layer = compile(gl, LAYER_VS, LAYER_FS);
     this.trans = compile(gl, FULL_VS, TRANS_FS);
     this.effect = compile(gl, FULL_VS, EFFECT_FS);
@@ -138,6 +152,7 @@ export class Renderer {
     // a 2x2x2 identity LUT keeps the sampler valid when no LUT is used
     this.emptyLut = this.makeLut(2, new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1]));
     this.fbos = [];
+    this.acc = null;
   }
 
   makeLut(size, rgb) {
@@ -359,6 +374,7 @@ export class Renderer {
   // entries: [{type:'clip', ...layer}], [{type:'transition', kind, p, a, b}] or [{type:'adjust', ...}] in bottom-to-top order
   render(entries) {
     const gl = this.gl;
+    if (this.lost || gl.isContextLost()) return false;
     if (!this.acc) this.setSize(this.canvas.width, this.canvas.height);
     const w = this.canvas.width, h = this.canvas.height;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.acc.fb);
