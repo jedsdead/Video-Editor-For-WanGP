@@ -43,7 +43,9 @@ const plain = (c) => {
 function continues(a, b) {
   if (b.gen?.parent === a.id || a.gen?.child === b.id) return true;
   if ((b.seam?.left?.verdict && b.seam.left.verdict !== "hard cut")) return true;
-  return a.mediaId === b.mediaId && Math.abs(Math.max(a.in, a.out) - Math.min(b.in, b.out)) < 1.5 / M.fps();
+  // judged on the drafts: a clip showing its final would otherwise break the stretch it was rendered in
+  const da = draftTake(a), db = draftTake(b);
+  return da.mediaId === db.mediaId && Math.abs(Math.max(da.in, da.out) - Math.min(db.in, db.out)) < 1.5 / M.fps();
 }
 
 export function stretches() {
@@ -130,19 +132,67 @@ export function applyRender(app, job) {
   toast(added ? `Final render added to ${added} clip${added > 1 ? "s" : ""}${P().settings.showFinal ? "" : " (View → Show final renders to see it)"}` : "A final render finished, but its clips have gone; it was added to the Media panel", added ? "info" : "warn");
 }
 
+// ---------------------------------------------------------------- what to render
+
+// How much of a neighbouring final the new render re-renders and holds fixed at a join, so it carries on out of it.
+const CONTEXT_SECONDS = 1.5;
+const freshFinal = (c) => !!c && finalIndex(c) >= 0 && !isStale(c);
+function finalRange(c) {
+  const fi = finalIndex(c), t = c.takes[fi];
+  return (c.takeIndex || 0) === fi ? { mediaId: c.mediaId, in: Math.min(c.in, c.out), out: Math.max(c.in, c.out) }
+                                   : { mediaId: t.mediaId, in: Math.min(t.in, t.out), out: Math.max(t.in, t.out) };
+}
+function contextOf(c, side) {
+  if (!freshFinal(c)) return null;
+  const r = finalRange(c);
+  const k = Math.min(CONTEXT_SECONDS, r.out - r.in);
+  return side === "before" ? { mediaId: r.mediaId, in: r.out - k, out: r.out } : { mediaId: r.mediaId, in: r.in, out: r.in + k };
+}
+
+// Render units: runs of clips within a stretch. With `clipIds`, the chosen clips; otherwise each stretch's clips
+// without an up-to-date final (or the whole stretch, when it is all final). A run next to a final in its stretch
+// takes that final's frames at the join as fixed context, so the two renders flow into each other.
+export function renderUnits(clipIds) {
+  const units = [];
+  for (const s of stretches()) {
+    let pick;
+    if (clipIds) pick = s.clips.map(c => clipIds.has(c.id));
+    else {
+      pick = s.clips.map(c => !freshFinal(c));
+      if (!pick.some(Boolean)) pick = s.clips.map(() => true);
+    }
+    for (let i = 0; i < s.clips.length; i++) {
+      if (!pick[i]) continue;
+      let j = i;
+      while (j + 1 < s.clips.length && pick[j + 1]) j++;
+      const clips = s.clips.slice(i, j + 1);
+      const before = i > 0 ? s.clips[i - 1] : null, after = j + 1 < s.clips.length ? s.clips[j + 1] : null;
+      units.push({ clips, start: clips[0].start, end: M.clipEnd(clips[clips.length - 1]),
+                   final: clips.every(freshFinal), stale: clips.some(isStale),
+                   contextBefore: contextOf(before, "before"), contextAfter: contextOf(after, "after") });
+      i = j;
+    }
+  }
+  return units;
+}
+
 // ---------------------------------------------------------------- dialog
 
-export async function openRenderDialog(app) {
+export async function openRenderDialog(app, opts = {}) {
   if (!P()) return;
   const gen = await ensureGenSettings();
-  const list = stretches();
-  if (!list.length) { toast("Nothing to render: the main video track has no plain video clips", "warn"); return; }
+  const list = renderUnits(opts.clipIds || null);
+  if (!list.length) {
+    toast(opts.clipIds ? "Final renders work on plain video clips on the main video track" : "Nothing to render: the main video track has no plain video clips", "warn");
+    return;
+  }
   const prefs = (() => { try { return JSON.parse(localStorage.getItem("ve_render") || "{}"); } catch (_) { return {}; } })();
   const fmt = (t) => `${t.toFixed(1)}s`;
   const rows = list.map((s, i) => {
-    const box = el("input", { type: "checkbox", checked: !s.final || s.stale });
+    const box = el("input", { type: "checkbox", checked: !s.final || !!opts.clipIds });
     const names = s.clips.length === 1 ? s.clips[0].name : `${s.clips[0].name} … ${s.clips[s.clips.length - 1].name}`;
-    const note = el("span.dim.small", {}, s.final ? (s.stale ? " · final is out of date" : " · rendered") : "");
+    const joins = [s.contextBefore ? "continues out of the final before it" : "", s.contextAfter ? "runs into the final after it" : ""].filter(Boolean);
+    const note = el("span.dim.small", {}, (s.final ? " · rendered" : s.stale ? " · final is out of date" : "") + (joins.length ? ` · ${joins.join(", ")}` : ""));
     return { s, box, row: el("label.rrow", {}, box, el("span", {}, `${fmt(s.start)}–${fmt(s.end)} · ${s.clips.length} clip${s.clips.length > 1 ? "s" : ""} · ${names}`), note) };
   });
   // refine at twice the draft size (one-phase drafts), or at the draft size when the drafts already had a phase 2
@@ -154,17 +204,18 @@ export async function openRenderDialog(app) {
   const steps = el("input", { type: "number", min: 1, max: 20, step: 1, value: prefs.steps ?? "", placeholder: "clip's", style: { width: "70px" } });
   const vae = el("input", { type: "checkbox", checked: prefs.vaeX2 !== false });
   const keepLoras = el("input", { type: "checkbox", checked: !!prefs.keepLoras });
+  const windowIn = el("input", { type: "number", min: 3, max: 20, step: 1, value: prefs.window || 10, style: { width: "60px" } });
   const prompt = el("textarea.rgprompt", { rows: 4, placeholder: "Leave empty to use the prompt of each stretch's first clip" });
   const note = el("div.dim.small");
   const error = el("div.warn");
   const field = (label, ...children) => el("div.rgfield", {}, el("label.rglabel", {}, label), el("div.rgctl", {}, ...children));
   const body = el("div.rgbody", {},
-    el("div", { style: { marginBottom: "8px" } }, "Refine each continuous stretch of the main track as one piece, at the final size, with the same Turbo LoRA, noise level and steps as your clips' phase 2. Each clip gets a Final take; its draft is kept."),
-    field("Stretches", ...rows.map(r => r.row)),
+    el("div", { style: { marginBottom: "8px" } }, "Refine each continuous stretch of the main track as one piece, at the final size, with the same Turbo LoRA, noise level and steps as your clips' phase 2. Each clip gets a Final take; its draft is kept. Next to a clip that already has a final, the render re-uses that final's frames at the join, so the two flow into each other."),
+    field(opts.clipIds ? "Clips" : "Stretches", ...rows.map(r => r.row)),
     field("Refine at", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, wIn, el("span", {}, "×"), hIn),
       el("label.rrow", {}, vae, el("span", {}, "Decode with the H3 VAE ×2")), note),
     field("Phase 2", el("div", { style: { display: "flex", gap: "10px", alignItems: "center" } },
-      el("span.dim", {}, "noise level start"), strength, el("span.dim", {}, "steps"), steps),
+      el("span.dim", {}, "noise level start"), strength, el("span.dim", {}, "steps"), steps, el("span.dim", {}, "window (s)"), windowIn),
       el("label.rrow", {}, keepLoras, el("span", {}, "Keep the clips' LoRAs in the refine (otherwise only RefMods, references and the Turbo LoRA)"))),
     field("Prompt", prompt),
     error);
@@ -175,6 +226,7 @@ export async function openRenderDialog(app) {
     project: P().name, size: [parseInt(wIn.value, 10), parseInt(hIn.value, 10)], vaeX2: vae.checked,
     strength: strength.value === "" ? null : parseFloat(strength.value), steps: steps.value === "" ? null : parseInt(steps.value, 10),
     prompt: prompt.value.trim(), keepLoras: keepLoras.checked, clips: s.clips.map(c => ({ clipId: c.id, ...draftTake(c) })),
+    contextBefore: s.contextBefore, contextAfter: s.contextAfter, window: parseFloat(windowIn.value) || 10,
     settingsFrom: (s.clips.find(c => M.mediaOf(c)?.has_metadata) || s.clips[0]).mediaId,
   });
   const refresh = debounce(async () => {
@@ -183,7 +235,8 @@ export async function openRenderDialog(app) {
     if (!first) { note.textContent = "Pick at least one stretch."; go.disabled = true; return; }
     try {
       const info = await api("api/render/prepare", { method: "POST", body: request(first.s) });
-      note.textContent = `Phase 1 size ${info.phase1[0]} × ${info.phase1[1]} (the drafts are scaled to it), refined at ${info.size[0]} × ${info.size[1]}, output ${info.output[0]} × ${info.output[1]}. ${info.model}; noise ${info.strength}, ${info.steps} steps${info.loras.length ? `; the clips' LoRAs: ${info.loras.join(", ")}${keepLoras.checked ? " (kept)" : " (left out)"}` : ""}.`;
+      const longest = rows.filter(r => r.box.checked).reduce((a, r) => Math.max(a, r.s.end - r.s.start), 0);
+      note.textContent = `${longest > (parseFloat(windowIn.value) || 10) ? `Longer stretches are refined in overlapping ${windowIn.value}s windows, blended at every step. ` : ""}Phase 1 size ${info.phase1[0]} × ${info.phase1[1]} (the drafts are scaled to it), refined at ${info.size[0]} × ${info.size[1]}, output ${info.output[0]} × ${info.output[1]}. ${info.model}; noise ${info.strength}, ${info.steps} steps${info.loras.length ? `; the clips' LoRAs: ${info.loras.join(", ")}${keepLoras.checked ? " (kept)" : " (left out)"}` : ""}.`;
       if (!strength.value) strength.placeholder = String(info.strength);
       if (!steps.value) steps.placeholder = String(info.steps);
       go.disabled = !info.available || !info.h3?.installed;
@@ -191,11 +244,11 @@ export async function openRenderDialog(app) {
       else if (!info.h3?.installed) error.textContent = "The editor's H3 add-on isn't active in WanGP (restart WanGP).";
     } catch (e) { error.textContent = e.message; go.disabled = true; }
   }, 250);
-  for (const c of [wIn, hIn, vae, keepLoras, strength, steps, ...rows.map(r => r.box)]) c.addEventListener("change", refresh);
+  for (const c of [wIn, hIn, vae, keepLoras, strength, steps, windowIn, ...rows.map(r => r.box)]) c.addEventListener("change", refresh);
   async function submit() {
     const chosen = rows.filter(r => r.box.checked);
     if (!chosen.length) return;
-    try { localStorage.setItem("ve_render", JSON.stringify({ width: +wIn.value, height: +hIn.value, vaeX2: vae.checked, strength: strength.value === "" ? null : +strength.value, steps: steps.value === "" ? null : +steps.value, keepLoras: keepLoras.checked })); } catch (_) { /* ignore */ }
+    try { localStorage.setItem("ve_render", JSON.stringify({ width: +wIn.value, height: +hIn.value, vaeX2: vae.checked, strength: strength.value === "" ? null : +strength.value, steps: steps.value === "" ? null : +steps.value, keepLoras: keepLoras.checked, window: parseFloat(windowIn.value) || 10 })); } catch (_) { /* ignore */ }
     go.disabled = true;
     let queued = 0;
     for (const r of chosen) {

@@ -505,6 +505,8 @@ function contextMenu(x, y, hit) {
       hit.row.kind === "video" ? { label: "Freeze frame at playhead", kbd: "Shift+F", disabled: M.isStill(clip), action: freezeFrame } : null,
       hit.row.kind === "video" ? { label: "Detect shots…", kbd: "Shift+D", disabled: M.isStill(clip), action: () => openShotDetect(app, clip.id) } : null,
       ...regenItems(clip, hit.row),
+      hit.row.kind === "video" && hit.row.track.id === M.primaryId() ? { label: state.selection.size > 1 ? "Render final (selected clips)…" : "Render final (this clip)…",
+        disabled: M.isStill(clip), action: () => openRenderDialog(app, { clipIds: new Set(state.selection) }) } : null,
       hit.row.kind === "video" ? { label: "Grade & effects", submenu: [
         { label: "Copy grade", kbd: K("Ctrl+Alt+C"), action: copyGrade },
         { label: "Paste grade", kbd: K("Ctrl+Alt+V"), action: pasteGrade },

@@ -880,6 +880,26 @@ class RegenService:
         fps = caps["fps"]
         frames = 0
         parts = []
+        pins = []
+
+        def context(side):
+            # the neighbouring final's frames at the join: rendered again and held to what that final shows, so the
+            # new render continues out of it (or into it) instead of meeting it at a cut
+            nonlocal frames
+            ctx = req.get(side)
+            if not ctx:
+                return
+            item = self._item(ctx["mediaId"])
+            a, b = sorted((float(ctx["in"]), float(ctx["out"])))
+            n = int(round((b - a) * fps))
+            if n < 9:
+                return
+            parts.append({"clipId": None, "context": side, "path": item["path"], "start": a, "frames": n, "offset": frames,
+                          "prompt": "", "end": b})
+            pins.append({"frame0": frames, "frame1": frames + n, "side": side})
+            frames += n
+
+        context("contextBefore")
         for c in clips:
             item = self._item(c["mediaId"])
             a, b = sorted((float(c["in"]), float(c["out"])))
@@ -889,12 +909,10 @@ class RegenService:
             parts.append({"clipId": c.get("clipId"), "path": item["path"], "start": a, "frames": n, "offset": frames,
                           "prompt": (self._meta(item) or {}).get("prompt") or "", "end": b})
             frames += n
-        if frames < 5:
+        if not any(p["clipId"] is not None for p in parts):
             raise ValueError("The stretch is too short to render")
+        context("contextAfter")
         total = C.legal_total(frames, minimum=caps["framesMinimum"])
-        window_max = int(((model_def or {}).get("sliding_window_defaults") or {}).get("window_max") or 0)
-        if window_max and total > window_max:
-            raise ValueError(f"This stretch is {total / fps:.1f}s; this first version renders up to {window_max / fps:.1f}s in one piece")
         width, height = (int(v) for v in req.get("size") or (0, 0))
         if width < 64 or height < 64:
             raise ValueError("Choose the final size")
@@ -902,8 +920,10 @@ class RegenService:
         strength = float(req.get("strength") if req.get("strength") is not None else (meta.get("switch_threshold") or 0.6))
         steps2 = int(req.get("steps") or meta.get("num_inference_steps2") or 3)
         prompt = strip_window_commands(req.get("prompt")) or stretch_prompt(
-            [(p["prompt"], p["start"], p["end"], p["offset"] / fps) for p in parts], fps)
-        return {"settings": settings, "model_def": model_def, "fps": fps, "parts": parts, "frames": frames, "total": total,
+            [(p["prompt"], p["start"], p["end"], p["offset"] / fps) for p in parts if p["clipId"] is not None], fps)
+        window = max(3.0, float(req.get("window") or 10.0))
+        return {"settings": settings, "model_def": model_def, "fps": fps, "parts": parts, "frames": frames, "total": total, "pins": pins,
+                "window": window, "overlap": max(1.0, min(window / 3, float(req.get("overlap") or 2.0))),
                 "width": width, "height": height, "strength": max(0.05, min(1.0, strength)), "steps": max(1, steps2),
                 "vae_x2": bool(req.get("vaeX2")), "prompt": prompt, "refmods": refmods, "meta": meta}
 
@@ -912,6 +932,8 @@ class RegenService:
         meta = plan["meta"]
         ok, reason = self.host.available()
         return {"available": ok, "reason": reason, "frames": plan["frames"], "total": plan["total"], "fps": plan["fps"],
+                "context": [p["side"] for p in plan["pins"]],
+                "windows": max(1, math.ceil((plan["total"] / plan["fps"] - plan["overlap"]) / (plan["window"] - plan["overlap"]))),
                 "seconds": plan["frames"] / plan["fps"], "size": [plan["width"], plan["height"]],
                 "phase1": [max(32, round(plan["height"] / 2 / 32) * 32), max(32, round(plan["width"] / 2 / 32) * 32)][::-1],
                 "output": [plan["width"] * (2 if plan["vae_x2"] else 1), plan["height"] * (2 if plan["vae_x2"] else 1)],
@@ -950,12 +972,17 @@ class RegenService:
             # and references stay; WanGP's phase-2 Turbo is automatic, and plugin settings such as its multiplier stay.
             task["activated_loras"] = []
             task["loras_multipliers"] = ""
-        spec = {"mode": "render", "draft": draft, "frames": plan["frames"], "pins": []}
+        spec = {"mode": "render", "draft": draft, "frames": plan["frames"], "size": [plan["width"], plan["height"]],
+                "window_seconds": plan["window"], "overlap_seconds": plan["overlap"], "pins": [], "holds": plan["pins"]}
+        if plan["pins"]:
+            # the same stretch at the refine size, for encoding the held frames at full detail
+            spec["pinvideo"] = os.path.join(folder, "pins.mp4")
+            write_draft(spec["pinvideo"], plan["parts"], plan["total"], plan["fps"], plan["width"], plan["height"])
         with open(os.path.join(folder, "task.json"), "w", encoding="utf-8") as handle:
             json.dump({"settings": task, "plugin_data": {"video_editor": spec}}, handle, indent=1, default=str)
         job = {"id": job_id, "status": "queued", "progress": 0.0, "message": "Queued in WanGP…", "created": time.time(),
                "project": req.get("project"), "kind": "render", "seed": seed, "mode": "render",
-               "parts": [{"clipId": p["clipId"], "offset": p["offset"], "frames": p["frames"]} for p in plan["parts"]],
+               "parts": [{"clipId": p["clipId"], "offset": p["offset"], "frames": p["frames"]} for p in plan["parts"] if p["clipId"] is not None],
                "fps": plan["fps"], "frames": plan["frames"], "strength": plan["strength"],
                "size": [plan["width"], plan["height"]], "vaeX2": plan["vae_x2"], "draftSig": req.get("draftSig"),
                "prompt": plan["prompt"], "model": self.host.model_name(plan["settings"].get("model_type")), "media": None, "error": None,

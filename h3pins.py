@@ -704,6 +704,107 @@ def _impl_encode_source(vae, inner, source, *args, **kwargs):
     return latents
 
 
+def render_windows(latent_t, window_latents, overlap_latents):
+    """Overlapping windows over `latent_t` latents for a final render: each starts on H3's 5-latent cycle (a window that
+    starts mid-cycle paints a flicker every 17 frames) and is 2 + 5n latents long, like a real video; the last one
+    ends on the last latent. Returns [(start, end)]."""
+    if latent_t <= window_latents:
+        return [(0, latent_t)]
+    stride = max(LATENTS_PER_CLIP, (window_latents - overlap_latents) // LATENTS_PER_CLIP * LATENTS_PER_CLIP)
+    last = latent_t - window_latents
+    last -= last % LATENTS_PER_CLIP          # latent_t is 2 + 5k, so the last window is 2 + 5n long too
+    regular = list(range(0, last, stride))
+    if (len(regular) > 1 and last - regular[-1] < stride // 2
+            and regular[-2] + window_latents - last >= LATENTS_PER_CLIP):
+        regular.pop()                        # the end window already covers most of it
+    starts = sorted(set(regular + [last]))
+    return [(a, a + window_latents) for a in starts[:-1]] + [(last, latent_t)]
+
+
+def window_weights(start, end, latent_t, ramp):
+    """Blend weights for a window's latents: 1 inside, ramping up from its left edge and down to its right edge over
+    `ramp` latents, except where the window meets the start or end of the whole latent."""
+    import numpy as np
+    n = end - start
+    w = np.ones(n, dtype=np.float32)
+    ramp = max(1, int(ramp))
+    if start > 0:
+        w[:ramp] = np.minimum(w[:ramp], (np.arange(ramp, dtype=np.float32)[:n] + 1) / (ramp + 1))
+    if end < latent_t:
+        w[n - ramp:] = np.minimum(w[n - ramp:], (np.arange(ramp, 0, -1, dtype=np.float32)[-min(n, ramp):]) / (ramp + 1))
+    return w
+
+
+def _impl_transformer_forward(self, inner, video_x, audio_x, sigma_video, sigma_audio, context, payload, *args, **kwargs):
+    """A final render's long latent, sampled in overlapping windows (each with its neighbours in view, nothing
+    committed ahead of them) and the windows' predictions blended at every step: no seams, and memory for one window."""
+    record = _GEN.get()
+    spec = (record or {}).get("render") if record else None
+    if not spec or not isinstance(payload, dict) or video_x.dim() != 5 or payload.get("target_video_order") is not None:
+        return inner(self, video_x, audio_x, sigma_video, sigma_audio, context, payload, *args, **kwargs)
+    import torch
+    if not record.get("render_phase2"):
+        # phase 1's result is replaced by the drafts before phase 2: don't spend a pass of the model on it
+        _count("render_phase1_skipped")
+        return torch.zeros_like(video_x), torch.zeros_like(audio_x)
+    fps = float(record.get("fps") or 24)
+    latent_t = int(video_x.shape[2])
+    window_frames = float(spec.get("window_seconds") or 10.0) * fps
+    window_latents = 2 + max(1, int(round((window_frames - 5) / GRID))) * LATENTS_PER_CLIP
+    overlap_latents = max(LATENTS_PER_CLIP, int(round(float(spec.get("overlap_seconds") or 2.0) * fps / GRID * LATENTS_PER_CLIP)))
+    windows = render_windows(latent_t, window_latents, overlap_latents)
+    if "render_pins" not in record:
+        record["render_pins"] = _render_pins(record, latent_t, int(video_x.shape[-2]), int(video_x.shape[-1])) if spec.get("holds") else []
+    if len(windows) == 1:
+        video_v, audio_v = inner(self, video_x, audio_x, sigma_video, sigma_audio, context, payload, *args, **kwargs)
+        return _hold_pins(record, video_x, video_v, sigma_video), audio_v
+    alf = AUDIO_LATENT_FPS
+    tail = int(getattr(_pipeline_module(), "H3_AUDIO_TAIL_LATENTS", 5))
+    audio_total = int(audio_x.shape[-1])
+    per_frame = sigma_video.numel() == latent_t
+    out = torch.zeros_like(video_x, dtype=torch.float32)
+    weight_sum = torch.zeros(latent_t, dtype=torch.float32, device=video_x.device)
+    for start, end in windows:
+        n = end - start
+        frames = 5 + (n - 2) // LATENTS_PER_CLIP * GRID
+        frame0 = start // LATENTS_PER_CLIP * GRID
+        a0 = min(audio_total - 1, int(round(frame0 / fps * alf)))
+        a1 = min(audio_total, a0 + int(round(frames / fps * alf)) + tail)
+        window_payload = dict(payload)
+        # a fresh layout and rope for the window's length; keyframes belong to the whole clip's timeline
+        for key in ("layout_signature", "layout", "rope", "graph_input_indices", "keyframes", "audio_keyframes"):
+            window_payload.pop(key, None)
+        window_payload.update(frame_count=frames, target_audio_condition_latents=a1 - a0)
+        sigma = sigma_video.reshape(-1)[start:end] if per_frame else sigma_video
+        # step caches (spectrum, first-block) would mix the windows up: each window runs the model in full
+        video_v, _ = inner(self, video_x[:, :, start:end].contiguous(), audio_x[..., a0:a1].contiguous(), sigma, sigma_audio,
+                           context, window_payload)
+        w = torch.from_numpy(window_weights(start, end, latent_t, overlap_latents)).to(video_x.device)
+        out[:, :, start:end] += video_v.float() * w.view(1, 1, -1, 1, 1)
+        weight_sum[start:end] += w
+        _count("render_window")
+    out /= weight_sum.clamp(min=1e-6).view(1, 1, -1, 1, 1)
+    # the soundtrack is frozen in phase 2 (and phase 1's is thrown away): no audio prediction is needed
+    return _hold_pins(record, video_x, out.to(video_x.dtype), sigma_video), torch.zeros_like(audio_x)
+
+
+def _hold_pins(record, video_x, video_v, sigma_video):
+    """Steer the pinned latents to their known values: the sampler's denoised estimate is x + sigma * v, so
+    v = (target - x) / sigma lands them there exactly while the model still sees them as part of the shot."""
+    pins = record.get("render_pins") or []
+    if not pins:
+        return video_v
+    sigma = float(sigma_video.reshape(-1).max())
+    if sigma <= 1e-5:
+        return video_v
+    video_v = video_v.clone()
+    for first, end, target in pins:
+        x = video_x[:, :, first:end].float()
+        video_v[:, :, first:end] = ((target.to(x.device) - x) / sigma).to(video_v.dtype)
+    _count("render_pinned")
+    return video_v
+
+
 def _impl_layout(self, inner, text_tags, latent_t, latent_h, latent_w, audio_t, payload, *args, **kwargs):
     record = _GEN.get()
     plan = record.get("plan") if record else None
@@ -833,6 +934,45 @@ def _render_source(record, normalized):
     return ((latents.to(torch.bfloat16) - mean) / std).to(normalized.dtype)
 
 
+PIN_LEAD_LATENTS = 8    # latents of lead-in encoded ahead of a pinned stretch, so the causal VAE's state settles
+
+
+def pin_latents(frame0, frame1):
+    """The latents lying wholly inside frames [frame0, frame1): latent 0 is frame 0, latent i (i >= 1) is frames
+    4i-3 .. 4i. Returns (first, end) with end exclusive."""
+    first = 0 if frame0 <= 0 else (frame0 + 3 + 3) // 4
+    end = (frame1 - 1) // 4 + 1
+    return first, max(first, end)
+
+
+def _render_pins(record, latent_t, lh, lw):
+    """Encoded latents (at the refine size) of the stretches a final render must reproduce exactly: the neighbouring
+    finals' frames either side, so the new render picks up where they leave off and hands over where they begin."""
+    import torch
+    pm = _pipeline_module()
+    pipeline = record["pipeline"]
+    spec = record["render"]
+    fps = float(record["fps"])
+    pins = []
+    for pin in spec.get("holds") or []:
+        first, end = pin_latents(int(pin["frame0"]), int(pin["frame1"]))
+        end = min(end, latent_t)
+        if end <= first:
+            continue
+        lead = max(0, first - PIN_LEAD_LATENTS)
+        frame_start = 0 if lead == 0 else 4 * lead      # a latent's last frame: encoding from it keeps the grid
+        count = 4 * (end - 1) - frame_start + 1
+        frames = read_frames(spec["pinvideo"], frame_start / fps, count, fps, lw * 16, lh * 16)
+        latents = pm._encode_video_source(pipeline.vae, frames, pipeline.device, None)
+        latents = latents.to(device=pipeline.device, dtype=torch.float32)
+        got = latents[:, :, first - lead:end - lead]
+        if got.shape[2] != end - first or tuple(got.shape[-2:]) != (lh, lw):
+            raise ValueError(f"pinned frames encoded to {tuple(got.shape)}, expected {end - first} latents at {(lh, lw)}")
+        pins.append((first, end, got))
+        _log(f"final render: latents {first}-{end} held to the neighbouring final")
+    return pins
+
+
 def _capture_phase_1(module, args):
     record = _GEN.get()
     if record is None or _JOB.get() is None or not args:
@@ -840,6 +980,11 @@ def _capture_phase_1(module, args):
     if record.get("render"):
         try:
             replaced = _render_source(record, args[0])
+            spec = record["render"]
+            if spec.get("holds") and spec.get("size"):
+                width, height = (int(v) for v in spec["size"])
+                record["render_pins"] = _render_pins(record, int(replaced.shape[2]), -(-height // 16), -(-width // 16))
+            record["render_phase2"] = True
             _count("render_source")
             _log(f"final render: phase 2 refines the drafts ({replaced.shape[2]} latents at {tuple(replaced.shape[-2:])})")
             return (replaced,) + tuple(args[1:])
@@ -1088,7 +1233,9 @@ def _patch_models():
         return False
     _IMPLS.update({"generate": _impl_generate, "prepare_condition_rows": _impl_prepare_condition_rows,
                    "video_decode": _impl_video_decode, "audio_decode": _impl_audio_decode, "layout": _impl_layout,
-                   "encode_source": _impl_encode_source})
+                   "encode_source": _impl_encode_source, "transformer_forward": _impl_transformer_forward})
+    if transformer_class is not None and "forward" in transformer_class.__dict__:
+        owners["transformer_forward"] = (transformer_class, "forward")
     if hasattr(pm, "_encode_video_source"):
         owners["encode_source"] = (pm, "_encode_video_source")
     else:
