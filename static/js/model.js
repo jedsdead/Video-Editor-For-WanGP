@@ -166,7 +166,7 @@ export function srcTime(clip, tau) {
   return clip.reverse ? clip.out - consumed(clip, tau) : clip.in + consumed(clip, tau);
 }
 // Clip time needed to consume `length` seconds of source.
-function tauForLength(clip, length) {
+export function tauForLength(clip, length) {
   if (hasSpeedKeys(clip)) return K.solveIntegral(keysOf(clip, "speed"), length);
   return length / speeds(clip)[0];
 }
@@ -857,6 +857,51 @@ export function setTrackKeyEase(trackId, index, ease) { const tr = getTrack(trac
 export function moveTrackKey(trackId, index, t, value) { const tr = getTrack(trackId); if (tr) storeTrackKeys(tr, KeyOps.move(trackKeys(tr), index, t, value, 1e9)); }
 export function offsetTrackKeys(trackId, indices, delta) { const tr = getTrack(trackId); if (tr) storeTrackKeys(tr, KeyOps.offset(trackKeys(tr), indices, delta, [-60, 12])); }
 export function clearTrackKeys(trackId) { const tr = getTrack(trackId); if (tr) storeTrackKeys(tr, []); }
+
+// ------------------------------------------------------------------ shot detection
+// Clip time (from the clip start) at which a source time is shown.
+export function clipTimeForSource(clip, src) {
+  return tauForLength(clip, clip.reverse ? clip.out - src : src - clip.in);
+}
+
+// Split a clip (and its aligned linked audio) at cuts ({t: source time, keys: ["W1S2", ...]}), then label every piece
+// as a shot. `shots` is the prompt's shot list: a piece gets the shot matched to the cut that starts it (the first shot
+// for the opening piece) plus any shot that continues without a cut inside it. Pieces are named "Name · Shot N".
+export function splitIntoShots(clipId, cuts, shots = []) {
+  cuts = cuts.map(c => (typeof c === "number" ? { t: c, keys: [] } : c));
+  const srcTimes = cuts.map(c => c.t);
+  const clip = getClip(clipId);
+  if (!clip) return [];
+  const base = clip.name || (mediaOf(clip) || {}).name || "Clip";
+  const mediaId = clip.mediaId;
+  const start = clip.start, end = clipEnd(clip);
+  const tracks = new Set([clip.trackId, ...partners(clip).filter(p => Math.abs(p.start - start) < 1e-3).map(p => p.trackId)]);
+  const times = srcTimes.map(src => start + clipTimeForSource(clip, src))
+    .filter(t => t > start + frameDur() / 2 && t < end - frameDur() / 2).sort((a, b) => a - b);
+  for (const t of times) {
+    const ids = new Set(P().clips.filter(c => c.mediaId === mediaId && tracks.has(c.trackId) && c.start < t - EPS && clipEnd(c) > t + EPS).map(c => c.id));
+    splitAt(snapFrame(t), { ids });
+  }
+  const pieces = P().clips.filter(c => c.mediaId === mediaId && tracks.has(c.trackId) && c.start >= start - 1e-3 && clipEnd(c) <= end + 1e-3);
+  const videoPieces = pieces.filter(c => c.trackId === clip.trackId).sort((a, b) => a.start - b.start);
+  const keyOf = (s) => `W${s.window}S${s.shot}`;
+  const matched = new Set(cuts.flatMap(c => c.keys || []));
+  const ordered = shots.slice().sort((x, y) => x.start - y.start);
+  videoPieces.forEach((piece, i) => {
+    const a = srcTime(piece, 0), b = srcTime(piece, clipDur(piece));
+    const lo = Math.min(a, b), hi = Math.max(a, b);
+    const startSrc = a;   // where this piece begins in playback order
+    const cut = cuts.find(c => Math.abs(c.t - startSrc) < frameDur());
+    const primary = cut && cut.keys?.length ? ordered.filter(s => cut.keys.includes(keyOf(s)))
+      : i === 0 ? ordered.filter(s => !matched.has(keyOf(s))).slice(0, 1) : [];
+    // shots that begin inside this piece without a cut of their own (e.g. a window continuing the same camera)
+    const continuing = ordered.filter(s => !matched.has(keyOf(s)) && s.start > lo + frameDur() && s.start < hi - frameDur() && !primary.includes(s));
+    const info = { index: i + 1, count: videoPieces.length, source: [lo, hi], shots: [...primary, ...continuing] };
+    const name = `${base} · Shot ${i + 1}`;
+    for (const c of pieces.filter(c => Math.abs(c.start - piece.start) < 1e-3)) { c.shotInfo = info; c.name = name; }
+  });
+  return videoPieces;
+}
 
 // ------------------------------------------------------------------ reverse, freeze frame, markers
 

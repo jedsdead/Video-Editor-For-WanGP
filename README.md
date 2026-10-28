@@ -2,7 +2,7 @@
 
 A multi-track video editor that runs as a plugin inside [WanGP](https://github.com/deepbeepmeep/Wan2GP), in its own tab. Cut your generations together, grade them, mix the audio and export, without leaving WanGP.
 
-**Version 0.4** · by jedsdeadbaby · MIT licence
+**Version 0.5** · by jedsdeadbaby · MIT licence
 
 ## Features
 
@@ -14,6 +14,7 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - **Markers (Shift+M):** named, coloured markers on the ruler and in a Markers panel. Drag to move, double-click to rename; ↑/↓ and snapping include them.
 - **Shuttle (J/K/L):** play backwards or forwards, pressing again for 2x, 4x and 8x. Audio scrubbing plays a short burst as you drag the playhead or step frames.
 - **Freeze frame (Shift+F)** inserts a held frame at the playhead, and **Reverse (Shift+R)** plays clips backwards (with their audio).
+- **Shot detection (Shift+D, or right-click a clip):** finds the cuts inside a clip and splits it into shots after you review them. For WanGP generations whose prompt has a shot list (`[/duration=…]` windows with `[Shot N] At mm:ss`), each detected cut is matched to the shot that asked for it, and every piece carries its shot text into the Inspector, ready for regeneration later.
 
 **Keyframes**
 - Keyframe volume, opacity, scale, position, rotation, crop, speed and the colour grade. Each keyframe eases to the next with Linear, Ease in, Ease out, S-curve, Fast start, Slow start or Hold.
@@ -61,7 +62,7 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 
 **WanGP integration**
 - Browse WanGP's output folders and import files in place, with nothing copied.
-- Clips that WanGP generated show their prompt, seed and settings in the Inspector.
+- Clips that WanGP generated show their prompt, seed and settings in the Inspector, and after shot detection, each shot's own text.
 
 **Export**
 - H.264, H.265, H.264 NVENC or ProRes 422 HQ, at any resolution and frame rate.
@@ -135,7 +136,7 @@ The editor is a web page served by WanGP through the plugin web-app API and show
 
 ## Roadmap
 
-- **Regenerate a shot:** pick a clip and regenerate it in WanGP from its saved prompt and settings, then drop the result back in place.
+- **Regenerate a shot:** right-click a shot to regenerate it with the same or a new seed, from its saved settings or the current Media Generator settings, optionally from a start frame; new results arrive as takes. Plus *Extend shot* (continue from its last frames) and *Regenerate longer*.
 - Multicam editing, nested sequences, audio noise reduction.
 
 ## Licence

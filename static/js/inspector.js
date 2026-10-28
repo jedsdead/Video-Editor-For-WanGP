@@ -104,6 +104,10 @@ export class Inspector {
       this.section(`${clips.length} clips selected`, el("div.dim", {}, "Changes apply to every selected clip of the matching kind."));
     }
 
+    // a shot and its linked audio share the same shot details: show them once
+    const shotClip = clips.find(c => c.shotInfo && M.trackKind(c.trackId) === "video") || clips.find(c => c.shotInfo);
+    if (shotClip && clips.every(c => c.mediaId === shotClip.mediaId && c.shotInfo?.index === shotClip.shotInfo.index)) this.renderShot(shotClip);
+
     if (video.length) {
       const pw = P().settings.width, ph = P().settings.height;
       this.defaults = { Opacity: 100, Scale: 100, "Position X": 0, "Position Y": 0 };
@@ -245,6 +249,22 @@ export class Inspector {
     update();
     this.refreshers.push(update);
     return el("div.field.wide", {}, el("label", {}, "Direction"), el("label", { style: { display: "flex", gap: "6px", alignItems: "center", color: "inherit" } }, box, "Reverse (play backwards)"));
+  }
+
+  // ---------------------------------------------------------------- shots (from Detect shots)
+  renderShot(clip) {
+    const info = clip.shotInfo;
+    const [a, b] = info.source || [0, 0];
+    const parts = [el("div.kv", {}, el("span", {}, "Shot"), el("span", {}, `${info.index} of ${info.count}`),
+      el("span", {}, "Source"), el("span", {}, `${a.toFixed(2)}s – ${b.toFixed(2)}s`))];
+    if (!info.shots?.length) parts.push(el("div.dim", { style: { fontSize: "11px", marginTop: "6px" } }, "Found from the picture. This clip's prompt has no shot list."));
+    for (const s of info.shots || []) {
+      parts.push(el("div.dim", { style: { fontSize: "11px", margin: "8px 0 3px" } }, `Prompt: window ${s.window}, shot ${s.shot}`),
+        el("div.prompt-box", {}, s.text),
+        el("div.btnrow", {}, el("button.small", { onclick: () => navigator.clipboard?.writeText(s.text).then(() => toast("Shot text copied")) }, "Copy shot text")));
+    }
+    parts.push(el("div.dim", { style: { fontSize: "11px", marginTop: "6px" } }, "Regenerating a shot from these details is coming in a later version."));
+    this.section("Shot", ...parts);
   }
 
   // ---------------------------------------------------------------- titles

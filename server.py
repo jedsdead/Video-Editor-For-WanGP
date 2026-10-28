@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from . import luts as L
 from . import media as M
 from . import render as R
+from . import shots as SH
 from . import titles as TT
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -191,6 +192,14 @@ def create_app(get_config):
         if not path:
             raise HTTPException(404, "Reversed preview not ready")
         return FileResponse(path)
+
+    @app.get("/api/media/{media_id}/shots")
+    def media_shots(media_id: str):
+        _item(media_id)
+        try:
+            return SH.analyse(service.registry, media_id)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
 
     @app.get("/api/media/{media_id}/original")
     def media_original(media_id: str):

@@ -16,6 +16,7 @@ import { openExportDialog } from "./exportdialog.js";
 import { CURVES, FADE_CURVES } from "./keys.js";
 import { TransformOverlay } from "./transform.js";
 import { MarkersPanel } from "./markers.js";
+import { openShotDetect } from "./shotdetect.js";
 
 const $ = (id) => document.getElementById(id);
 const app = { status: {} };
@@ -227,6 +228,12 @@ function freezeFrame() {
 }
 app.freezeFrame = freezeFrame;
 
+function detectShots() {
+  const clip = M.selectedClips().find(c => M.trackKind(c.trackId) === "video" && !M.isStill(c));
+  if (!clip) { toast("Select a video clip to detect its shots", "warn"); return; }
+  openShotDetect(app, clip.id);
+}
+
 function toggleReverse() {
   const clips = M.selectedClips().filter(c => !M.isStill(c));
   if (!clips.length) { toast("Select clips to reverse", "warn"); return; }
@@ -300,6 +307,7 @@ function menuItems(name) {
     { label: "Freeze frame at playhead", kbd: "Shift+F", action: freezeFrame },
     { label: "Reverse selected clips", kbd: "Shift+R", action: toggleReverse },
     { label: "Add title at playhead", kbd: "Shift+T", action: () => app.bin.addTitle() },
+    { label: "Detect shots in selected clip…", kbd: "Shift+D", action: detectShots },
     "-",
     { label: "Mark in", kbd: "I", action: setIn },
     { label: "Mark out", kbd: "O", action: setOut },
@@ -428,6 +436,7 @@ function contextMenu(x, y, hit) {
       { label: "Reset speed to 100%", disabled: M.isStill(clip), action: () => M.edit("Reset speed", () => M.setSpeed([...state.selection], 1)) },
       { label: clip.reverse ? "Play forwards" : "Reverse", kbd: "Shift+R", disabled: M.isStill(clip), action: toggleReverse },
       hit.row.kind === "video" ? { label: "Freeze frame at playhead", kbd: "Shift+F", disabled: M.isStill(clip), action: freezeFrame } : null,
+      hit.row.kind === "video" ? { label: "Detect shots…", kbd: "Shift+D", disabled: M.isStill(clip), action: () => openShotDetect(app, clip.id) } : null,
       hit.row.kind === "video" ? { label: "Copy grade", action: copyGrade } : null,
       hit.row.kind === "video" ? { label: "Paste grade", action: pasteGrade } : null,
       "-",
@@ -457,7 +466,7 @@ function contextMenu(x, y, hit) {
 function showShortcuts() {
   const rows = [
     ["Space", "Play / pause"], ["J / K / L", "Shuttle back / stop / forward (press again for 2x, 4x, 8x)"], ["← / →", "Previous / next frame (Shift: 1 second)"],
-    ["Shift+M", "Add a marker"], ["Shift+F", "Freeze frame at the playhead"], ["Shift+R", "Reverse selected clips"], ["Shift+T", "Add a title"], ["C", "Crop handles on the viewer"],
+    ["Shift+D", "Detect shots in the selected clip"], ["Shift+M", "Add a marker"], ["Shift+F", "Freeze frame at the playhead"], ["Shift+R", "Reverse selected clips"], ["Shift+T", "Add a title"], ["C", "Crop handles on the viewer"],
     ["↑ / ↓", "Previous / next edit point"], ["Home / End", "Start / end of timeline"], ["I / O, Alt+X", "Mark in / out, clear"],
     ["V / B / R", "Select / Blade / Range tool"], ["S / M", "Snapping / Magnetic timeline"], [K("Ctrl+Shift+L"), "Linked selection"],
     [K("Ctrl+B"), "Split at playhead (selected clips, or all)"], ["Del / Shift+Del", "Delete / ripple delete (clips, range or transition)"],
@@ -517,6 +526,7 @@ function onKey(e) {
     case "m": case "M": handled(); e.shiftKey ? addMarker() : toggleMagnetic(); break;
     case "f": case "F": if (e.shiftKey) { handled(); freezeFrame(); } break;
     case "t": case "T": if (e.shiftKey) { handled(); app.bin.addTitle(); } break;
+    case "d": case "D": if (e.shiftKey) { handled(); detectShots(); } break;
     case "Delete": case "Backspace": handled(); deleteSelection(e.shiftKey); break;
     case "Escape": M.clearSelection(); state.range = null; bus.emit("range"); break;
     case "+": case "=": handled(); app.timeline.setZoom(app.timeline.pps * 1.4); break;
