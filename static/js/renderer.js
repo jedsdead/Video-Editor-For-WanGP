@@ -40,7 +40,7 @@ out vec4 o;
 void main() {
   vec4 t = texture(uTex, vUv);
   if (uPremul) { o = t * uAlpha; return; }   // an already premultiplied effect buffer
-  vec3 c = clamp(t.rgb * uLevel, 0.0, 1.0);   // level lock (1,1,1 when off)
+  vec3 c = clamp(t.rgb * uLevel, 0.0, 1.0);   // join match (1,1,1 when off)
   if (uGrade) {
     c = c * uExposure * uWB;
     if (uStyle == 1) {

@@ -797,11 +797,11 @@ class RegenService:
         fps = float(a.get("fps") or b.get("fps") or 24)
         return C.seam_verdict(a["path"], float(req["a"]["end"]), b["path"], float(req["b"]["start"]), fps)
 
-    def level_lock(self, req):
-        """Level-lock gains for a join; req: {a: {mediaId, end}, b: {mediaId, start}, correct: "a" | "b"}."""
+    def join_match(self, req):
+        """Join-match gains for a join; req: {a: {mediaId, end}, b: {mediaId, start}, correct: "a" | "b"}."""
         a, b = self._item(req["a"]["mediaId"]), self._item(req["b"]["mediaId"])
         fps = float((a if req.get("correct") == "a" else b).get("fps") or 24)
-        return C.level_lock(a["path"], float(req["a"]["end"]), b["path"], float(req["b"]["start"]), fps,
+        return C.join_match(a["path"], float(req["a"]["end"]), b["path"], float(req["b"]["start"]), fps,
                             correct="a" if req.get("correct") == "a" else "b")
 
     def list(self, project=None):

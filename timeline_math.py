@@ -166,7 +166,7 @@ def consumed(clip, tau, media_kind=None):
 
 
 def level_at(clip, tau, media_kind=None):
-    """Level-lock gains [r, g, b] for the frame a clip shows at clip time tau, or None (see compose.level_lock)."""
+    """Join-match gains [r, g, b] for the frame a clip shows at clip time tau, or None (see compose.join_match)."""
     level = clip.get("level") or {}
     if not level or level.get("on") is False or level.get("mediaId") != clip.get("mediaId") or is_still(media_kind):
         return None

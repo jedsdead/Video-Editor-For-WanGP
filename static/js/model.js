@@ -231,7 +231,7 @@ export function srcTime(clip, tau) {
   if (isStill(clip)) return 0;
   return clip.reverse ? clip.out - consumed(clip, tau) : clip.in + consumed(clip, tau);
 }
-// Level-lock gains [r, g, b] for the frame a clip shows at clip time tau, or null (see compose.level_lock).
+// Join-match gains [r, g, b] for the frame a clip shows at clip time tau, or null (see compose.join_match).
 export function levelAt(clip, tau) {
   const L = clip.level;
   if (!L || L.on === false || L.mediaId !== clip.mediaId || isStill(clip)) return null;

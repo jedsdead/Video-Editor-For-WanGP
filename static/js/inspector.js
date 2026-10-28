@@ -429,21 +429,21 @@ export class Inspector {
           el("button.small", { title: "Generate this again with a new seed; the result is added as another take", onclick: () => rerollFor(this.app, live()) }, "Reroll…"),
           el("button.small", { title: "Play 2s either side of the join into this clip", onclick: () => previewJoin(live().start) }, "▶ Join in"),
           el("button.small", { title: "Play 2s either side of the join out of this clip", onclick: () => previewJoin(M.clipEnd(live())) }, "▶ Join out"),
-          el("button.small", { title: "Measure the joins (and the level lock) again", onclick: () => { this.app.regen.rateSeams(clip.id); if (live().level?.on !== false) this.app.regen.lockLevels(clip.id); } }, "Re-measure")));
+          el("button.small", { title: "Measure the joins (and the join match) again", onclick: () => { this.app.regen.rateSeams(clip.id); if (live().level?.on !== false) this.app.regen.matchJoins(clip.id); } }, "Re-measure")));
       const lv = live().level;
       const lockBox = el("input", { type: "checkbox", checked: !!lv && lv.on !== false, onchange: (e) => {
-        if (e.target.checked && (!lv || lv.mediaId !== live().mediaId)) { M.edit("Level lock", () => { const l = live(); l.level = { ...(l.level || {}), on: true }; }); this.app.regen.lockLevels(clip.id); }
-        else M.edit("Level lock", () => { const l = live(); l.level = { ...(l.level || {}), on: e.target.checked }; });
+        if (e.target.checked && (!lv || lv.mediaId !== live().mediaId)) { M.edit("Join match", () => { const l = live(); l.level = { ...(l.level || {}), on: true }; }); this.app.regen.matchJoins(clip.id); }
+        else M.edit("Join match", () => { const l = live(); l.level = { ...(l.level || {}), on: e.target.checked }; });
       } });
-      const describe = (part, m, what) => !m ? null : part ? `${what} ${m.step >= 0 ? "+" : ""}${m.step.toFixed(1)} levels` : `${what} fine`;
+      const describe = (part, m, what) => !m ? null : part ? `${what} ${m.offset >= 0 ? "+" : ""}${(m.offset ?? 0).toFixed(1)}%` : `${what} fine`;
       const lvText = !lv ? "off" : lv.mediaId !== live().mediaId ? "measuring…" : [describe(lv.open, lv.measured?.open, "opening"), describe(lv.close, lv.measured?.close, "closing")].filter(Boolean).join(", ") || "nothing to correct";
-      parts.push(el("label.rrow", { title: "Gains the clip's first (and last) ~12 frames onto the level of the footage it joins, fading back to no change" }, lockBox, el("span", {}, `Level lock · ${lvText}`)));
+      parts.push(el("label.rrow", { title: "Corrects the clip's exposure and colour where it meets the footage it joins, fading out over about half a second" }, lockBox, el("span", {}, `Join match · ${lvText}`)));
       if (!live().seam) this.app.regen.rateSeams(clip.id);
     }
     const takes = live().takes || [];
     const rows = takes.map((t, i) => {
       const active = (live().takeIndex || 0) === i;
-      return el(`div.take${active ? ".active" : ""}`, { onclick: () => { if (!active) M.edit("Switch take", () => M.setTake(clip.id, i)); this.app.regen.rateSeams(clip.id); if (live().gen && live().level?.on !== false) this.app.regen.lockLevels(clip.id); } },
+      return el(`div.take${active ? ".active" : ""}`, { onclick: () => { if (!active) M.edit("Switch take", () => M.setTake(clip.id, i)); this.app.regen.rateSeams(clip.id); if (live().gen && live().level?.on !== false) this.app.regen.matchJoins(clip.id); } },
         el("span.takeno", {}, String(i + 1)),
         el("span.takelabel", {}, t.label, t.seed != null ? el("span.dim", {}, ` · seed ${t.seed}`) : null,
           i > 0 ? el("span.dim", {}, ` · ${t.audio === "keep" ? "original audio" : "new audio"}`) : null),

@@ -300,10 +300,10 @@ def create_app(get_config, host=None):
         except (ValueError, KeyError) as error:
             raise HTTPException(400, str(error))
 
-    @app.post("/api/gen/levellock")
-    def gen_level_lock(payload: dict = Body(...)):
+    @app.post("/api/gen/joinmatch")
+    def gen_join_match(payload: dict = Body(...)):
         try:
-            return service.regen.level_lock(payload)
+            return service.regen.join_match(payload)
         except (ValueError, KeyError) as error:
             raise HTTPException(400, str(error))
 

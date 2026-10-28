@@ -788,7 +788,7 @@ class ExportJob:
             rgb = img[:3] if img.shape[0] == 4 else img
             level = T.level_at(clip, tau, tl.kind(clip))
             if level is not None:
-                # level lock: a source correction, so it goes before the clip's own grade
+                # join match: a source correction, so it goes before the clip's own grade
                 rgb = (rgb * torch.tensor(level, dtype=rgb.dtype, device=rgb.device).view(3, 1, 1)).clamp(0, 1)
             rgb = apply_lut(comp.grade(rgb, params), grade)
             img = self._cat(rgb, img[3:4]) if img.shape[0] == 4 else rgb

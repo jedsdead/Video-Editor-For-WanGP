@@ -140,7 +140,7 @@ export async function openGenerate(app, mode, where) {
       pinsBox,
       el("label.rrow", {}, keepCut, el("span", {}, "Keep my exact cuts (pixel grade instead of moving a cut onto H3's grid)")),
       el("label.rrow", {}, carryAudio, el("span", {}, "Carry the pinned audio too")),
-      el("label.rrow", {}, levelLock, el("span", {}, "Level lock: match the new footage's brightness and colour to the clip it joins, over the ~12 frames where continuations step")),
+      el("label.rrow", {}, levelLock, el("span", {}, "Join match: correct the new footage's exposure and colour where it meets the clip it joins, fading out over about half a second")),
       el("label.rrow", {}, crossfade, el("span", {}, "Blend the joins: crossfade across the frames both sides rendered (pinned frames inside the run only)"))),
     field(fresh ? "Length" : "New footage", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seconds, el("span.dim", {}, "seconds")), lengthNote),
     field("Settings", srcClip.row, srcCurrent.row, modelNote),

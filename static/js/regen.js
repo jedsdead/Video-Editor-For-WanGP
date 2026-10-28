@@ -141,8 +141,8 @@ export class RegenJobs {
         M.select([tid]);
         toast(`${job.mode[0].toUpperCase() + job.mode.slice(1)} added${placedNote} · seed ${job.seed}`);
         this.rateSeams(tid);
-        if (job.request?.levelLock !== false) this.lockLevels(tid);
-        else M.edit("Level lock", () => { const l = M.getClip(tid); if (l) delete l.level; });
+        if (job.request?.levelLock !== false) this.matchJoins(tid);
+        else M.edit("Join match", () => { const l = M.getClip(tid); if (l) delete l.level; });
       }
     }
     try { await api(`api/regen/jobs/${job.id}/dismiss`, { method: "POST" }); } catch (_) { /* kept for next time */ }
@@ -180,10 +180,10 @@ export class RegenJobs {
     if (next && job.right && next.id === job.right.clipId) join(clip, next, twoRenderings(after) ? job.trimTail || 0 : 0, "start");
   }
 
-  // Level lock: gain a generated clip's opening (and closing, where it runs into a clip) onto the level of the
-  // footage it joins, for the ~12 frames where a continuation's level steps. Recorded against the clip's media and
+  // Join match: correct a generated clip's exposure and colour where it meets the footage it joins (its opening, and
+  // its closing where it runs into a clip), fading out away from the join. Recorded against the clip's media and
   // source times, so moving or trimming the clip keeps it, and switching takes drops it.
-  async lockLevels(clipId) {
+  async matchJoins(clipId) {
     const clip = M.getClip(clipId);
     if (!clip || clip.reverse || M.trackKind(clip.trackId) !== "video") return;
     // only the joins the generation was made to meet (its lineage), never a hard cut into an unrelated clip
@@ -193,17 +193,17 @@ export class RegenJobs {
     const ask = async (a, b, correct) => {
       if (!a || !b || a.reverse || b.reverse || M.isStill(a) || M.isStill(b)) return null;
       try {
-        return await api("api/gen/levellock", { method: "POST", body: { a: { mediaId: a.mediaId, end: Math.max(a.in, a.out) }, b: { mediaId: b.mediaId, start: Math.min(b.in, b.out) }, correct } });
+        return await api("api/gen/joinmatch", { method: "POST", body: { a: { mediaId: a.mediaId, end: Math.max(a.in, a.out) }, b: { mediaId: b.mediaId, start: Math.min(b.in, b.out) }, correct } });
       } catch (_) { return null; }
     };
     const exact = (place) => { const p = (g.pins || []).find(x => x.place === place); return p && isHeld(p) && p.grade === "latent"; };
     const open = exact("before") ? null : await ask(prev, clip, "b"), close = exact("after") ? null : await ask(clip, next, "a");
     const live = M.getClip(clipId);
     if (!live || live.mediaId !== clip.mediaId) return;
-    M.edit("Level lock", () => {
+    M.edit("Join match", () => {
       const l = M.getClip(clipId);
       l.level = { mediaId: l.mediaId, on: l.level?.on !== false, open: open?.gains ? open : null, close: close?.gains ? close : null,
-                  measured: { open: open && { step: open.step, swing: open.swing, noise: open.noise }, close: close && { step: close.step, swing: close.swing, noise: close.noise } } };
+                  measured: { open: open && { offset: open.offset, noise: open.noise }, close: close && { offset: close.offset, noise: close.noise } } };
     }, { coalesceKey: `lv-${clipId}` });
   }
 

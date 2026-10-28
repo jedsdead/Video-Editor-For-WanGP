@@ -145,96 +145,108 @@ def seam_verdict(path_a, end_a, path_b, start_b, fps, frames=6):
     return {"verdict": verdict, "ratio": round(ratio, 2), "join": round(join, 4), "motion": round(base, 4)}
 
 
-# --------------------------------------------------------------------------- level lock
-# A continuation opens at a slightly different level from the footage it continues (a bias of the model given that
-# context, so re-rolling doesn't fix it); it lasts ~12 frames and then settles. The lock predicts where the earlier
-# clip was heading, and gains the new clip's opening frames per channel onto that, ramping back to no change by frame
-# 12. The same maths mirrored corrects a run's closing frames where it runs into an existing clip. Thresholds and the
-# method follow comfyui-obvpm-timeline's levellock.py (GPL-3.0), measured there over 38 joins.
+# --------------------------------------------------------------------------- join match
+# A generated clip that continues another often opens at a slightly different exposure or colour balance, which then
+# drifts back over its first half second; one arriving on a clip can drift away just before it. Join match measures
+# that offset and corrects it with a per-channel gain that is strongest at the join and decays away from it.
+#
+# Everything is measured in log space (where an exposure change is a constant offset) on small, area-averaged frames:
+#   * the reference: where the footage on the other side of the join is heading at the join - its value at the join
+#     frame plus a robust trend (the median frame-to-frame change), so a shot walking into shade isn't undone;
+#   * the new clip at the join, the same way from its own side;
+#   * the noise: how much the reference side wobbles around its own trend (a robust spread of its frame steps).
+# An offset larger than JM_NOISE_K times the noise (and JM_FLOOR, and visible: JM_LEVELS) is corrected with gain exp(offset * w(d)), where d is
+# the distance in frames from the join and w(d) = exp(-d / JM_TAU), cut off once below 1%. Gains are limited to
+# +-JM_MAX. Small wobble in the corrected frames is smoothed toward a 3-frame median with the same decaying weight.
 
-LOCK_FRAMES = 12
-LOCK_FIT = 12
-STEP_OVER_NOISE, STEP_FLOOR = 3.0, 0.6      # levels 0..255
-SWING_OVER_NOISE, SWING_FLOOR = 3.0, 1.5
-MAX_GAIN = 1.06
+JM_FRAMES = 18           # frames corrected at most (w falls below 1% after ~4.6 * JM_TAU)
+JM_TAU = 4.0             # decay constant, frames
+JM_REF = 8               # frames used for the reference side
+JM_NOISE_K = 2.5
+JM_FLOOR = 0.006         # log units: ~0.6% exposure
+JM_MAX = 0.08            # gains within 0.92 .. 1.08
+JM_LEVELS = 0.75         # smallest difference worth correcting, in 8-bit levels
 
 
-def _channel_means(path, start, count, fps, size=(160, 90)):
+def _log_means(path, start, count, fps, size=(96, 54)):
     w, h = size
     args = [M.ffmpeg_path(), "-v", "error", "-ss", f"{max(0.0, start):.4f}", "-i", path, "-an",
             "-vf", f"fps={fps},scale={w}:{h}:flags=area,format=rgb24", "-frames:v", str(count), "-f", "rawvideo", "-"]
     raw = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **M.popen_kwargs()).stdout
     n = len(raw) // (w * h * 3)
-    return np.frombuffer(raw[:n * w * h * 3], np.uint8).reshape(n, h, w, 3).astype(np.float64).mean(axis=(1, 2))
+    rgb = np.frombuffer(raw[:n * w * h * 3], np.uint8).reshape(n, h, w, 3).astype(np.float64)
+    return np.log(rgb.mean(axis=(1, 2)) / 255.0 + 1e-3)
 
 
-def _line(y):
-    return np.polyfit(np.arange(float(len(y))), y, 1)
+def _value_at_edge(series, at_end, beyond=0):
+    """A (frames, 3) log series' value at its edge frame (at_end: its last, else its first), or `beyond` frames past
+    that edge along its robust trend (the median frame-to-frame change). The median of the three edge frames stands in
+    for the frame one in from the edge, which keeps a single odd frame from deciding the result."""
+    steps = np.diff(series, axis=0)
+    trend = np.median(steps, axis=0) if len(steps) else np.zeros(series.shape[1])
+    if at_end:
+        return np.median(series[-3:], axis=0) + trend * (1 + beyond)
+    return np.median(series[:3], axis=0) - trend * (1 + beyond)
 
 
-def _luma(rgb):
-    return rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722
-
-
-def level_measure(tail, head, frames=LOCK_FRAMES):
-    """tail: the earlier clip's last frames (n, 3); head: the later clip's first frames. None if too short."""
-    if len(tail) < 4 or len(head) < 4:
+def join_offset(reference, new, new_after_ref=True):
+    """Per-channel log offset (reference - new) at the join, and whether it is worth correcting.
+    reference/new: (frames, 3) log series, each in time order. new_after_ref: the new clip starts where the reference
+    ends (an extend), else it ends where the reference starts (a prepend). The reference is projected one frame across
+    the join, onto the new clip's edge frame, and compared with that frame."""
+    if len(reference) < 4 or len(new) < 4:
         return None
-    delta = []
-    for c in range(3):
-        slope, icept = _line(tail[:, c])
-        delta.append(float(slope * len(tail) + icept - _line(head[:, c])[1]))
-    lt, lh = _luma(tail), _luma(head)
-    slope, icept = _line(lt)
-    pred = float(slope * len(lt) + icept)
-    local = float(np.abs(np.diff(lt)).mean())
-    s2, i2 = _line(lh)
-    resid = lh - (s2 * np.arange(float(len(lh))) + i2)
-    step = float(lh[:3].mean() - pred)
-    swing = float(resid.max() - resid.min())
-    return {"delta": delta, "step": step, "swing": swing, "local": local,
-            "do_step": abs(step) > max(STEP_FLOOR, STEP_OVER_NOISE * local),
-            "do_swing": swing > max(SWING_FLOOR, SWING_OVER_NOISE * local)}
-
-
-def level_gains(m, frames, closing=False):
-    """Per-frame (n, 3) gains for a clip's opening (closing=False) or closing frames, or None when nothing needs it."""
-    if not m or not (m["do_step"] or m["do_swing"]):
-        return None
-    n = len(frames)
-    if n < 2:
-        return None
-    ramp = (np.arange(float(n)) + 1.0) / n if closing else 1.0 - np.arange(float(n)) / n
-    out = np.ones((n, 3))
-    for c in range(3):
-        actual = frames[:, c]
-        if m["do_swing"]:
-            s2, i2 = _line(actual)
-            base = s2 * np.arange(float(n)) + i2
-        else:
-            base = actual
-        shift = m["delta"][c] * ramp if m["do_step"] else 0.0
-        desired = base - shift if closing else base + shift
-        with np.errstate(divide="ignore", invalid="ignore"):
-            g = np.where(np.abs(actual) > 1e-6, desired / actual, 1.0)
-        out[:, c] = np.clip(g, 1.0 / MAX_GAIN, MAX_GAIN)
-    return out
-
-
-def level_lock(path_a, end_a, path_b, start_b, fps, correct="b"):
-    """Gains for the join from clip A (ending at end_a seconds of its file) into clip B (starting at start_b).
-    correct="b" corrects B's opening (an extend); "a" corrects A's closing (a run that arrives on B).
-    Returns {"src0", "fps", "gains", "step", "swing"} with src0 the source time of the first corrected frame, or a
-    dict with gains None when the join needs nothing."""
-    tail = _channel_means(path_a, end_a - LOCK_FIT / fps, LOCK_FIT, fps)
-    head = _channel_means(path_b, start_b, LOCK_FRAMES, fps)
-    m = level_measure(tail, head)
-    if correct == "b":
-        gains, src0 = level_gains(m, head[:LOCK_FRAMES]), start_b
+    if new_after_ref:
+        ref_edge = _value_at_edge(reference, at_end=True, beyond=1)
+        new_edge = _value_at_edge(new, at_end=False)
     else:
-        closing = tail[-LOCK_FRAMES:]
-        gains, src0 = level_gains(m, closing, closing=True), end_a - len(closing) / fps
+        ref_edge = _value_at_edge(reference, at_end=False, beyond=1)
+        new_edge = _value_at_edge(new, at_end=True)
+    offset = ref_edge - new_edge
+    # noise: how much the reference wobbles around its own trend (a scene steadily brightening isn't noise)
+    steps = np.diff(reference.mean(axis=1))
+    noise = float(1.4826 * np.median(np.abs(steps - np.median(steps)))) if len(steps) else 0.0
+    bar = max(JM_FLOOR, JM_NOISE_K * noise)
+    # and the difference must be visible: at least JM_LEVELS of 255 on some channel (dark scenes are noisy in log terms)
+    visible = float(np.abs(np.exp(ref_edge) - np.exp(new_edge)).max()) * 255 >= JM_LEVELS
+    return {"offset": offset, "noise": noise, "bar": bar, "correct": bool(np.abs(offset).max() > bar and visible)}
+
+
+def join_gains(m, new, new_after_ref=True):
+    """(frames, 3) multiplicative gains for the new clip's frames nearest the join (its first frames when it follows
+    the reference, its last when it precedes it), or None when the join needs nothing."""
+    if not m or not m["correct"]:
+        return None
+    n = min(len(new), JM_FRAMES)
+    frames = new[:n] if new_after_ref else new[-n:]
+    distance = np.arange(n, dtype=np.float64) if new_after_ref else np.arange(n - 1, -1, -1, dtype=np.float64)
+    weight = np.exp(-distance / JM_TAU)
+    weight[weight < 0.01] = 0.0
+    log_gain = np.clip(m["offset"][None, :] * weight[:, None], -JM_MAX, JM_MAX)
+    # settle wobble: pull each corrected frame toward the median of itself and its neighbours, by the same weight
+    padded = np.concatenate([frames[:1], frames, frames[-1:]])
+    smooth = np.median(np.stack([padded[:-2], padded[1:-1], padded[2:]]), axis=0)
+    log_gain += np.clip((smooth - frames) * weight[:, None], -JM_MAX, JM_MAX)
+    return np.exp(np.clip(log_gain, -JM_MAX, JM_MAX))
+
+
+def join_match(path_a, end_a, path_b, start_b, fps, correct="b"):
+    """Join-match gains for the join from clip A (ending at end_a seconds of its file) into clip B (starting at
+    start_b). correct="b" corrects B's opening (B continues A); "a" corrects A's closing (A runs into B).
+    Returns {"src0", "fps", "gains", "offset", "noise"}: src0 is the source time of the first corrected frame; gains is
+    None when the join needs nothing."""
+    span = max(JM_FRAMES, JM_REF)
+    a = _log_means(path_a, end_a - span / fps, span, fps)
+    b = _log_means(path_b, start_b, span, fps)
+    if correct == "b":
+        m = join_offset(a[-JM_REF:], b, new_after_ref=True)
+        gains, src0 = join_gains(m, b, new_after_ref=True), start_b
+    else:
+        m = join_offset(b[:JM_REF], a, new_after_ref=False)
+        gains = join_gains(m, a, new_after_ref=False)
+        src0 = end_a - (len(gains) if gains is not None else 0) / fps
     info = {"src0": round(src0, 6), "fps": fps, "gains": None if gains is None else np.round(gains, 5).tolist()}
     if m:
-        info.update({"step": round(m["step"], 3), "swing": round(m["swing"], 3), "noise": round(m["local"], 3)})
+        # reported as an exposure-style percentage on the average of the channels
+        info.update({"offset": round(float(np.expm1(m["offset"].mean())) * 100, 2), "noise": round(float(np.expm1(m["noise"])) * 100, 2)})
     return info
