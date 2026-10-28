@@ -76,6 +76,9 @@ def media_kind(path):
     return None
 
 
+PROBE_VERSION = 2      # 2: a video's duration is its picture stream's
+
+
 def probe(path):
     result = run([ffprobe_path(), "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path], timeout=60)
     if result.returncode != 0:
@@ -114,10 +117,13 @@ def probe(path):
         info["width"], info["height"] = width, height
         fps = _fraction(video.get("avg_frame_rate")) or _fraction(video.get("r_frame_rate"))
         info["fps"] = round(fps, 4) if fps and fps < 1000 else 0
-        if kind == "video" and not duration:
-            frames = int(video.get("nb_frames") or 0)
-            if frames and info["fps"]:
-                info["duration"] = round(frames / info["fps"], 4)
+        # a video's length is its picture's: WanGP's outputs can carry a soundtrack a few frames longer than the frames
+        # (Discard Last Frames trims the picture only), and frames past the picture's end can't be shown
+        frames = int(video.get("nb_frames") or 0)
+        picture = _fraction(video.get("duration")) or (frames / info["fps"] if frames and info["fps"] else 0)
+        if kind == "video" and picture and (not duration or picture < duration - 1e-3):
+            info["duration"] = round(picture, 4)
+    info["probe"] = PROBE_VERSION
     return info
 
 
@@ -163,10 +169,27 @@ class MediaRegistry:
             for item in stored.values():
                 if not os.path.isfile(item.get("path", "")):
                     item["missing"] = True
+                else:
+                    item.pop("missing", None)
                 for key in ("proxy", "thumbs", "wave"):
                     if item.get(key) == "pending":
                         item[key] = "stale"
             self.items = stored
+            # older entries took a video's duration from the container (the longer of picture and sound): measure again
+            remeasured = False
+            for media_id, item in stored.items():
+                if item.get("kind") == "video" and item.get("probe") != PROBE_VERSION and not item.get("missing"):
+                    try:
+                        fresh = probe(item["path"])
+                        item["duration"], item["probe"] = fresh["duration"], PROBE_VERSION
+                        remeasured = True
+                    except Exception:
+                        pass
+            if remeasured:
+                try:
+                    self._save()
+                except Exception:
+                    pass
         except FileNotFoundError:
             self.items = {}
         except Exception as error:

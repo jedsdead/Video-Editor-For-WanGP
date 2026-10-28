@@ -740,6 +740,9 @@ class RegenService:
         task = build_task(settings, prompt=prompt, seed=seed, frames=lengths["total"], fps=info["fps"], model_def=model_def)
         if info["pins"]:
             task["sliding_window_size"] = max(int(task.get("sliding_window_size") or 0), lengths["total"])   # one window: pins only apply to window 1
+            # and nothing discarded: Discard Last Frames would cut the end of the run, where an arriving pin sits, and
+            # shift every trim after it
+            task["sliding_window_discard_last_frames"] = 0
         spec = {"pins": [{k: p[k] for k in ("place", "file", "fps", "frames", "start_frame", "sha", "audio", "kind")} for p in info["pins"]],
                 "mode": info["mode"]}
         job_id = uuid.uuid4().hex[:12]

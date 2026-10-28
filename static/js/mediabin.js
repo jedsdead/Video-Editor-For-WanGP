@@ -153,6 +153,14 @@ export class MediaBin {
         if (!info) P().media[id].missing = true;
         else P().media[id] = { ...P().media[id], ...info };
       }
+      // a video measured shorter than before (its picture, not a longer soundtrack): pull clips back inside it
+      const over = P().clips.filter(c => { const m = P().media[c.mediaId]; return m && m.kind === "video" && m.duration > 0 && Math.max(c.in, c.out) > m.duration + 1e-3; });
+      if (over.length) M.edit("Fit clips to their media", () => {
+        for (const c of over) {
+          const d = P().media[c.mediaId].duration;
+          if (c.out >= c.in) c.out = Math.max(c.in + 1 / 24, Math.min(c.out, d)); else c.in = Math.max(c.out + 1 / 24, Math.min(c.in, d));
+        }
+      });
       bus.emit("media");
       bus.emit("change");
     } catch (_) { /* offline */ }
