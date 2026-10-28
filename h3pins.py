@@ -46,7 +46,7 @@ import traceback
 
 import numpy as np
 
-VERSION = "1.0"
+VERSION = "1.0.1"
 PLUGIN_KEY = "video_editor"                 # plugin_data key the editor's tasks carry
 GRID = 17                                   # pixel frames per VAE clip
 LATENTS_PER_CLIP = 5
@@ -856,9 +856,15 @@ def _wrap_save_video(original):
             try:
                 values = _bind(original, args, kwargs)
                 tensor = values.get("tensor")
-                if tensor is not None and hasattr(tensor, "dim") and tensor.dim() in (4, 5):
-                    job["final_fp"] = fingerprints(tensor)
+                # WanGP passes the frames as one tensor, or as the list of per-window chunks it has gathered
+                # (CFHW each, joined along frames): fingerprint each piece and join the fingerprints
+                parts = tensor if isinstance(tensor, (list, tuple)) else [tensor]
+                parts = [t for t in parts if t is not None and hasattr(t, "dim") and t.dim() in (4, 5)]
+                if parts:
+                    job["final_fp"] = np.concatenate([fingerprints(t) for t in parts], 0)
                     _count("fingerprinted")
+                else:
+                    _log(f"could not fingerprint the saved video: unexpected frames ({type(tensor).__name__})")
             except Exception as error:
                 job["final_fp"] = None
                 _log(f"could not fingerprint the saved video: {error!r}")
