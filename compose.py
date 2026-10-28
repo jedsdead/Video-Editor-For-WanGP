@@ -150,7 +150,7 @@ def seam_verdict(path_a, end_a, path_b, start_b, fps, frames=6):
 # context, so re-rolling doesn't fix it); it lasts ~12 frames and then settles. The lock predicts where the earlier
 # clip was heading, and gains the new clip's opening frames per channel onto that, ramping back to no change by frame
 # 12. The same maths mirrored corrects a run's closing frames where it runs into an existing clip. Thresholds and the
-# method follow comfyui-obvpm-timeline's levellock.py (MIT), measured there over 38 joins.
+# method follow comfyui-obvpm-timeline's levellock.py (GPL-3.0), measured there over 38 joins.
 
 LOCK_FRAMES = 12
 LOCK_FIT = 12
