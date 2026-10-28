@@ -208,6 +208,62 @@ def build_task(base, *, prompt, seed, frames, fps, start_image=None, end_image=N
     return settings
 
 
+# --------------------------------------------------------------------------- RefMods
+
+REFMOD_SETTING = "h3_refmod_state"
+REFMODS_REL = ("loras", "refmods_plugin", "minimax_h3")   # the RefMod plugin's storage, under the WanGP root
+
+
+def refmods_root():
+    return os.path.join(os.getcwd(), *REFMODS_REL)   # WanGP runs from its install folder
+
+
+def relink_refmods(settings, root=None):
+    """RefMods saved in a clip's settings are named by their path inside the RefMod folder. If a mod has been moved
+    into a subfolder since the clip was made, find it by file name and point the task at its new place.
+    Returns (settings, notes); notes describe what was relinked or is missing."""
+    custom = (settings or {}).get("custom_settings")
+    if not isinstance(custom, dict) or not custom.get(REFMOD_SETTING):
+        return settings, []
+    root = root or refmods_root()
+    try:
+        blob = custom[REFMOD_SETTING]
+        state = json.loads(blob) if isinstance(blob, str) else copy.deepcopy(blob)
+    except Exception:
+        return settings, []
+    rows = state.get("rows") if isinstance(state, dict) else None
+    if not isinstance(rows, list) or not os.path.isdir(root):
+        return settings, []
+    index = None
+    notes, changed = [], False
+    for row in rows:
+        name = str((row or {}).get("mod") or "").replace("\\", "/").strip("/")
+        if not name:
+            continue
+        if os.path.isfile(os.path.join(root, *name.split("/")) + ".safetensors"):
+            continue
+        if index is None:
+            index = {}
+            for folder, _, files in os.walk(root):
+                for f in files:
+                    if f.lower().endswith(".safetensors"):
+                        rel = os.path.relpath(os.path.join(folder, f[:-len(".safetensors")]), root).replace(os.sep, "/")
+                        index.setdefault(f[:-len(".safetensors")].lower(), []).append(rel)
+        found = index.get(name.split("/")[-1].lower(), [])
+        if len(found) == 1:
+            row["mod"] = found[0]
+            changed = True
+            notes.append({"mod": name, "now": found[0], "status": "relinked"})
+        elif len(found) > 1:
+            notes.append({"mod": name, "candidates": found, "status": "ambiguous"})
+        else:
+            notes.append({"mod": name, "status": "missing"})
+    if changed:
+        settings = dict(settings)
+        settings["custom_settings"] = {**custom, REFMOD_SETTING: json.dumps(state) if isinstance(blob, str) else state}
+    return settings, notes
+
+
 # --------------------------------------------------------------------------- ffmpeg helpers
 
 def _run(args):
@@ -313,6 +369,7 @@ class RegenService:
         a, b = sorted(float(x) for x in req.get("range"))
         meta = self._meta(item) or {}
         settings = self._settings_for(item, bool(req.get("useCurrent")))
+        settings, refmods = relink_refmods(settings)
         model_type = settings.get("model_type")
         model_def = self.host.model_def(model_type) or {}
         caps = capabilities(model_def)
@@ -321,7 +378,7 @@ class RegenService:
         prompt, shots = shot_prompt(meta.get("prompt") or settings.get("prompt") or "", prompt_fps, a, b, meta.get("sliding_window_overlap") or 0)
         return {"model": {"type": model_type, "name": self.host.model_name(model_type)}, "capabilities": caps,
                 "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "range": [a, b], "sourceFps": source_fps,
-                "minSeconds": caps["framesMinimum"] / caps["fps"]}
+                "minSeconds": caps["framesMinimum"] / caps["fps"], "refmods": refmods}
 
     def _item(self, media_id):
         item = self.registry.get(media_id)
@@ -339,6 +396,7 @@ class RegenService:
         a, b = sorted(float(x) for x in req.get("range"))
         meta = self._meta(item) or {}
         settings = self._settings_for(item, bool(req.get("useCurrent")))
+        settings, _ = relink_refmods(settings)
         model_type = settings.get("model_type")
         model_def = self.host.model_def(model_type) or {}
         caps = capabilities(model_def)

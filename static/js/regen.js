@@ -218,6 +218,12 @@ export async function openRegenDialog(app, clipId, preset = "dialog") {
       const keep = promptBox.value && info && promptBox.value !== info.prompt;   // keep the user's edits
       info = await api("api/regen/prepare", { method: "POST", body: { mediaId: orig.mediaId, range, useCurrent: useCurrent() } });
       modelNote.textContent = `Model: ${info.model.name}`;
+      for (const r of info.refmods || []) {
+        const line = r.status === "relinked" ? `RefMod '${r.mod}' has moved since this clip was made: using ${r.now}.`
+          : r.status === "ambiguous" ? `RefMod '${r.mod}' isn't where this clip expects it, and several files have that name (${r.candidates.join(", ")}). Move it back or use the Media Generator settings.`
+          : `RefMod '${r.mod}' can't be found in the RefMods folder, so it will be skipped.`;
+        modelNote.append(el(r.status === "relinked" ? "div" : "div.warn", {}, line));
+      }
       if (!keep) promptBox.value = info.prompt;
       shotsNote.textContent = info.shots.length ? `Built from ${info.shots.map(s => `window ${s.window} shot ${s.shot}`).join(", ")} of the original prompt, retimed to start at 00:00.` :
         "The original prompt has no shot list, so this is its text for this part of the clip.";
