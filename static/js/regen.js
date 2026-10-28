@@ -89,8 +89,10 @@ export class RegenJobs {
     app.bin.register([job.media], null);
     const item = P().media[job.media.id] || job.media;
     const dur = item.duration || 0;
-    const inT = Math.min(job.trimHead || 0, Math.max(0, dur - M.frameDur()));
-    const outT = Math.max(inT + M.frameDur(), dur - (job.trimTail || 0));
+    // on the file's own frame grid: a duration rounded to 0.1 ms would otherwise put every later cut a hair off it
+    const ff = item.fps || M.fps(), onGrid = (x) => Math.round(x * ff) / ff;
+    const inT = onGrid(Math.min(job.trimHead || 0, Math.max(0, dur - 1 / ff)));
+    const outT = Math.max(inT + 1 / ff, onGrid(dur - (job.trimTail || 0)));
     const length = outT - inT;
     const left = job.left && M.getClip(job.left.clipId), right = job.right && M.getClip(job.right.clipId);
     const lineage = { mode: job.mode, parent: job.left?.clipId || null, child: job.right?.clipId || null, jobId: job.id, seed: job.seed, pins: job.pins };

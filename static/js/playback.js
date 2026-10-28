@@ -375,13 +375,17 @@ export class Playback {
     const tau = t - clip.start;
     const raw = this.elementTime(entry, clip, tau);
     const maxT = Math.max(0, (item.duration || 0) - 0.03);
-    const desired = clamp(raw, 0, maxT);
+    let desired = clamp(raw, 0, maxT);
     const speed = speedAt(clip, tau) * Math.abs(this.rate);
     // Elements can't play backwards or slower than 1/16: step by seeking instead (reverse shuttle, freezes, unprepared reverse).
     const stepping = this.rate < 0 || (clip.reverse && !entry.rev);
     const holding = raw < 0 || raw > maxT || speed < 0.07 || stepping;
     if (!this.playing || holding) {
       if (!el.paused) el.pause();
+      // paused or stepping: aim at the middle of the source frame, never its edge, so the element can't land on the
+      // frame before (a frame boundary a hair early shows the previous frame)
+      const sf = item.fps || fps();
+      if (sf > 0 && entry.kind === "video") desired = clamp((Math.floor(desired * sf + 0.02) + 0.5) / sf, 0, maxT);
       const tolerance = this.playing && !stepping && speed >= 0.07 ? 0.2 : 0.015;
       if (!el.seeking && Math.abs(el.currentTime - desired) > tolerance) el.currentTime = desired;
       return;
@@ -480,13 +484,16 @@ export class Playback {
   buildFrame(t) {
     const entries = [];
     const needed = new Set();
+    // which clip shows is decided at the middle of the frame containing t (as export does), so an edge a hair off the
+    // frame grid can't show the clip that has just ended
+    const tm = (Math.floor(t * fps() + 1e-6) + 0.5) / fps();
     for (const track of videoTracks()) {
       if (track.hidden) continue;
       const trs = P().transitions.filter(tr => tr.trackId === track.id && !isAudioTransition(tr.type));
       let active = null;
       for (const tr of trs) {
         const info = transitionInfo(tr);
-        if (info && t >= info.lo && t < info.hi) { active = { tr, info }; break; }
+        if (info && tm >= info.lo && tm < info.hi) { active = { tr, info }; break; }
       }
       if (active) {
         const { tr, info } = active;
@@ -496,7 +503,7 @@ export class Playback {
         continue;
       }
       for (const clip of clipsOn(track.id)) {
-        if (clip.start <= t && t < clip.start + clipDur(clip)) {
+        if (clip.start <= tm && tm < clip.start + clipDur(clip)) {
           needed.add(clip.id);
           if (mediaOf(clip)?.kind === "adjust") { const adj = this.adjustFor(clip, t); if (adj) entries.push(adj); continue; }
           const layer = this.layerFor(clip, t);

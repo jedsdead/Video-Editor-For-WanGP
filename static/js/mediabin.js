@@ -155,6 +155,13 @@ export class MediaBin {
       }
       // a video measured shorter than before (its picture, not a longer soundtrack): pull clips back inside it
       const over = P().clips.filter(c => { const m = P().media[c.mediaId]; return m && m.kind === "video" && m.duration > 0 && Math.max(c.in, c.out) > m.duration + 1e-3; });
+      // cut points a hair off their file's frame grid (from a rounded duration): put them back on it
+      const grid = (c) => { const f = P().media[c.mediaId]?.fps; return f > 0 ? f : 0; };
+      const near = (x, f) => Math.abs(x * f - Math.round(x * f)) > 1e-6 && Math.abs(x * f - Math.round(x * f)) < 0.01;
+      const offGrid = P().clips.filter(c => { const f = grid(c); return f && P().media[c.mediaId]?.kind === "video" && (near(c.in, f) || near(c.out, f)); });
+      if (offGrid.length) M.edit("Snap cuts to frames", () => {
+        for (const c of offGrid) { const f = grid(c); if (near(c.in, f)) c.in = Math.round(c.in * f) / f; if (near(c.out, f)) c.out = Math.round(c.out * f) / f; }
+      });
       if (over.length) M.edit("Fit clips to their media", () => {
         for (const c of over) {
           const d = P().media[c.mediaId].duration;

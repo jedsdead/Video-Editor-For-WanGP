@@ -751,8 +751,11 @@ class ExportJob:
             f0, f1, weight = src.get(T.source_time(clip, tau, kind))
             if f0 is None:
                 return None
+            # within 2% of a frame is that frame: sub-frame offsets from rounding are not motion to blend
+            if f1 is not None and weight > 0.98:
+                return comp.to_tensor(f1)
             img = comp.to_tensor(f0)
-            if f1 is None or weight < 1e-3:
+            if f1 is None or weight < 0.02:
                 return img
             mode = clip.get("interp") or "default"
             mode = default_interp if mode == "default" else mode
@@ -833,12 +836,15 @@ class ExportJob:
         for index in range(frames):
             self.check()
             t = start + index / tl.fps
+            # which clip owns output frame k is decided at the frame's middle, so a clip edge a hair off the frame grid
+            # (a cut at 4.250033s) can't hand a frame to the clip that has just ended
+            tm = t + 0.5 / tl.fps
             canvas = torch.zeros(3, tl.height, tl.width, device=device)
             for track in tl.video_tracks:
                 if track.get("hidden"):
                     continue
                 active_tr = next((tr for tr in track_transitions[track["id"]]
-                                  if tr["lo"] <= t < tr["hi"]), None)
+                                  if tr["lo"] <= tm < tr["hi"]), None)
                 if active_tr is not None:
                     a = clip_layer(tl.clips[active_tr["a"]], t)
                     b = clip_layer(tl.clips[active_tr["b"]], t)
@@ -852,7 +858,7 @@ class ExportJob:
                     layers = []
                     for clip in track_clips[track["id"]]:
                         s = float(clip["start"])
-                        if s <= t < s + tl.durations[clip["id"]]:
+                        if s <= tm < s + tl.durations[clip["id"]]:
                             if tl.kind(clip) == "adjust":
                                 for layer in layers:
                                     canvas = layer[:3] + canvas * (1 - layer[3:4])
