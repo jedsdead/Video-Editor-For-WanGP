@@ -69,11 +69,24 @@ class WanGPHost:
         except Exception:
             return model_type or ""
 
-    def submit(self, settings, callbacks):
+    def submit(self, settings, callbacks, plugin_data=None):
         service = self._find_service()
         if service is None:
             raise RuntimeError("WanGP's generation queue isn't reachable")
+        try:
+            from . import h3pins
+            h3pins.ensure_installed()   # make sure our job hooks are still the outermost ones
+        except Exception:
+            pass
         from shared.api import WanGPSession
         session = WanGPSession(webui_state=service._state, console_output=False, console_isatty=False, webui_append=True)
         session._gradio_webui_context = {"load_queue": service.load_inline_queue}
-        return session.submit_task(settings, callbacks=callbacks)
+        task = {"params": settings, "plugin_data": dict(plugin_data or {})}
+        return session.submit_task(task, callbacks=callbacks)
+
+    def h3_status(self):
+        try:
+            from . import h3pins
+            return h3pins.status()
+        except Exception as error:
+            return {"installed": False, "problems": [repr(error)]}

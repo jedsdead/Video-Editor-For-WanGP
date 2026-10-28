@@ -13,12 +13,14 @@ import { ScopesPanel } from "./scopes.js";
 import { MixerPanel } from "./mixer.js";
 import { TransitionsPanel } from "./transitionspanel.js";
 import { EffectsPanel } from "./effectspanel.js";
+import { initCollapsible } from "./collapse.js";
 import { openExportDialog } from "./exportdialog.js";
 import { CURVES, FADE_CURVES } from "./keys.js";
 import { TransformOverlay } from "./transform.js";
 import { MarkersPanel } from "./markers.js";
 import { openShotDetect } from "./shotdetect.js";
 import { RegenJobs, openRegenDialog, canRegenerate } from "./regen.js";
+import { openGenerate, sides, MODE_LABEL } from "./gendialog.js";
 
 const $ = (id) => document.getElementById(id);
 const app = { status: {} };
@@ -260,11 +262,18 @@ app.prepareReverse = prepareReverse;
 
 // Regeneration and takes in the clip menu.
 function regenItems(clip, row) {
-  if (row.kind !== "video" || !canRegenerate(clip)) return [];
-  const items = [{ label: "Regenerate", submenu: [
-    { label: "Re-generate shot with new seed…", action: () => openRegenDialog(app, clip.id, "new") },
-    { label: "Re-generate shot with same seed…", action: () => openRegenDialog(app, clip.id, "same") },
-    { label: "Regenerate / extend shot…", action: () => openRegenDialog(app, clip.id) }] }];
+  if (row.kind !== "video" || M.isStill(clip)) return [];
+  const items = [];
+  const gen = [];
+  for (const mode of ["extend", "prepend", "bridge", "replace", "loop"]) {
+    const sd = sides(mode, { clipId: clip.id });
+    if (mode === "loop" && (sd.reason || sd.left?.id !== clip.id)) continue;
+    gen.push({ label: { extend: "Extend after this clip…", prepend: "Prepend before this clip…", bridge: "Bridge into the next clip…",
+      replace: "Replace, joining its neighbours…", loop: "Loop back to the first clip…" }[mode], disabled: !!sd.reason, action: () => openGenerate(app, mode, { clipId: clip.id }) });
+  }
+  if (canRegenerate(clip)) gen.push("-", { label: "Fresh take, new seed (no pins)…", action: () => openRegenDialog(app, clip.id, "new") },
+    { label: "Fresh take, same seed (no pins)…", action: () => openRegenDialog(app, clip.id, "same") });
+  items.push({ label: "Generate", submenu: gen });
   if (clip.takes?.length) {
     items.push({ label: `Takes (${(clip.takeIndex || 0) + 1} of ${clip.takes.length})`, submenu: clip.takes.map((t, i) => ({
       label: `${i + 1}. ${t.label}${t.seed != null ? ` (seed ${t.seed})` : ""}`, check: (clip.takeIndex || 0) === i,
@@ -369,6 +378,8 @@ function menuItems(name) {
     "-",
     { label: "Audio scrubbing", check: app.playback.scrubAudio, action: () => { app.playback.scrubAudio = !app.playback.scrubAudio; localStorage.setItem("ve_scrub", app.playback.scrubAudio ? "1" : "0"); } },
     { label: "Crop handles on the viewer", kbd: "C", check: app.overlay.cropMode, action: () => app.overlay.setCropMode(!app.overlay.cropMode) },
+    { label: "Snap cuts to H3's 17-frame grid", check: state.h3Snap, action: () => { state.h3Snap = !state.h3Snap; localStorage.setItem("ve_h3snap", state.h3Snap ? "1" : "0");
+      toast(state.h3Snap ? "Cuts on WanGP clips snap to H3's 17-frame grid, so extends and prepends from them stay latent grade" : "H3 grid snapping off"); } },
     "-",
     { label: "Zoom in", kbd: "+", action: () => app.timeline.setZoom(app.timeline.pps * 1.4) },
     { label: "Zoom out", kbd: "-", action: () => app.timeline.setZoom(app.timeline.pps / 1.4) },
@@ -509,7 +520,11 @@ function contextMenu(x, y, hit) {
       { label: "Properties", action: () => app.docks.show("inspector") },
     ]);
   } else {
+    const gap = hit.row && hit.row.kind === "video" ? M.gapAt(hit.row.track.id, hit.t) : null;
+    const fill = gap && (gap.prev || gap.next) ? { label: gap.prev && gap.next ? "Fill gap with a generation, joining both clips…" : "Fill with a generation…",
+      action: () => openGenerate(app, "fill", { trackId: hit.row.track.id, t: hit.t }) } : null;
     showMenu(x, y, [
+      fill, fill ? "-" : null,
       { label: "Paste at playhead", disabled: !state.clipboard, action: paste },
       state.range ? { label: "Delete range", action: () => deleteSelection(false) } : null,
       state.range ? { label: "Ripple delete range", action: () => deleteSelection(true) } : null,
@@ -645,6 +660,8 @@ async function main() {
   app.transitions = new TransitionsPanel(app);
   app.effects = new EffectsPanel(app);
   app.regen = new RegenJobs(app);
+  state.h3Snap = localStorage.getItem("ve_h3snap") === "1";
+  initCollapsible(document.body);
   bus.on("regen-jobs", () => app.timeline && app.timeline.draw());
   app.markers = new MarkersPanel(app);
   app.docks = new Docks([

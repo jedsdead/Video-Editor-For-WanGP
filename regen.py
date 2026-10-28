@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 
+from . import compose as C
 from . import media as M
 
 # Keys WanGP writes into an output's metadata that are not generation settings.
@@ -304,6 +305,9 @@ class RegenService:
         self.jobs = {}
         self.handles = {}
         self.lock = threading.Lock()
+        self._sha_cache = {}
+        from .h3pins import LatentStore
+        self.latents = LatentStore(os.path.join(data_root, "latents"))
         self._load()
 
     # ---- persistence: finished jobs survive a reload of the editor (and of WanGP) until the editor applies them
@@ -342,7 +346,8 @@ class RegenService:
     def status(self):
         ok, reason = self.host.available()
         current = self.host.current_settings()
-        return {"available": ok, "reason": reason,
+        h3 = self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}
+        return {"available": ok, "reason": reason, "h3": h3,
                 "current": {"modelType": current.get("model_type"), "name": self.host.model_name(current.get("model_type")),
                             "capturedAt": current.get("_captured_at")} if current else None}
 
@@ -450,8 +455,10 @@ class RegenService:
         threading.Thread(target=self._run, args=(job_id, task), daemon=True, name=f"video_editor_regen_{job_id}").start()
         return job
 
-    def _run(self, job_id, task):
+    def _run(self, job_id, task, plugin_data=None):
         service = self
+        folder = os.path.join(self.root, job_id)
+        last_preview = [0.0]
 
         class Callbacks:
             def on_status(self, status):
@@ -466,8 +473,28 @@ class RegenService:
                     p = 0.0
                 service._update(job_id, status="running", progress=max(0.0, min(1.0, p)), message=str(getattr(update, "status", "") or "Generating…"))
 
+            def on_preview(self, update):
+                # WanGP's live preview while sampling: a frame strip, or a short silent MP4 in Tiny VAE video mode
+                now = time.time()
+                if now - last_preview[0] < 0.8:
+                    return
+                last_preview[0] = now
+                try:
+                    video = getattr(update, "video", None)
+                    if video:
+                        with open(os.path.join(folder, "preview.mp4.tmp"), "wb") as handle:
+                            handle.write(video)
+                        os.replace(os.path.join(folder, "preview.mp4.tmp"), os.path.join(folder, "preview.mp4"))
+                        service._update(job_id, preview="mp4", previewAt=now)
+                    elif getattr(update, "image", None) is not None:
+                        update.image.convert("RGB").save(os.path.join(folder, "preview.jpg.tmp"), "JPEG", quality=82)
+                        os.replace(os.path.join(folder, "preview.jpg.tmp"), os.path.join(folder, "preview.jpg"))
+                        service._update(job_id, preview="jpg", previewAt=now)
+                except Exception:
+                    pass
+
         try:
-            handle = self.host.submit(task, Callbacks())
+            handle = self.host.submit(task, Callbacks(), plugin_data) if plugin_data else self.host.submit(task, Callbacks())
             self.handles[job_id] = handle
             result = handle.result()
             if getattr(result, "cancelled", False) or self.jobs.get(job_id, {}).get("status") == "cancelled":
@@ -486,6 +513,131 @@ class RegenService:
             self._update(job_id, status="error", error=str(error), message=str(error))
         finally:
             self.handles.pop(job_id, None)
+
+    # ---- timeline generations: extend / prepend / bridge / fill / loop
+    def _sha(self, item):
+        path = item["path"]
+        st = os.stat(path)
+        key = (path, st.st_mtime, st.st_size)
+        if key not in self._sha_cache:
+            from .h3pins import sha256_file
+            self._sha_cache[key] = sha256_file(path)
+        return self._sha_cache[key]
+
+    def _pin(self, side, place, window, gen_fps):
+        """Plan one pin from {mediaId, cut (seconds in its file)}: which frames, at what grade, and how far the cut moves."""
+        item = self._item(side["mediaId"])
+        src_fps = float(item.get("fps") or gen_fps)
+        file_frames = int(round(float(item.get("duration") or 0) * src_fps))
+        cut = int(round(float(side["cut"]) * src_fps))
+        available = cut if place == "before" else max(0, file_frames - cut)
+        frames = C.fit_window(int(window), int(available * gen_fps / src_fps))
+        if frames < 5:
+            raise ValueError(f"the {'previous' if place == 'before' else 'next'} clip has too few frames {'before' if place == 'before' else 'after'} the cut to pin")
+        manifest, sha = None, None
+        if abs(src_fps - gen_fps) < 1e-3:
+            try:
+                sha = self._sha(item)
+                manifest = self.latents.manifest(sha)
+            except Exception:
+                manifest = None
+        aligned = (C.align_before_pin if place == "before" else C.align_after_pin)(manifest, cut, frames)
+        if side.get("pixel") and aligned["grade"] == "latent" and aligned["shift"]:
+            aligned = {"start": cut - frames if place == "before" else cut, "cut": cut, "grade": "pixel", "shift": 0, "reason": "kept your cut"}
+        if aligned["grade"] != "latent" and abs(src_fps - gen_fps) >= 1e-3:
+            aligned["reason"] = f"the clip is {src_fps:g} fps; pins are re-encoded at {gen_fps:g} fps"
+        return {"place": place, "mediaId": item["id"], "file": item["path"], "fps": src_fps, "frames": frames,
+                "start_frame": int(aligned["start"]), "cut_frame": int(aligned["cut"]), "cut": aligned["cut"] / src_fps,
+                "shift": int(aligned["shift"]), "grade": aligned["grade"], "reason": aligned["reason"],
+                "sha": sha if aligned["grade"] == "latent" else None, "audio": bool(side.get("audio", True))}
+
+    def _compose(self, req):
+        ok, reason = self.host.available()
+        mode = req.get("mode")
+        if mode not in ("extend", "prepend", "bridge", "fill", "loop", "replace"):
+            raise ValueError("Unknown generation mode")
+        source = self._item(req.get("settingsFrom") or (req.get("left") or req.get("right") or {}).get("mediaId"))
+        meta = self._meta(source) or {}
+        settings = self._settings_for(source, bool(req.get("useCurrent")))
+        settings, refmods = relink_refmods(settings)
+        model_type = settings.get("model_type")
+        model_def = self.host.model_def(model_type) or {}
+        caps = capabilities(model_def)
+        gen_fps = caps["fps"]
+        window = int(req.get("window") or 22)
+        pins = []
+        if req.get("left") and mode in ("extend", "bridge", "fill", "loop", "replace"):
+            pins.append(self._pin(req["left"], "before", window, gen_fps))
+        if req.get("right") and mode in ("prepend", "bridge", "fill", "loop", "replace"):
+            pins.append(self._pin(req["right"], "after", window, gen_fps))
+        if not pins:
+            raise ValueError("Nothing to pin: this needs a clip on the side it continues from")
+        before = sum(p["frames"] for p in pins if p["place"] == "before")
+        after = sum(p["frames"] for p in pins if p["place"] == "after")
+        lengths = C.plan_lengths(float(req.get("newSeconds") or 3.0), gen_fps, before, after, caps["framesMinimum"], nearest=True)
+        window_max = int(((model_def or {}).get("sliding_window_defaults") or {}).get("window_max") or 0)
+        if window_max and lengths["total"] > window_max:
+            raise ValueError(f"that's {lengths['total']} frames in one run; this model allows {window_max} ({window_max / gen_fps:.1f}s) including the pins")
+        a, b = sorted(float(x) for x in (req.get("promptRange") or [0, 0]))
+        prompt_fps = caps["fps"] if not str(meta.get("force_fps") or "").strip().isdigit() else float(meta["force_fps"])
+        prompt, shots = shot_prompt(meta.get("prompt") or settings.get("prompt") or "", prompt_fps, a, b, meta.get("sliding_window_overlap") or 0) if b > a else (meta.get("prompt") or "", [])
+        info = {"mode": mode, "model": {"type": model_type, "name": self.host.model_name(model_type)}, "capabilities": caps,
+                "fps": gen_fps, "pins": pins, "lengths": {**lengths, "newSeconds": lengths["new"] / gen_fps, "totalSeconds": lengths["total"] / gen_fps,
+                                                          "trimHead": before / gen_fps, "trimTail": after / gen_fps},
+                "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "refmods": refmods,
+                "available": ok, "reason": reason, "h3": self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}}
+        return info, settings, model_def
+
+    def compose_prepare(self, req):
+        info, _, _ = self._compose(req)
+        return {k: v for k, v in info.items()}
+
+    def compose_submit(self, req):
+        info, settings, model_def = self._compose(req)
+        if not info["available"]:
+            raise ValueError(info["reason"])
+        if not (info.get("h3") or {}).get("installed"):
+            raise ValueError("The editor's H3 add-on isn't active in WanGP (see the console), so pinned generations can't run")
+        seed = req.get("seed")
+        if seed in (None, "", "new") or int(seed) < 0:
+            seed = random.randint(0, 2 ** 31 - 1)
+        seed = int(seed)
+        lengths = info["lengths"]
+        prompt = str(req.get("prompt") or "").strip() or info["prompt"]
+        task = build_task(settings, prompt=prompt, seed=seed, frames=lengths["total"], fps=info["fps"], model_def=model_def)
+        task["sliding_window_size"] = max(int(task.get("sliding_window_size") or 0), lengths["total"])   # one window: pins only apply to window 1
+        spec = {"pins": [{k: p[k] for k in ("place", "file", "fps", "frames", "start_frame", "sha", "audio")} for p in info["pins"]],
+                "mode": info["mode"]}
+        job_id = uuid.uuid4().hex[:12]
+        folder = os.path.join(self.root, job_id)
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "task.json"), "w", encoding="utf-8") as handle:
+            json.dump({"settings": task, "plugin_data": {"video_editor": spec}}, handle, indent=1, default=str)
+        job = {"id": job_id, "status": "queued", "progress": 0.0, "message": "Queued in WanGP…", "created": time.time(),
+               "project": req.get("project"), "kind": "compose", "mode": info["mode"], "seed": seed,
+               "clipId": req.get("clipId"), "trackId": req.get("trackId"), "place": req.get("place"),
+               "left": {**(req.get("left") or {}), "cut": next((p["cut"] for p in info["pins"] if p["place"] == "before"), None)} if req.get("left") else None,
+               "right": {**(req.get("right") or {}), "cut": next((p["cut"] for p in info["pins"] if p["place"] == "after"), None)} if req.get("right") else None,
+               "pins": [{k: p[k] for k in ("place", "grade", "frames", "shift", "reason")} for p in info["pins"]],
+               "trimHead": lengths["trimHead"], "trimTail": lengths["trimTail"], "newSeconds": lengths["newSeconds"],
+               "prompt": prompt, "model": info["model"]["name"], "audio": "new", "media": None, "error": None,
+               "request": {k: v for k, v in req.items() if k not in ("prompt",)}}
+        with self.lock:
+            self.jobs[job_id] = job
+            self._save()
+        threading.Thread(target=self._run, args=(job_id, task, {"video_editor": spec}), daemon=True, name=f"video_editor_gen_{job_id}").start()
+        return job
+
+    def preview_path(self, job_id):
+        job = self.jobs.get(job_id) or {}
+        kind = job.get("preview")
+        path = os.path.join(self.root, job_id, f"preview.{kind}") if kind else None
+        return (path, kind) if path and os.path.isfile(path) else (None, None)
+
+    def seam(self, req):
+        a, b = self._item(req["a"]["mediaId"]), self._item(req["b"]["mediaId"])
+        fps = float(a.get("fps") or b.get("fps") or 24)
+        return C.seam_verdict(a["path"], float(req["a"]["end"]), b["path"], float(req["b"]["start"]), fps)
 
     def list(self, project=None):
         with self.lock:
@@ -526,5 +678,8 @@ class NoHost:
     def model_name(self, model_type):
         return model_type or ""
 
-    def submit(self, settings, callbacks):
+    def submit(self, settings, callbacks, plugin_data=None):
         raise RuntimeError("Regeneration is unavailable")
+
+    def h3_status(self):
+        return {"installed": False, "problems": ["the editor is not running inside WanGP"]}

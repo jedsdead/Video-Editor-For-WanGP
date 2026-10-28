@@ -81,6 +81,19 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - **Takes:** each result is added as a take on its clip, with the original kept as take 1. Switch takes in the Inspector or the clip menu. A take with new audio switches the linked audio too.
 - The same seed gives a new result, not the original shot, because the prompt and length differ.
 
+**Generate on the timeline (MiniMax H3)**
+- Right-click a clip → **Generate**: **Extend** (continue out of it), **Prepend** (run into it), **Bridge** (join it to the next clip), **Replace** (regenerate it so it joins both neighbours, as a new take) and **Loop** (end where the edit began). Right-click empty space on a video track for **Fill gap with a generation**.
+- The neighbours' last or first 22, 39 or 56 frames are pinned in as fixed context and trimmed off the result, so the new footage continues straight out of or into them. Pins can carry their audio too.
+- **Latent grade:** the editor installs a small add-on into WanGP that saves each H3 generation's latents beside the video. Pins taken from those latents skip a decode/encode round trip, for the cleanest joins. That needs the cut on H3's 17-frame grid, so a cut may move by up to 16 frames; tick **Keep my exact cuts** to use pixel grade instead. Clips without saved latents always use pixel grade.
+- **Seam verdicts:** each join is rated seamless, soft bump or hard cut, shown as coloured bars on the timeline and in the Inspector, with ▶ buttons to play across a join.
+- **Takes and lineage:** generating the same slot again (or **Reroll**) adds a take. Generated clips show what they came from.
+- **Live preview** of the generation in the Inspector while WanGP works.
+- **View → Snap cuts to H3's 17-frame grid** keeps splits and trims of WanGP clips on the grid.
+- Saved latents are kept up to 20 GB, oldest removed first. WanGP must be restarted once after installing or updating the editor so the add-on loads.
+
+**Inspector**
+- Click a section heading, or an effect's name, to fold it away. Alt+click folds or unfolds every section. Folded sections are remembered.
+
 **WanGP integration**
 - Browse WanGP's output folders and import files in place, with nothing copied.
 - Clips that WanGP generated show their prompt, seed and settings in the Inspector, and after shot detection, each shot's own text.

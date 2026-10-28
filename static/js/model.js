@@ -58,6 +58,7 @@ export const state = {
   clipboard: null,
   gradeClipboard: null,
   readOnly: false,
+  h3Snap: false,        // snap cuts on WanGP clips to H3's 17-frame grid
 };
 
 export const P = () => state.project;
@@ -588,6 +589,13 @@ export function placeMedia(item, trackId, time) {
 export function splitAt(t, { ids = null } = {}) {
   let targets = ids ? P().clips.filter(c => ids.has(c.id)) : P().clips.slice();
   targets = targets.filter(c => c.start < t - EPS && clipEnd(c) > t + EPS && !getTrack(c.trackId).locked);
+  if (state.h3Snap) {   // cut WanGP clips on H3's 17-frame grid
+    const wangp = targets.find(c => trackKind(c.trackId) === "video" && mediaOf(c)?.has_metadata);
+    if (wangp) {
+      t = gridSnapTime(wangp, t);
+      targets = targets.filter(c => c.start < t - EPS && clipEnd(c) > t + EPS);
+    }
+  }
   const all = new Set(targets.map(c => c.id));
   if (state.linked) for (const c of targets) for (const p of partners(c)) if (p.start < t - EPS && clipEnd(p) > t + EPS) all.add(p.id);
   const newLinks = {};
@@ -720,9 +728,10 @@ export function trimLimits(clip, edge, groupIds) {
   return [clip.start + minDur, hi];
 }
 
-export function trimEdge(clipId, edge, time, { linked = true } = {}) {
+export function trimEdge(clipId, edge, time, { linked = true, snap = true } = {}) {
   const clip = getClip(clipId);
   if (!clip) return;
+  if (snap && state.h3Snap && trackKind(clip.trackId) === "video") time = gridSnapTime(clip, time);
   const edgeTime = edge === "start" ? clip.start : clipEnd(clip);
   const group = [clip];
   if (linked && state.linked) for (const p of partners(clip)) {
@@ -991,7 +1000,8 @@ export function addTake(clipId, take) {
                     partners: alignedPartners(clip).map(p => ({ id: p.id, mediaId: p.mediaId, in: p.in, out: p.out })) }];
     clip.takeIndex = 0;
   }
-  const entry = { id: uid("tk"), mediaId: take.mediaId, in: 0, out: Math.max(frameDur(), take.length), label: take.label || `Take ${clip.takes.length + 1}`,
+  const t0 = take.in || 0;
+  const entry = { id: uid("tk"), mediaId: take.mediaId, in: t0, out: t0 + Math.max(frameDur(), take.length), label: take.label || `Take ${clip.takes.length + 1}`,
                   seed: take.seed ?? null, audio: take.audio || "new", jobId: take.jobId || null, created: Date.now() };
   clip.takes.push(entry);
   setTake(clipId, clip.takes.length - 1);
@@ -1028,6 +1038,58 @@ export function removeTake(clipId, index) {
   if (active === index) setTake(clipId, 0);
   else if (active > index) clip.takeIndex = active - 1;
   if (clip.takes.length === 1 && (clip.takeIndex || 0) === 0) { delete clip.takes; delete clip.takeIndex; }
+}
+
+// ---- timeline generations (extend / prepend / bridge / fill / loop)
+
+// The empty stretch of a track around time t: {start, end, prev, next}, or null when t is on a clip.
+export function gapAt(trackId, t) {
+  const list = clipsOn(trackId);
+  if (list.some(c => c.start <= t + EPS && clipEnd(c) > t + EPS)) return null;
+  const prev = list.filter(c => clipEnd(c) <= t + EPS).pop() || null;
+  const next = list.find(c => c.start >= t - EPS) || null;
+  return { start: prev ? clipEnd(prev) : 0, end: next ? next.start : Infinity, prev, next };
+}
+
+// Place media at a time with its source range [inT, outT], pushing later clips on its tracks along to make room
+// (or, filling a gap, only by the part that does not fit). Returns the new clips (video first).
+export function insertMedia(item, trackId, time, inT, outT, { room = 0, close = false } = {}) {
+  const vIndex = videoTracks().findIndex(t => t.id === trackId);
+  const audioTrack = item.has_audio ? ensureAudioTrack(Math.max(0, vIndex)) : null;
+  const clips = newClipsForMedia(item, trackId, audioTrack, snapFrame(time));
+  for (const c of clips) { c.in = inT; c.out = outT; }
+  const dur = outT - inT;
+  // a fill that comes back shorter than its gap pulls the later clips in, so it still meets the next clip
+  const push = close && room > 0 ? dur - room : Math.max(0, dur - room);
+  if (Math.abs(push) > EPS) rippleAfter(new Set([trackId, ...(audioTrack ? [audioTrack] : [])]), time + room - EPS, push, new Set());
+  P().clips.push(...clips);
+  if (P().magnetic && trackId === primaryId()) applyPlacement(clips.map(c => c.id));
+  return clips;
+}
+
+// Move a clip's cut (the source time at its end or start) to `src` seconds, with its aligned linked audio.
+export function setCutSource(clipId, edge, src) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  const tau = clipTimeForSource(clip, src);
+  if (!Number.isFinite(tau)) return;
+  trimEdge(clipId, edge === "end" ? "end" : "start", clip.start + tau, { snap: false });
+}
+
+// The generated clip that already sits in a slot (so a new take goes onto it instead of adding another clip).
+export function generatedIn(mode, parentId, childId) {
+  return P().clips.find(c => c.gen && c.gen.mode === mode && (c.gen.parent || null) === (parentId || null) && (c.gen.child || null) === (childId || null)) || null;
+}
+
+// H3 compresses time in 17-frame groups; latent-grade pins need cuts on that grid.
+export function gridSnapTime(clip, t) {
+  const item = mediaOf(clip);
+  if (!item || item.kind !== "video" || !item.has_metadata) return t;
+  const f = item.fps || fps();
+  const src = srcTime(clip, clamp(t - clip.start, 0, clipDur(clip)));
+  const snapped = Math.round(src * f / 17) * 17 / f;
+  const tau = clipTimeForSource(clip, Math.min(Math.max(snapped, 0), item.duration || snapped));
+  return Number.isFinite(tau) ? clip.start + tau : t;
 }
 
 // Neighbouring clips on the same track that touch this one (for previous / next shot frames).

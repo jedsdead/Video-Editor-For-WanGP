@@ -444,6 +444,7 @@ export class Timeline {
     if (clip.takes?.length > 1) badges.push(`T${(clip.takeIndex || 0) + 1}/${clip.takes.length}`);
     const job = window.veApp?.regen?.forClip(clip.id).find(j => j.status !== "error");
     if (job) badges.push(job.status === "queued" ? "⟳ queued" : `⟳ ${Math.round((job.progress || 0) * 100)}%`);
+    if (clip.gen) badges.push({ extend: "⇢", prepend: "⇠", bridge: "⇄", fill: "⇄", loop: "↻", replace: "⟲" }[clip.gen.mode] || "◆");
     ctx.fillStyle = "#e9ecf2";
     const label = `${badges.join(" ")}${badges.length ? "  " : ""}${clip.name || item.name || "clip"}`;
     ctx.fillText(label, Math.max(x0, 0) + 4, top + 2);
@@ -460,6 +461,14 @@ export class Timeline {
     if (clip.fadeOut > 0) fadeShape(x1, clip.fadeOut, clip.fadeOutCurve || "linear", -1);
     this.paintKeys(ctx, clip, row, x0, x1, top, h, headH, selected);
     if (item.missing) { ctx.fillStyle = "rgba(200,40,40,.55)"; ctx.fillRect(x0, top, w, h); ctx.fillStyle = "#fff"; ctx.fillText("Media offline", x0 + 4, top + headH + 4); }
+    // seam verdicts of generated joins: green seamless, yellow soft bump, red hard cut
+    const seamColor = { seamless: "#36c46f", "soft bump": "#ffc83c", "hard cut": "#ff5a5a" };
+    for (const [side, xEdge] of [["left", x0], ["right", x1]]) {
+      const v = clip.seam?.[side];
+      if (!v || !seamColor[v.verdict]) continue;
+      ctx.fillStyle = seamColor[v.verdict];
+      ctx.fillRect(side === "left" ? xEdge : xEdge - 3, top + headH, 3, h - headH);
+    }
     ctx.restore();
     // fade handles
     const hovered = this.hover && this.hover.clip && this.hover.clip.id === clip.id;

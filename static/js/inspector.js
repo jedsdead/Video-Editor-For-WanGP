@@ -6,6 +6,7 @@ import { CURVES, FADE_CURVES } from "./keys.js";
 import { FONT_FALLBACK } from "./titles.js";
 import { EFFECTS, EFFECT_ORDER, defaultEffectParams } from "./effects.js";
 import { openRegenDialog, canRegenerate } from "./regen.js";
+import { openGenerate, rerollFor, sides, MODE_LABEL } from "./gendialog.js";
 import { FAMILIES, AUDIO_TRANSITIONS, DISSOLVE_STYLES, IRIS_SHAPES, ANGLE_PRESETS, DEFAULT_PARAMS, MAX_BORDER, isAudioTransition, hasEdge } from "./transitions.js";
 
 const RES_PRESETS = [[1280, 720], [1920, 1080], [3840, 2160], [832, 480], [480, 832], [720, 1280], [1080, 1920], [1024, 1024], [2560, 1080]];
@@ -113,7 +114,8 @@ export class Inspector {
     // a shot and its linked audio share the same shot details: show them once
     const shotClip = clips.find(c => c.shotInfo && M.trackKind(c.trackId) === "video") || clips.find(c => c.shotInfo);
     if (shotClip && clips.every(c => c.mediaId === shotClip.mediaId && c.shotInfo?.index === shotClip.shotInfo.index)) this.renderShot(shotClip);
-    const regenClip = clips.length === 1 || (clips.length === 2 && clips[0].linkId && clips[0].linkId === clips[1].linkId) ? clips.find(c => canRegenerate(c)) : null;
+    const regenClip = clips.length === 1 || (clips.length === 2 && clips[0].linkId && clips[0].linkId === clips[1].linkId)
+      ? clips.find(c => M.trackKind(c.trackId) === "video" && !M.isStill(c)) : null;
     if (regenClip) this.renderRegen(regenClip);
 
     if (video.length) {
@@ -338,7 +340,7 @@ export class Inspector {
       const change = (label, fn) => M.edit(label, () => M.updateEffect(clip.id, fx.id, fn));
       const on = el("input", { type: "checkbox", checked: fx.on !== false, title: "Turn the effect on or off", onchange: (e) => change(`${def.label} on/off`, f => { f.on = e.target.checked; }) });
       this.refreshers.push(() => { on.checked = fxLive().on !== false; });
-      const head = el("div.fxhead", {}, on, el("span.fxname", {}, def.label), el("div.spacer"),
+      const head = el("div.fxhead", {}, on, el("span.fxname", { title: "Click to fold or unfold this effect" }, def.label), el("div.spacer"),
         el("button.small.kbtn", { title: "Move up (earlier in the chain)", disabled: index === 0, onclick: () => { M.edit("Reorder effects", () => M.moveEffect(clip.id, fx.id, -1)); this.render(); } }, "▲"),
         el("button.small.kbtn", { title: "Move down (later in the chain)", disabled: index === effects.length - 1, onclick: () => { M.edit("Reorder effects", () => M.moveEffect(clip.id, fx.id, 1)); this.render(); } }, "▼"),
         el("button.small.kbtn", { title: "Reset to defaults", onclick: () => { M.edit(`Reset ${def.label}`, () => {
@@ -369,7 +371,7 @@ export class Inspector {
           rows.push(this.keySlider(label, [clip], lane, { toUi: (v) => Math.round(v * 10) / 10, fromUi: (v) => v, min: p.min, max: p.max, step: p.step, format: (v) => (+v).toFixed(p.step < 1 ? 1 : 0) }));
         }
       }
-      const card = el(`div.fxcard${fx.on === false ? ".off" : ""}`, {}, head, ...rows);
+      const card = el(`div.fxcard${fx.on === false ? ".off" : ""}`, { "data-collapse-key": `fx:${fx.id}` }, head, ...rows);
       this.refreshers.push(() => card.classList.toggle("off", fxLive().on === false));
       holder.append(card);
     });
@@ -385,19 +387,55 @@ export class Inspector {
       for (const job of this.app.regen.forClip(clip.id)) {
         const pct = Math.round((job.progress || 0) * 100);
         const text = job.status === "error" ? `Failed: ${job.error || job.message}` : job.status === "queued" ? "Waiting in WanGP's queue…" : `${pct}% · ${job.message || "Generating…"}`;
+        const what = job.kind === "compose" ? MODE_LABEL[job.mode] || job.mode : job.mode === "extend" ? "Extending" : "Regenerating";
+        const preview = job.preview && job.status === "running"
+          ? (job.preview === "mp4" ? el("video.rgpreview", { src: `api/regen/jobs/${job.id}/preview?v=${job.previewAt}`, autoplay: true, loop: true, muted: true, playsInline: true })
+            : el("img.rgpreview", { src: `api/regen/jobs/${job.id}/preview?v=${job.previewAt}` })) : null;
         jobsBox.append(el(`div.rgjob.${job.status}`, {},
           el("div.rgbar", {}, el("div", { style: { width: `${job.status === "error" ? 100 : pct}%` } })),
-          el("div.rgjobline", {}, el("span", {}, `${job.mode === "extend" ? "Extending" : "Regenerating"} · seed ${job.seed}`), el("span.dim", {}, text),
+          el("div.rgjobline", {}, el("span", {}, `${what} · seed ${job.seed}`), el("span.dim", {}, text),
             job.status === "error" ? el("button.small", { onclick: () => this.app.regen.dismiss(job.id) }, "Clear")
-              : el("button.small", { onclick: () => this.app.regen.cancel(job.id) }, "Cancel"))));
+              : el("button.small", { onclick: () => this.app.regen.cancel(job.id) }, "Cancel")),
+          job.pins?.length ? el("div.dim.small", {}, job.pins.map(p => `${p.place === "before" ? "previous" : "next"} clip ${p.grade} grade`).join(" · ")) : null,
+          preview));
       }
     };
     drawJobs();
     this.cleanups.push(bus.on("regen-jobs", drawJobs));
+    const can = (mode) => !sides(mode, { clipId: clip.id }).reason;
+    const button = (label, mode, title) => el("button.small", { disabled: !can(mode), title, onclick: () => openGenerate(this.app, mode, { clipId: clip.id }) }, label);
+    const parts = [
+      el("div.btnrow", {},
+        button("Extend…", "extend", "Continue this clip from its last frames"),
+        button("Prepend…", "prepend", "Generate what happens before this clip, running into its first frames"),
+        button("Replace…", "replace", "Regenerate this clip so it joins its neighbours (comes back as a take)"),
+        button("Bridge…", "bridge", "Generate a new piece between this clip and the next one")),
+      canRegenerate(clip) ? el("div.btnrow", {},
+        el("button.small", { title: "A new take of this shot from its prompt, without pinned neighbours", onclick: () => openRegenDialog(this.app, clip.id, "new") }, "Fresh take…")) : null,
+      jobsBox,
+    ];
+    const g = live().gen;
+    if (g) {
+      const fps = M.fps();
+      const seam = live().seam || {};
+      const verdict = (side, v) => v ? el(`span.seam.${(v.verdict || "unknown").replace(" ", "-")}`, { title: v.ratio != null ? `Join change ${v.ratio}x the motion around it` : "" }, `${side}: ${v.verdict}`) : null;
+      const previewJoin = (t) => { this.app.playback.pause(); this.app.playback.seek(Math.max(0, t - 2)); this.app.playback.play(); setTimeout(() => this.app.playback.pause(), 4000); };
+      parts.push(el("div.kv", { style: { marginTop: "8px" } },
+        el("span", {}, "Generated"), el("span", {}, `${MODE_LABEL[g.mode] || g.mode} · seed ${g.seed}`),
+        el("span", {}, "Pins"), el("span", {}, (g.pins || []).map(p => `${p.place === "before" ? "previous" : "next"}: ${p.grade}`).join(", ") || "none")),
+        el("div.seams", {}, verdict("Into it", seam.left), verdict("Out of it", seam.right),
+          !seam.left && !seam.right ? el("span.dim.small", {}, "Measuring the joins…") : null),
+        el("div.btnrow", {},
+          el("button.small", { title: "Generate this again with a new seed; the result is added as another take", onclick: () => rerollFor(this.app, live()) }, "Reroll…"),
+          el("button.small", { title: "Play 2s either side of the join into this clip", onclick: () => previewJoin(live().start) }, "▶ Join in"),
+          el("button.small", { title: "Play 2s either side of the join out of this clip", onclick: () => previewJoin(M.clipEnd(live())) }, "▶ Join out"),
+          el("button.small", { title: "Measure the joins again", onclick: () => this.app.regen.rateSeams(clip.id) }, "Re-measure")));
+      if (!live().seam) this.app.regen.rateSeams(clip.id);
+    }
     const takes = live().takes || [];
     const rows = takes.map((t, i) => {
       const active = (live().takeIndex || 0) === i;
-      return el(`div.take${active ? ".active" : ""}`, { onclick: () => { if (!active) M.edit("Switch take", () => M.setTake(clip.id, i)); } },
+      return el(`div.take${active ? ".active" : ""}`, { onclick: () => { if (!active) M.edit("Switch take", () => M.setTake(clip.id, i)); this.app.regen.rateSeams(clip.id); } },
         el("span.takeno", {}, String(i + 1)),
         el("span.takelabel", {}, t.label, t.seed != null ? el("span.dim", {}, ` · seed ${t.seed}`) : null,
           i > 0 ? el("span.dim", {}, ` · ${t.audio === "keep" ? "original audio" : "new audio"}`) : null),
@@ -405,14 +443,10 @@ export class Inspector {
         i > 0 ? el("button.small.kbtn", { title: "Remove this take from the clip (the file stays in the Media panel)",
           onclick: (e) => { e.stopPropagation(); M.edit("Remove take", () => M.removeTake(clip.id, i)); } }, "✕") : null);
     });
-    this.section("Regenerate",
-      el("div.btnrow", {},
-        el("button.small", { onclick: () => openRegenDialog(this.app, clip.id, "new") }, "New seed…"),
-        el("button.small", { onclick: () => openRegenDialog(this.app, clip.id, "same") }, "Same seed…"),
-        el("button.small", { onclick: () => openRegenDialog(this.app, clip.id) }, "Extend…")),
-      jobsBox,
-      takes.length ? el("div.takes", {}, el("div.dim", { style: { fontSize: "11px", margin: "6px 0 4px" } }, "Takes (click to use one):"), ...rows) : null,
-      el("div.dim", { style: { fontSize: "11px", marginTop: "6px" } }, "Regenerations run in WanGP's queue and come back as takes on this clip; the original is always take 1."));
+    if (takes.length) parts.push(el("div.takes", {}, el("div.dim", { style: { fontSize: "11px", margin: "6px 0 4px" } }, "Takes (click to use one):"), ...rows));
+    parts.push(el("div.dim", { style: { fontSize: "11px", marginTop: "6px", lineHeight: "1.45" } },
+      "Generations run in WanGP's queue. Neighbouring clips' frames are pinned in as fixed context (latent grade when WanGP saved their latents) and trimmed off the result, so the new footage continues out of or into them. Generating the same slot again adds a take."));
+    this.section("Generate", ...parts);
   }
 
   // ---------------------------------------------------------------- titles

@@ -28,6 +28,26 @@ class VideoEditorPlugin(WAN2GPPlugin):
             self._wangp_host = WanGPHost(self)
         return self._wangp_host
 
+    def _data_root(self):
+        import os
+        config = self._config() or {}
+        return os.path.join(os.path.abspath(config.get("save_path") or "outputs"), "video_editor")
+
+    def _install_h3(self):
+        """The H3 latent add-on: saves latents with every H3 video and applies the editor's pins."""
+        if getattr(self, "_h3_installed", False):
+            return
+        self._h3_installed = True
+        try:
+            from . import h3pins
+            h3pins.install(self, self._data_root())
+        except Exception as error:
+            print(f"[Video Editor] H3 latent add-on not installed: {error!r}")
+
+    def post_ui_setup(self, components):
+        self._install_h3()
+        return {}
+
     def on_tab_select(self, state):
         try:
             self._host().capture(state)
@@ -46,4 +66,5 @@ class VideoEditorPlugin(WAN2GPPlugin):
 
     def create_web_app(self):
         from .server import create_app
+        self._install_h3()
         return create_app(self._config, host=self._host())

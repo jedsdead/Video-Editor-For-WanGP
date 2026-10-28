@@ -279,6 +279,34 @@ def create_app(get_config, host=None):
         service.regen.cancel(job_id)
         return {"ok": True}
 
+    @app.post("/api/gen/prepare")
+    def gen_prepare(payload: dict = Body(...)):
+        try:
+            return service.regen.compose_prepare(payload)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+
+    @app.post("/api/gen/submit")
+    def gen_submit(payload: dict = Body(...)):
+        try:
+            return service.regen.compose_submit(payload)
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+
+    @app.post("/api/gen/seam")
+    def gen_seam(payload: dict = Body(...)):
+        try:
+            return service.regen.seam(payload)
+        except (ValueError, KeyError) as error:
+            raise HTTPException(400, str(error))
+
+    @app.get("/api/regen/jobs/{job_id}/preview")
+    def regen_preview(job_id: str):
+        path, kind = service.regen.preview_path(job_id)
+        if not path:
+            raise HTTPException(404, "No preview yet")
+        return FileResponse(path, media_type="video/mp4" if kind == "mp4" else "image/jpeg", headers={"Cache-Control": "no-store"})
+
     @app.post("/api/regen/jobs/{job_id}/dismiss")
     def regen_dismiss(job_id: str):
         try:

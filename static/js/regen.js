@@ -45,6 +45,7 @@ export class RegenJobs {
 
   // A finished generation becomes a take on its clip (or, for an extension without the original frames, a clip after it).
   async apply(job) {
+    if (job.kind === "compose") return this.applyCompose(job);
     this.applying.add(job.id);
     const app = this.app;
     app.bin.register([job.media], null);
@@ -76,6 +77,83 @@ export class RegenJobs {
     try { await api(`api/regen/jobs/${job.id}/dismiss`, { method: "POST" }); } catch (_) { /* kept for next time */ }
     this.jobs = this.jobs.filter(j => j.id !== job.id);
     bus.emit("regen-jobs");
+  }
+
+  // Timeline generations: trim off the pinned frames, move the neighbours' cuts to where the take joins them, then
+  // place the take (a new clip, or a new take on the clip already generated for that slot) and rate its joins.
+  async applyCompose(job) {
+    this.applying.add(job.id);
+    const app = this.app;
+    app.bin.register([job.media], null);
+    const item = P().media[job.media.id] || job.media;
+    const dur = item.duration || 0;
+    const inT = Math.min(job.trimHead || 0, Math.max(0, dur - M.frameDur()));
+    const outT = Math.max(inT + M.frameDur(), dur - (job.trimTail || 0));
+    const length = outT - inT;
+    const left = job.left && M.getClip(job.left.clipId), right = job.right && M.getClip(job.right.clipId);
+    const lineage = { mode: job.mode, parent: job.left?.clipId || null, child: job.right?.clipId || null, jobId: job.id, seed: job.seed, pins: job.pins };
+    let target = null, placedNote = "";
+    if ((job.left && !left) || (job.right && !right) || (job.mode === "replace" && !M.getClip(job.request?.replaceId))) {
+      toast(`A ${job.mode} generation finished, but the clips it joins have changed; it was added to the Media panel`, "warn");
+    } else {
+      M.edit(`Add ${job.mode}`, () => {
+        // the cuts the pins were taken at (latent grade may have moved them onto H3's grid)
+        if (left && job.left.cut != null && Math.abs(job.left.cut - Math.max(left.in, left.out)) > 1e-4) M.setCutSource(left.id, "end", job.left.cut);
+        if (right && job.right.cut != null && Math.abs(job.right.cut - Math.min(right.in, right.out)) > 1e-4) M.setCutSource(right.id, "start", job.right.cut);
+        const takeLabel = (c) => `Take ${(c.takes?.length || 1) + 1}`;
+        if (job.mode === "replace") {
+          target = M.getClip(job.request.replaceId);
+          M.addTake(target.id, { mediaId: item.id, in: inT, length, label: takeLabel(target), seed: job.seed, audio: "new", jobId: job.id });
+          target.gen = { ...lineage, mode: "replace" };
+          return;
+        }
+        const existing = M.generatedIn(job.mode, lineage.parent, lineage.child);
+        if (existing) {
+          target = existing;
+          M.addTake(existing.id, { mediaId: item.id, in: inT, length, label: takeLabel(existing), seed: job.seed, audio: "new", jobId: job.id });
+          placedNote = " as a new take";
+          return;
+        }
+        const L = left && M.getClip(left.id), R = right && M.getClip(right.id);
+        let at, room = 0;
+        if (job.mode === "prepend") at = R.start;
+        else if (job.mode === "fill") {
+          const gap = M.gapAt(job.trackId, L ? M.clipEnd(L) + 1e-4 : Math.max(0, R.start - 1e-4));
+          at = gap ? gap.start : (L ? M.clipEnd(L) : R.start);
+          room = gap && Number.isFinite(gap.end) ? gap.end - gap.start : 0;
+        } else at = M.clipEnd(L);
+        const clips = M.insertMedia(item, job.trackId, at, inT, outT, { room, close: job.mode === "fill" });
+        for (const c of clips) { c.gen = lineage; c.name = `${(L || R)?.name?.split(" · ")[0] || item.name} · ${job.mode}`; }
+        target = clips[0];
+      });
+      if (target) {
+        M.select([target.id]);
+        toast(`${job.mode[0].toUpperCase() + job.mode.slice(1)} added${placedNote} · seed ${job.seed}`);
+        this.rateSeams(target.id);
+      }
+    }
+    try { await api(`api/regen/jobs/${job.id}/dismiss`, { method: "POST" }); } catch (_) { /* kept for next time */ }
+    this.jobs = this.jobs.filter(j => j.id !== job.id);
+    bus.emit("regen-jobs");
+  }
+
+  // Measure how the clip joins the clips touching it (seamless / soft bump / hard cut).
+  async rateSeams(clipId) {
+    const clip = M.getClip(clipId);
+    if (!clip || M.trackKind(clip.trackId) !== "video") return;
+    const { prev, next } = M.touchingNeighbours(clip);
+    const seam = {};
+    const ask = async (a, b) => {
+      try {
+        return await api("api/gen/seam", { method: "POST", body: { a: { mediaId: a.mediaId, end: Math.max(a.in, a.out) }, b: { mediaId: b.mediaId, start: Math.min(b.in, b.out) } } });
+      } catch (_) { return null; }
+    };
+    if (prev && !prev.reverse && !clip.reverse) seam.left = await ask(prev, clip);
+    if (next && !next.reverse && !clip.reverse) seam.right = await ask(clip, next);
+    const live = M.getClip(clipId);
+    if (!live) return;
+    live.seam = { ...seam, at: Date.now() };
+    bus.emit("change");
   }
 
   async cancel(jobId) {

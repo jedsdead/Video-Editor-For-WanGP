@@ -114,7 +114,19 @@ textarea { resize: vertical; width: 100%; user-select: text; }
 
 /* inspector */
 .insp-section { border-bottom: 1px solid var(--border); padding: 8px 2px 10px; }
-.insp-section h4 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); display: flex; align-items: center; justify-content: space-between; }
+.insp-section > h4 { cursor: pointer; user-select: none; justify-content: flex-start; gap: 2px; }
+.insp-section > h4 > :first-child { margin-left: auto; }
+.insp-section > h4::before { content: "▾"; display: inline-block; width: 12px; margin-right: 2px; color: var(--muted); transition: transform .12s; }
+.insp-section.collapsed > h4::before { transform: rotate(-90deg); }
+.insp-section.collapsed > h4 { margin-bottom: 0; }
+.insp-section.collapsed > :not(h4) { display: none !important; }
+.insp-section > h4:hover { color: var(--text); }
+.fxcard .fxname { cursor: pointer; user-select: none; }
+.fxcard .fxname::before { content: "▾ "; color: var(--muted); }
+.fxcard.collapsed .fxname::before { content: "▸ "; }
+.fxcard.collapsed > :not(.fxhead) { display: none !important; }
+.fxcard.collapsed .fxhead { margin-bottom: 0; }
+.insp-section h4 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); display: flex; align-items: center; justify-content: flex-start; }
 .field { display: grid; grid-template-columns: 92px 1fr 64px; gap: 6px; align-items: center; margin: 5px 0; }
 .field label { color: var(--muted); font-size: 12px; }
 .field input[type=number], .field input[type=text], .field select { width: 100%; min-width: 0; }
@@ -326,3 +338,15 @@ canvas.shotgraph { width: 100%; height: 110px; display: block; border-radius: 6p
 .take.active { border-color: var(--sel); background: rgba(255, 204, 77, .07); }
 .take .takeno { width: 16px; text-align: center; font-weight: 600; }
 .take .takelabel { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.rgpreview { width: 100%; margin-top: 6px; border-radius: 4px; background: #000; display: block; }
+.gpins { display: flex; flex-direction: column; gap: 3px; margin: 6px 0; font-size: 12px; }
+.grade { padding: 0 5px; border-radius: 3px; font-size: 11px; }
+.grade.latent { background: rgba(54, 196, 111, .2); color: #6fe09c; }
+.grade.pixel { background: rgba(255, 170, 60, .18); color: #ffb866; }
+.seams { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 2px; }
+.seam { font-size: 11px; padding: 1px 7px; border-radius: 10px; }
+.seam.seamless { background: rgba(54, 196, 111, .2); color: #6fe09c; }
+.seam.soft-bump { background: rgba(255, 200, 60, .18); color: #ffd36b; }
+.seam.hard-cut { background: rgba(255, 90, 90, .18); color: #ff8a8a; }
+.seam.unknown { background: var(--panel3); color: var(--muted); }
