@@ -101,10 +101,15 @@ export async function openGenerate(app, mode, where) {
 
   const windowSel = el("select", {}, [22, 39, 56].map(f => el("option", { value: f }, `${f} frames`)));
   windowSel.value = String(prefs.window || 22);
-  const modeSel = el("select", {}, el("option", { value: "motion" }, "Motion context: H3's native continuation (recommended)"),
-    el("option", { value: "pinned" }, "Pinned frames inside the run"));
-  modeSel.value = prefs.pinMode === "pinned" ? "pinned" : "motion";
-  const modeNote = el("div.dim.small", {}, "Motion context hands H3 the previous clip's last frames the way Wan2GP continues a sliding window, so the run starts at the cut. Pinned frames regenerate those frames inside the run and trim them off.");
+  const opt = (v, l) => el("option", { value: v }, l);
+  const leaveSel = el("select", {}, opt("motion", "Motion context: H3's native continuation (recommended)"), opt("masked", "Masked: held exactly inside the run"),
+    opt("both", "Masked + keyframes"), opt("pinned", "Pinned keyframes (re-rendered, trimmed)"));
+  leaveSel.value = prefs.leaveMode || (prefs.pinMode === "pinned" ? "pinned" : "motion");
+  const arriveSel = el("select", {}, opt("both", "Masked + keyframes: steer toward it, arrive exactly (recommended)"), opt("masked", "Masked: held exactly inside the run"),
+    opt("pinned", "Pinned keyframes (re-rendered, trimmed)"));
+  arriveSel.value = prefs.arriveMode || "both";
+  const modeNote = el("div.dim.small", {}, "Motion context hands H3 the frames before the cut as history, the way Wan2GP continues a sliding window. Masked holds the neighbour's frames inside the run with a denoise mask (WanGP's Denoise Control Video), so they are never re-drawn and the join has one rendering. Pinned keyframes are re-drawn by the model and trimmed off.");
+  const modeRow = (label, sel) => el("div", { style: { display: "flex", gap: "8px", alignItems: "center", margin: "6px 0 2px" } }, el("span.dim.small", { style: { width: "92px" } }, label), sel);
   const seconds = el("input", { type: "number", min: 0.5, max: fresh ? 120 : 19, step: 0.1, value: (+defaultSeconds).toFixed(2), style: { width: "76px" } });
   const lengthNote = el("div.dim.small");
   const pinsBox = el("div.gpins");
@@ -131,7 +136,7 @@ export async function openGenerate(app, mode, where) {
     status.available ? null : el("div.warn", { style: { marginBottom: "8px" } }, status.reason || "Generation is unavailable"),
     addonNote,
     fresh ? null : field("Pinned frames", el("div", { style: { display: "flex", gap: "8px", alignItems: "center" } }, windowSel, el("span.dim.small", {}, "of each neighbour held as fixed context")),
-      s.left ? el("div", { style: { margin: "6px 0 2px" } }, modeSel) : null, s.left ? modeNote : null,
+      s.left ? modeRow("Leaving a clip", leaveSel) : null, s.right ? modeRow("Arriving at one", arriveSel) : null, s.left || s.right ? modeNote : null,
       pinsBox,
       el("label.rrow", {}, keepCut, el("span", {}, "Keep my exact cuts (pixel grade instead of moving a cut onto H3's grid)")),
       el("label.rrow", {}, carryAudio, el("span", {}, "Carry the pinned audio too")),
@@ -155,7 +160,7 @@ export async function openGenerate(app, mode, where) {
     right: s.right ? { clipId: s.right.id, mediaId: s.right.mediaId, cut: startSource(s.right), pixel: keepCut.checked, audio: carryAudio.checked } : null,
     replaceId: s.replace?.id || null,
     gap: s.gap ? { start: s.gap.start, end: Number.isFinite(s.gap.end) ? s.gap.end : null } : null,
-    window: parseInt(windowSel.value, 10), pinMode: modeSel.value, crossfade: crossfade.checked, levelLock: levelLock.checked, newSeconds: clamp(parseFloat(seconds.value) || 3, 0.2, 30),
+    window: parseInt(windowSel.value, 10), leaveMode: leaveSel.value, arriveMode: arriveSel.value, crossfade: crossfade.checked, levelLock: levelLock.checked, newSeconds: clamp(parseFloat(seconds.value) || 3, 0.2, 30),
     useCurrent: srcCurrent.input.checked, settingsFrom: settingsItem?.id || (s.left || s.right)?.mediaId || null, promptRange,
     at: s.at ?? null, targetId: s.target?.id || null,
   });
@@ -166,7 +171,9 @@ export async function openGenerate(app, mode, where) {
     const grade = p.grade === "latent" ? el("span.grade.latent", {}, "latent grade") : el("span.grade.pixel", {}, "pixel grade");
     const extra = (p.grade === "latent" && p.shift ? ` · the cut moves ${(p.shift / fps).toFixed(2)}s ${p.place === "before" ? "earlier" : "later"} onto H3's grid` : "")
       + (p.reason ? ` · ${p.reason}` : "");
-    return el("div.gpin", {}, el("b", {}, `${who}: `), p.kind === "motion" ? `${p.frames} frames as motion context, ` : `${p.frames} frames, `, grade, extra);
+    const how = { motion: "as motion context", masked: "held by the mask", both: "held by the mask + keyframes", pinned: "pinned keyframes" }[p.kind] || "";
+    const hand = p.handover ? ` · handover ${p.handover} frames inside the window` : "";
+    return el("div.gpin", {}, el("b", {}, `${who}: `), `${p.frames} frames ${how}, `, grade, extra, hand);
   };
 
   const prepare = debounce(async () => {
@@ -195,7 +202,7 @@ export async function openGenerate(app, mode, where) {
     seedInput.hidden = seedSel.value !== "custom";
     go.disabled = !info || !status.available || (!fresh && !status.h3?.installed);
   };
-  for (const c of [windowSel, modeSel, seconds, keepCut, carryAudio, srcClip.input, srcCurrent.input]) c.addEventListener("change", prepare);
+  for (const c of [windowSel, leaveSel, arriveSel, seconds, keepCut, carryAudio, srcClip.input, srcCurrent.input]) c.addEventListener("change", prepare);
   seedSel.addEventListener("change", update);
 
   async function submit() {
@@ -207,7 +214,7 @@ export async function openGenerate(app, mode, where) {
       if (!Number.isFinite(seed) || seed < 0) { error.textContent = "Enter a seed of 0 or more"; return; }
     }
     const req = { ...request(), seed, prompt: promptBox.value };
-    savePrefs({ window: req.window, pinMode: req.pinMode, crossfade: req.crossfade, levelLock: req.levelLock, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
+    savePrefs({ window: req.window, leaveMode: req.leaveMode, arriveMode: req.arriveMode, crossfade: req.crossfade, levelLock: req.levelLock, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
       freshSeconds: fresh && !s.target ? req.newSeconds : prefs.freshSeconds, keepCut: keepCut.checked, carryAudio: carryAudio.checked,
       useCurrent: req.useCurrent, seed: seedSel.value === "custom" ? "custom" : "new", customSeed: seedInput.value });
     go.disabled = true;

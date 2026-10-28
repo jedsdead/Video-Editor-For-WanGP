@@ -162,6 +162,84 @@ def allowed_frames(n, model_def):
     return frames
 
 
+HANDOVER_BEFORE, HANDOVER_AFTER = 4, 5        # frames: the VAE's file-edge steps (last one / first two latents)
+
+
+def masked_unavailable(settings, model_def):
+    """Why a masked join can't run with these settings and model (None when it can). A masked join is a Denoise
+    Control Video edit (GV) with a video mask (A): the neighbours' frames held, the rest generated."""
+    model_def = model_def or {}
+    choices = model_def.get("guide_custom_choices") or {}
+    letters = str(choices.get("letters_filter") or "")
+    values = [v for _, v in (choices.get("choices") or [])]
+    if "GV" not in values and not ("G" in letters and "V" in letters):
+        return "this model has no Denoise Control Video mode"
+    masks = (model_def.get("mask_preprocessing") or {}).get("selection") or []
+    if "A" not in masks:
+        return "this model takes no video mask"
+    vpt = str(settings.get("video_prompt_type") or "")
+    if "V" in vpt or "U" in vpt:
+        return "the settings use a reference or control video"
+    if "F" in vpt:
+        return "the settings inject frames"
+    if "~" in vpt:
+        return "phase 2 tiling is on"
+    return None
+
+
+def masked_task(settings, guide_path, mask_path):
+    """Turn a task into the Denoise Control Video edit that holds the masked pins."""
+    vpt = str(settings.get("video_prompt_type") or "")
+    settings["video_prompt_type"] = "GVA" + "".join(ch for ch in vpt if ch not in "GVAN")
+    settings["video_guide"] = guide_path
+    settings["video_mask"] = mask_path
+    settings["denoising_strength"] = 1.0
+    settings["masking_strength"] = 1.0
+    settings["keep_frames_video_guide"] = ""
+    settings["video_guide_outpainting"] = ""
+    return settings
+
+
+def write_masked_guides(folder, pins, total, fps, width, height):
+    """The control video (each masked pin's frames at its place in the run, grey elsewhere) and its mask (black
+    where held, white where generated), both exactly `total` frames at the run's size and frame rate."""
+    import subprocess
+    guide, mask = os.path.join(folder, "guide.mp4"), os.path.join(folder, "mask.mp4")
+    held = sorted([p for p in pins if p["kind"] in ("masked", "both")], key=lambda p: p["place"] != "before")
+    spans, inputs, filters, labels, mlabels, cursor = [], [], [], [], [], 0
+    before = next((p for p in held if p["place"] == "before"), None)
+    after = next((p for p in held if p["place"] == "after"), None)
+    if before:
+        spans.append(("pin", before))
+        cursor = before["frames"]
+    gap = total - cursor - (after["frames"] if after else 0)
+    if gap > 0:
+        spans.append(("gap", gap))
+    if after:
+        spans.append(("pin", after))
+    for i, (kind, item) in enumerate(spans):
+        if kind == "pin":
+            idx = len(inputs) // 4
+            inputs += ["-ss", f"{item['start_frame'] / item['fps']:.6f}", "-i", item["file"]]
+            filters.append(f"[{idx}:v]fps={fps},scale={width}:{height}:flags=bicubic,format=yuv420p,trim=end_frame={item['frames']},setpts=PTS-STARTPTS[g{i}]")
+            filters.append(f"color=c=black:s={width}x{height}:r={fps}:d={item['frames'] / fps + 1:.4f},format=yuv420p,trim=end_frame={item['frames']},setpts=PTS-STARTPTS[m{i}]")
+        else:
+            filters.append(f"color=c=0x808080:s={width}x{height}:r={fps}:d={item / fps + 1:.4f},format=yuv420p,trim=end_frame={item},setpts=PTS-STARTPTS[g{i}]")
+            filters.append(f"color=c=white:s={width}x{height}:r={fps}:d={item / fps + 1:.4f},format=yuv420p,trim=end_frame={item},setpts=PTS-STARTPTS[m{i}]")
+        labels.append(f"[g{i}]")
+        mlabels.append(f"[m{i}]")
+    n = len(spans)
+    graph = ";".join(filters) + f";{''.join(labels)}concat=n={n}:v=1:a=0[gout];{''.join(mlabels)}concat=n={n}:v=1:a=0[mout]"
+    ffmpeg = M.ffmpeg_path()
+    common = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-r", f"{fps}", "-frames:v", str(total)]
+    run = subprocess.run([ffmpeg, "-v", "error", "-y", *inputs, "-filter_complex", graph,
+                          "-map", "[gout]", "-crf", "4", *common, guide, "-map", "[mout]", "-crf", "0", *common, mask],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, **M.popen_kwargs())
+    if run.returncode or not os.path.isfile(guide) or not os.path.isfile(mask):
+        raise ValueError("couldn't build the masked join's control video: " + run.stderr.decode(errors="ignore")[-400:])
+    return guide, mask
+
+
 def capabilities(model_def):
     """What a model supports for regeneration."""
     model_def = model_def or {}
@@ -524,14 +602,15 @@ class RegenService:
             self._sha_cache[key] = sha256_file(path)
         return self._sha_cache[key]
 
-    def _pin(self, side, place, window, gen_fps, motion=False):
+    def _pin(self, side, place, window, gen_fps, kind="pinned"):
         """Plan one pin from {mediaId, cut (seconds in its file)}: which frames, at what grade, and how far the cut moves."""
         item = self._item(side["mediaId"])
         src_fps = float(item.get("fps") or gen_fps)
         file_frames = int(round(float(item.get("duration") or 0) * src_fps))
         cut = int(round(float(side["cut"]) * src_fps))
         available = cut if place == "before" else max(0, file_frames - cut)
-        motion = motion and place == "before"
+        motion = kind == "motion" and place == "before"
+        kind = "pinned" if kind == "motion" and not motion else kind
         fit = C.motion_window if motion else C.fit_window
         frames = fit(int(window), int(available * gen_fps / src_fps))
         if frames < 5:
@@ -554,7 +633,7 @@ class RegenService:
                 "start_frame": int(aligned["start"]), "cut_frame": int(aligned["cut"]), "cut": aligned["cut"] / src_fps,
                 "shift": int(aligned["shift"]), "grade": aligned["grade"], "reason": aligned["reason"],
                 "sha": sha if aligned["grade"] == "latent" else None, "audio": bool(side.get("audio", True)),
-                "kind": "motion" if motion else "pinned",
+                "kind": kind,
                 # frames of this pin that are part of the generated run (and trimmed off it)
                 "inRun": 1 if motion else frames}
 
@@ -577,13 +656,40 @@ class RegenService:
         gen_fps = caps["fps"]
         window = int(req.get("window") or 22)
         pins = []
+        # how each side joins: motion context (leaving only), masked (held inside the run by a denoise mask),
+        # both (masked + keyframe rows) or pinned (keyframe rows only, re-rendered and trimmed)
+        masked_problem = masked_unavailable(settings, model_def)
+        leave_mode = req.get("leaveMode") or ("pinned" if req.get("pinMode") == "pinned" else "motion")
+        arrive_mode = req.get("arriveMode") or "both"
+        if leave_mode not in ("motion", "masked", "both", "pinned"):
+            leave_mode = "motion"
+        if arrive_mode not in ("masked", "both", "pinned"):
+            arrive_mode = "both"
+        fallback = {}
+        for name in ("leave_mode", "arrive_mode"):
+            if locals()[name] in ("masked", "both") and masked_problem:
+                fallback[name] = masked_problem
+        leave_mode = "pinned" if "leave_mode" in fallback else leave_mode
+        arrive_mode = "pinned" if "arrive_mode" in fallback else arrive_mode
         if not fresh:
             if req.get("left") and mode in ("extend", "bridge", "fill", "loop", "replace"):
-                pins.append(self._pin(req["left"], "before", window, gen_fps, motion=req.get("pinMode", "motion") == "motion"))
+                pins.append(self._pin(req["left"], "before", window, gen_fps, kind=leave_mode))
             if req.get("right") and mode in ("prepend", "bridge", "fill", "loop", "replace"):
-                pins.append(self._pin(req["right"], "after", window, gen_fps))
+                pins.append(self._pin(req["right"], "after", window, gen_fps, kind=arrive_mode))
             if not pins:
                 raise ValueError("Nothing to pin: this needs a clip on the side it continues from")
+            for p in pins:
+                why = fallback.get("leave_mode" if p["place"] == "before" else "arrive_mode")
+                if why:
+                    p["reason"] = f"pinned inside the run: masked isn't available ({why})" + (f"; {p['reason']}" if p["reason"] else "")
+                elif p["kind"] in ("masked", "both") and p["grade"] == "latent":
+                    # hand over one latent step inside the held window, where both files decode the same latents
+                    # mid-file (H3's VAE draws a file's first two and last step slightly differently)
+                    n = HANDOVER_BEFORE if p["place"] == "before" else HANDOVER_AFTER
+                    p["handover"] = n
+                    p["cut_frame"] += -n if p["place"] == "before" else n
+                    p["cut"] = p["cut_frame"] / p["fps"]
+                    p["trim"] = p["frames"] - n
         before = sum(p["inRun"] for p in pins if p["place"] == "before")
         after = sum(p["inRun"] for p in pins if p["place"] == "after")
         window_max = int(((model_def or {}).get("sliding_window_defaults") or {}).get("window_max") or 0)
@@ -608,7 +714,9 @@ class RegenService:
             prompt, shots = shot_prompt(meta.get("prompt") or settings.get("prompt") or "", prompt_fps, a, b, meta.get("sliding_window_overlap") or 0) if b > a else (meta.get("prompt") or "", [])
         info = {"mode": mode, "model": {"type": model_type, "name": self.host.model_name(model_type)}, "capabilities": caps,
                 "fps": gen_fps, "pins": pins, "lengths": {**lengths, "newSeconds": lengths["new"] / gen_fps, "totalSeconds": lengths["total"] / gen_fps,
-                                                          "trimHead": before / gen_fps, "trimTail": after / gen_fps, "note": step_note},
+                                                          "trimHead": sum(p.get("trim", p["inRun"]) for p in pins if p["place"] == "before") / gen_fps,
+                                                          "trimTail": sum(p.get("trim", p["inRun"]) for p in pins if p["place"] == "after") / gen_fps,
+                                                          "note": step_note},
                 "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "refmods": refmods,
                 "available": ok, "reason": reason, "h3": self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}}
         return info, settings, model_def
@@ -637,6 +745,13 @@ class RegenService:
         job_id = uuid.uuid4().hex[:12]
         folder = os.path.join(self.root, job_id)
         os.makedirs(folder, exist_ok=True)
+        if any(p["kind"] in ("masked", "both") for p in info["pins"]):
+            try:
+                width, height = (int(v) for v in str(task.get("resolution") or "").lower().split("x"))
+            except ValueError:
+                raise ValueError("the settings have no resolution for the masked join's control video")
+            guide, mask = write_masked_guides(folder, info["pins"], lengths["total"], info["fps"], width, height)
+            masked_task(task, guide, mask)
         with open(os.path.join(folder, "task.json"), "w", encoding="utf-8") as handle:
             json.dump({"settings": task, "plugin_data": {"video_editor": spec}}, handle, indent=1, default=str)
         job = {"id": job_id, "status": "queued", "progress": 0.0, "message": "Queued in WanGP…", "created": time.time(),
@@ -644,7 +759,7 @@ class RegenService:
                "clipId": req.get("clipId"), "trackId": req.get("trackId"), "place": req.get("place"),
                "left": {**(req.get("left") or {}), "cut": next((p["cut"] for p in info["pins"] if p["place"] == "before"), None)} if req.get("left") else None,
                "right": {**(req.get("right") or {}), "cut": next((p["cut"] for p in info["pins"] if p["place"] == "after"), None)} if req.get("right") else None,
-               "pins": [{k: p[k] for k in ("place", "grade", "frames", "shift", "reason", "kind")} for p in info["pins"]],
+               "pins": [{**{k: p[k] for k in ("place", "grade", "frames", "shift", "reason", "kind")}, "handover": p.get("handover", 0)} for p in info["pins"]],
                "trimHead": lengths["trimHead"], "trimTail": lengths["trimTail"], "newSeconds": lengths["newSeconds"],
                "prompt": prompt, "model": info["model"]["name"], "audio": "new", "media": None, "error": None,
                "request": {k: v for k, v in req.items() if k not in ("prompt",)}}

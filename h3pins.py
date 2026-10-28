@@ -430,6 +430,7 @@ class PinPlan:
         self.stages = []          # [(latent_h, latent_w)] in _prepare_condition_rows call order
         self.video = {}           # stage index -> [(place, latents)]
         self.audio = []           # [(anchor dict, latents)]
+        self.masked = {}          # stage index -> [(place, latents)] held by WanGP's mask (latent grade only)
         self.calls = 0
         self.audio_rows = None    # id of the cond_audio_rows tensor that holds our audio pins
         self.notes = []
@@ -470,7 +471,10 @@ def _plan_pins(pipeline, spec, kwargs):
     sr = int(getattr(pm, "AUDIO_SAMPLE_RATE", 32000))
     for pin in pins:
         frames = int(pin["frames"])
-        motion = pin.get("kind") == "motion" and pin["place"] == "before"
+        kind = pin.get("kind") or "pinned"
+        motion = kind == "motion" and pin["place"] == "before"
+        held = kind in ("masked", "both")      # WanGP's Denoise Control Video mask holds this window
+        rows = kind != "masked"                # keyframe rows too (pinned, both, motion)
         if motion:
             # H3's native continuation: 17k frames of history (motion context, before the run on H3's timeline) plus
             # the join frame pinned as the run's first frame, exactly as Wan2GP lays out a sliding-window overlap
@@ -518,7 +522,14 @@ def _plan_pins(pipeline, spec, kwargs):
                 plan.notes.append(f"{pin['place']} pin: latent grade ({frames} frames{' of motion context' if motion else ''}"
                                   f"{', from Latent Carry' if window.get('source') == 'latent_carry' else ''})")
         pixels = None
+        if held:
+            # WanGP encodes the held window from the control video's pixels; latent grade swaps in the saved latents
+            for si in range(len(stages)):
+                if latents is not None and latents[si] is not None:
+                    plan.masked.setdefault(si, []).append((pin["place"], latents[si]))
         for si, (h, w) in enumerate(stages):
+            if not rows:
+                break
             if latents is not None and latents[si] is not None:
                 lat = latents[si]
             else:
@@ -539,6 +550,8 @@ def _plan_pins(pipeline, spec, kwargs):
                 plan.video.setdefault(si, []).append((pin["place"], lat))
         if latents is None and not any("pixel" in note for note in plan.notes if note.startswith(pin["place"])):
             plan.notes.append(f"{pin['place']} pin: pixel grade ({frames} frames{' of motion context' if motion else ''})")
+        if held:
+            plan.notes.append(f"{pin['place']} pin: held by the mask ({kind})")
         # audio: the pinned seconds of the clip's soundtrack, held at the same place
         if pin.get("audio", True) and not keep_audio:
             audio_latents = None
@@ -639,6 +652,30 @@ def _impl_prepare_condition_rows(self, inner, visual_latents, audio_latents, gen
                 plan.audio_rows = id(result[1])
             return result
     return inner(self, visual_latents, audio_latents, generator, keyframes, *args, **kwargs)
+
+
+def _impl_encode_source(vae, inner, source, *args, **kwargs):
+    """WanGP's encode of a Denoise Control Video source (once per sampling phase): put the saved latents of the masked
+    pins over the windows they hold, so the held frames are the neighbour's own latents, not a re-encode."""
+    latents = inner(vae, source, *args, **kwargs)
+    record = _GEN.get()
+    plan = record.get("plan") if record else None
+    if plan is None or not plan.masked or not hasattr(latents, "shape"):
+        return latents
+    hw = tuple(latents.shape[-2:])
+    stage = next((si for si, dims in enumerate(plan.stages) if tuple(dims) == hw), None)
+    if stage is None:
+        _log(f"masked pins: no stage of {hw} latents; held windows stay pixel grade")
+        return latents
+    total = int(latents.shape[2])
+    for place, lat in plan.masked.get(stage, []):
+        n = int(lat.shape[2])
+        if n > total:
+            continue
+        window = slice(0, n) if place == "before" else slice(total - n, total)
+        latents[:, :, window] = lat.to(device=latents.device, dtype=latents.dtype)
+    _STATE["held"] = _STATE.get("held", 0) + 1
+    return latents
 
 
 def _impl_layout(self, inner, text_tags, latent_t, latent_h, latent_w, audio_t, payload, *args, **kwargs):
@@ -967,7 +1004,12 @@ def _patch_models():
         _STATE["problems"].append("this WanGP build's H3 code is not what the editor expects (" + ", ".join(missing) + ")")
         return False
     _IMPLS.update({"generate": _impl_generate, "prepare_condition_rows": _impl_prepare_condition_rows,
-                   "video_decode": _impl_video_decode, "audio_decode": _impl_audio_decode, "layout": _impl_layout})
+                   "video_decode": _impl_video_decode, "audio_decode": _impl_audio_decode, "layout": _impl_layout,
+                   "encode_source": _impl_encode_source})
+    if hasattr(pm, "_encode_video_source"):
+        owners["encode_source"] = (pm, "_encode_video_source")
+    else:
+        _log("this WanGP has no _encode_video_source: masked joins will be pixel grade")
     applied = []
     try:
         for key, (owner, attr) in owners.items():

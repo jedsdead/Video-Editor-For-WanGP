@@ -16,6 +16,8 @@ export function canRegenerate(clip) {
 }
 
 // ------------------------------------------------------------------ jobs
+const isHeld = (p) => p && (p.kind === "masked" || p.kind === "both");
+
 export class RegenJobs {
   constructor(app) {
     this.app = app;
@@ -168,9 +170,12 @@ export class RegenJobs {
         }
       }
     };
+    // two renderings of the window exist only for pinned keyframes and for masked windows held from re-encoded pixels;
+    // a latent-grade masked window is the neighbour's own latents (a fade there only adds flicker)
+    const twoRenderings = (p) => p && p.kind !== "motion" && !(isHeld(p) && p.grade === "latent");
     const before = pinOf("before"), after = pinOf("after");
-    if (prev && job.left && prev.id === job.left.clipId) join(prev, clip, before && before.kind !== "motion" ? job.trimHead || 0 : 0, "end");
-    if (next && job.right && next.id === job.right.clipId) join(clip, next, after ? job.trimTail || 0 : 0, "start");
+    if (prev && job.left && prev.id === job.left.clipId) join(prev, clip, twoRenderings(before) ? job.trimHead || 0 : 0, "end");
+    if (next && job.right && next.id === job.right.clipId) join(clip, next, twoRenderings(after) ? job.trimTail || 0 : 0, "start");
   }
 
   // Level lock: gain a generated clip's opening (and closing, where it runs into a clip) onto the level of the
@@ -189,7 +194,8 @@ export class RegenJobs {
         return await api("api/gen/levellock", { method: "POST", body: { a: { mediaId: a.mediaId, end: Math.max(a.in, a.out) }, b: { mediaId: b.mediaId, start: Math.min(b.in, b.out) }, correct } });
       } catch (_) { return null; }
     };
-    const open = await ask(prev, clip, "b"), close = await ask(clip, next, "a");
+    const exact = (place) => { const p = (g.pins || []).find(x => x.place === place); return p && isHeld(p) && p.grade === "latent"; };
+    const open = exact("before") ? null : await ask(prev, clip, "b"), close = exact("after") ? null : await ask(clip, next, "a");
     const live = M.getClip(clipId);
     if (!live || live.mediaId !== clip.mediaId) return;
     M.edit("Level lock", () => {
