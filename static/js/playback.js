@@ -6,10 +6,12 @@
 // render.py applies the same EQ/compressor (via ffmpeg) and the same fader, automation and pan maths on export.
 import { state, P, bus, clipsOn, videoTracks, audioTracks, clipDur, srcTime, speedAt, fadeFactor, isRamped, transitionInfo,
          mediaOf, timelineEnd, getClip, audioTransitionGains, fps, clipWindow, prop, gradeAt, hasGradeKeys,
-         trackGainDb } from "./model.js";
+         trackGainDb, effectParamsAt, GENERATOR_KINDS } from "./model.js";
 import { gradeUniforms } from "./grade.js";
 import { isAudioTransition } from "./transitions.js";
 import { drawTitle } from "./titles.js";
+import { drawGenerator, effectPasses, EFFECTS } from "./effects.js";
+const EFFECTS_KNOWN = new Set(Object.keys(EFFECTS));
 import { ensureLut } from "./lut.js";
 import { dbToGain, clamp } from "./util.js";
 
@@ -316,11 +318,11 @@ export class Playback {
     let entry = this.pool.get(clip.id);
     const item = mediaOf(clip);
     if (!item) return null;
-    const rev = kind !== "image" && kind !== "title" && this.reversedReady(clip);
+    const rev = kind === "video" && this.reversedReady(clip);
     if (entry && (entry.mediaId !== clip.mediaId || entry.kind !== kind || entry.rev !== rev)) { this.dispose(clip.id); entry = null; }
     if (!entry) {
       let el;
-      if (kind === "title") el = document.createElement("canvas");
+      if (kind === "title" || kind === "solid" || kind === "gradient") el = document.createElement("canvas");
       else if (kind === "image") { el = new Image(); el.decoding = "async"; el.onload = () => { this.dirty = true; }; }
       else {
         el = document.createElement(kind === "audio" ? "audio" : "video");
@@ -330,7 +332,7 @@ export class Playback {
         el.addEventListener("seeked", () => { this.dirty = true; });
         el.addEventListener("loadeddata", () => { this.dirty = true; });
       }
-      if (kind !== "title") el.src = this.url(item, rev);
+      if (el.tagName !== "CANVAS") el.src = this.url(item, rev);
       entry = { el, kind, rev, mediaId: clip.mediaId, used: performance.now(), trackId: null };
       this.pool.set(clip.id, entry);
       if (kind === "audio") this.connectAudio(entry);
@@ -344,7 +346,7 @@ export class Playback {
     if (!entry) return;
     try { entry.el.pause && entry.el.pause(); } catch (_) { /* ignore */ }
     try { entry.gain && entry.gain.disconnect(); entry.node && entry.node.disconnect(); } catch (_) { /* ignore */ }
-    if (entry.kind !== "title") {
+    if (entry.el.tagName !== "CANVAS") {
       entry.el.removeAttribute("src");
       if (entry.el.load) try { entry.el.load(); } catch (_) { /* ignore */ }
     }
@@ -407,24 +409,16 @@ export class Playback {
              uv: [cl, ct, 1 - cr, 1 - cb], full: [w, h], k };
   }
 
-  layerFor(clip, t) {
-    const item = mediaOf(clip);
-    if (!item) return null;
-    const kind = item.kind === "image" ? "image" : item.kind === "title" ? "title" : "video";
-    const entry = this.entryFor(clip, kind);
-    if (!entry) return null;
-    if (kind === "video") this.syncElement(entry, clip, t, false);
-    const p = P();
-    if (kind === "title") {
-      const sig = JSON.stringify([clip.title, p.settings.width, p.settings.height]);
-      if (entry.sig !== sig) { drawTitle(entry.el, clip.title, p.settings.width, p.settings.height); entry.sig = sig; }
-    }
-    const sw = kind === "title" ? p.settings.width : item.width || p.settings.width;
-    const sh = kind === "title" ? p.settings.height : item.height || p.settings.height;
-    const d = clipDur(clip);
-    const kt = clamp(t - clip.start, 0, d);
-    const geo = this.geometry(clip, kt, sw, sh);
-    const alpha = clamp(prop(clip, "opacity", kt), 0, 1) * fadeFactor(clip, kt, d);
+  // Effect passes for a clip at clip time kt, as a function of the buffer size (null when it has none).
+  effectsFor(clip, kt, t) {
+    const list = (clip.effects || []).filter(f => f.on !== false && EFFECTS_KNOWN.has(f.type));
+    if (!list.length) return null;
+    const frame = Math.round(t * fps());
+    const resolved = list.map(f => [f.type, effectParamsAt(clip, f, kt)]);
+    return (w, h) => resolved.flatMap(([type, params]) => effectPasses(type, params, w, h, frame));
+  }
+
+  gradeFor(clip, kt) {
     let gradeObj = clip.grade, grade;
     if (hasGradeKeys(clip)) { gradeObj = gradeAt(clip, kt); grade = gradeUniforms(gradeObj); }
     else {
@@ -436,7 +430,43 @@ export class Playback {
       ensureLut(this.renderer, gradeObj.lut, () => { this.dirty = true; });
       lut = { name: gradeObj.lut, mix: clamp(gradeObj.lutMix ?? 1, 0, 1) };
     }
-    return { type: "clip", clip, source: entry.el, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, alpha, grade, lut };
+    return { grade, lut };
+  }
+
+  // Adjustment layer: grade and effects applied to everything below it.
+  adjustFor(clip, t) {
+    const d = clipDur(clip);
+    const kt = clamp(t - clip.start, 0, d);
+    const alpha = clamp(prop(clip, "opacity", kt), 0, 1) * fadeFactor(clip, kt, d);
+    if (alpha <= 0) return null;
+    return { type: "adjust", clip, alpha, ...this.gradeFor(clip, kt), effects: this.effectsFor(clip, kt, t) };
+  }
+
+  layerFor(clip, t) {
+    const item = mediaOf(clip);
+    if (!item || item.kind === "adjust") return null;
+    const kind = item.kind === "image" || GENERATOR_KINDS.has(item.kind) ? item.kind : "video";
+    const entry = this.entryFor(clip, kind);
+    if (!entry) return null;
+    if (kind === "video") this.syncElement(entry, clip, t, false);
+    const p = P();
+    if (kind === "title" || kind === "solid" || kind === "gradient") {
+      const sig = JSON.stringify([kind, kind === "title" ? clip.title : clip.gen, p.settings.width, p.settings.height]);
+      if (entry.sig !== sig) {
+        if (kind === "title") drawTitle(entry.el, clip.title, p.settings.width, p.settings.height);
+        else drawGenerator(entry.el, kind, clip.gen, p.settings.width, p.settings.height);
+        entry.sig = sig;
+      }
+    }
+    const projectSized = GENERATOR_KINDS.has(kind);
+    const sw = projectSized ? p.settings.width : item.width || p.settings.width;
+    const sh = projectSized ? p.settings.height : item.height || p.settings.height;
+    const d = clipDur(clip);
+    const kt = clamp(t - clip.start, 0, d);
+    const geo = this.geometry(clip, kt, sw, sh);
+    const alpha = clamp(prop(clip, "opacity", kt), 0, 1) * fadeFactor(clip, kt, d);
+    return { type: "clip", clip, source: entry.el, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, full: geo.full, alpha,
+             ...this.gradeFor(clip, kt), effects: this.effectsFor(clip, kt, t) };
   }
 
   buildFrame(t) {
@@ -460,6 +490,7 @@ export class Playback {
       for (const clip of clipsOn(track.id)) {
         if (clip.start <= t && t < clip.start + clipDur(clip)) {
           needed.add(clip.id);
+          if (mediaOf(clip)?.kind === "adjust") { const adj = this.adjustFor(clip, t); if (adj) entries.push(adj); continue; }
           const layer = this.layerFor(clip, t);
           if (layer) entries.push(layer);
         }
@@ -558,7 +589,7 @@ export class Playback {
         const [w0] = clipWindow(clip);
         if (w0 > t && w0 - t < LOOKAHEAD && !needed.has(clip.id)) {
           const item = mediaOf(clip);
-          if (!item || item.kind === "audio" || item.kind === "title") continue;
+          if (!item || item.kind === "audio" || GENERATOR_KINDS.has(item.kind)) continue;
           const entry = this.entryFor(clip, item.kind === "image" ? "image" : "video");
           if (entry && item.kind !== "image") this.preload(entry, clip);
           needed.add(clip.id);

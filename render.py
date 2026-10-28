@@ -15,6 +15,7 @@ from . import luts as L
 from . import media as M
 from . import timeline_math as T
 from . import titles as TT
+from . import fx as FX
 
 CODECS = {
     "h264": {"label": "H.264 (MP4)", "ext": ".mp4", "video": ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"], "crf": True, "audio": ["-c:a", "aac", "-b:a", "192k"]},
@@ -60,7 +61,7 @@ class Timeline:
             item = registry.get(clip["mediaId"]) or (project.get("media") or {}).get(clip["mediaId"])
             if item is None:
                 raise RuntimeError(f"Media for clip '{clip.get('name', clip['id'])}' is not available")
-            if item.get("kind") != "title" and not os.path.isfile(item.get("path", "")):
+            if item.get("kind") not in FX.GENERATOR_KINDS and not os.path.isfile(item.get("path", "")):
                 raise RuntimeError(f"Missing file: {item.get('path')}")
             self.media[clip["mediaId"]] = item
         self.tracks = {track["id"]: track for track in project.get("tracks", [])}
@@ -692,6 +693,7 @@ class ExportJob:
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
         comp = Compositor(tl.width, tl.height, device)
+        effects = FX.Effects(device)
         default_interp = opts.get("interpolation") or "blend"
         sources = {}
         rife = {"model": None, "failed": False}
@@ -725,6 +727,9 @@ class ExportJob:
                     pw, ph = self._project_w(tl), self._project_h(tl)
                     w, h = fit_size(pw, ph, tl.width, tl.height, decode_scale[clip["id"]])
                     src = TitleSource(clip.get("title"), pw, ph, w, h)
+                elif item["kind"] in ("solid", "gradient"):
+                    w, h = fit_size(self._project_w(tl), self._project_h(tl), tl.width, tl.height, decode_scale[clip["id"]])
+                    src = FX.GeneratorSource(item["kind"], clip.get("gen"), w, h)
                 elif item["kind"] == "image":
                     src = StillSource(item["path"], w, h)
                 elif clip.get("reverse"):
@@ -760,6 +765,8 @@ class ExportJob:
             return img * (1 - weight) + other * weight
 
         def clip_layer(clip, t):
+            if tl.kind(clip) == "adjust":
+                return None
             tau = t - float(clip["start"])
             img = frame_for(clip, tau)
             if img is None:
@@ -772,6 +779,12 @@ class ExportJob:
             rgb = img[:3] if img.shape[0] == 4 else img
             rgb = apply_lut(comp.grade(rgb, params), grade)
             img = self._cat(rgb, img[3:4]) if img.shape[0] == 4 else rgb
+            if FX.active(clip):
+                # effects run on premultiplied RGBA in the clip's own image space, then back to straight alpha
+                alpha = img[3:4] if img.shape[0] == 4 else torch.ones_like(img[:1])
+                out = effects.apply(self._cat(img[:3] * alpha, alpha), clip, kt, round(t * tl.fps))
+                a = out[3:4]
+                img = self._cat(torch.where(a > 0, out[:3] / a.clamp(min=1e-6), torch.zeros_like(out[:3])).clamp(0, 1), a)
             scale = max(0.0, T.prop(clip, "scale", kt, 1.0))
             base = decode_scale.get(clip["id"], 1.0)
             if abs(scale - base) > 1e-4:
@@ -784,6 +797,22 @@ class ExportJob:
             return comp.place(img, T.prop(clip, "x", kt, 0.0) * tl.width / max(1, self._project_w(tl)),
                               T.prop(clip, "y", kt, 0.0) * tl.height / max(1, self._project_h(tl)), alpha,
                               rotation=T.prop(clip, "rotation", kt, 0.0), crop=crop)
+
+        def adjust(clip, canvas, t):
+            """Adjustment layer: grade and effects on everything composited so far, mixed back by its opacity."""
+            duration = tl.durations[clip["id"]]
+            kt = min(max(t - float(clip["start"]), 0.0), duration)
+            alpha = min(1.0, max(0.0, T.prop(clip, "opacity", kt, 1.0))) * T.fade_factor(clip, kt, duration)
+            if alpha <= 0:
+                return canvas
+            keyed = T.has_grade_keys(clip)
+            grade = T.grade_at(clip, kt) if keyed else (clip.get("grade") or {})
+            params = T.grade_params(grade) if keyed else grades[clip["id"]]
+            out = apply_lut(comp.grade(canvas.clamp(0, 1), params), grade)
+            if FX.active(clip):
+                out = effects.apply(self._cat(out, torch.ones_like(out[:1])), clip, kt, round(t * tl.fps))
+                out = out[:3] + canvas * (1 - out[3:4])   # keyed-out or transparent parts show the original
+            return out * alpha + canvas * (1 - alpha)
 
         track_clips = {t["id"]: sorted([c for c in tl.clips.values() if c["trackId"] == t["id"]], key=lambda c: float(c["start"]))
                        for t in tl.video_tracks}
@@ -814,6 +843,12 @@ class ExportJob:
                     for clip in track_clips[track["id"]]:
                         s = float(clip["start"])
                         if s <= t < s + tl.durations[clip["id"]]:
+                            if tl.kind(clip) == "adjust":
+                                for layer in layers:
+                                    canvas = layer[:3] + canvas * (1 - layer[3:4])
+                                layers = []
+                                canvas = adjust(clip, canvas, t)
+                                continue
                             layer = clip_layer(clip, t)
                             if layer is not None:
                                 layers.append(layer)

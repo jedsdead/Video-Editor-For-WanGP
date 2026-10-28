@@ -12,6 +12,7 @@ import { ColourPanel } from "./colour.js";
 import { ScopesPanel } from "./scopes.js";
 import { MixerPanel } from "./mixer.js";
 import { TransitionsPanel } from "./transitionspanel.js";
+import { EffectsPanel } from "./effectspanel.js";
 import { openExportDialog } from "./exportdialog.js";
 import { CURVES, FADE_CURVES } from "./keys.js";
 import { TransformOverlay } from "./transform.js";
@@ -256,6 +257,40 @@ function prepareReverse(item) {
 }
 app.prepareReverse = prepareReverse;
 
+// Effects clipboard: the whole effect chain (with its keyframes) of one clip, pasted onto others (added after theirs).
+function copyEffects() {
+  const clip = M.selectedClips().find(c => M.trackKind(c.trackId) === "video" && (c.effects || []).length);
+  if (!clip) { toast("Select a video clip with effects", "warn"); return; }
+  const lanes = Object.fromEntries(Object.entries(clip.keys || {}).filter(([k]) => k.startsWith("fx:")));
+  state.effectsClipboard = JSON.parse(JSON.stringify({ effects: clip.effects, lanes }));
+  toast(`Copied ${clip.effects.length} effect${clip.effects.length > 1 ? "s" : ""}`);
+}
+function pasteEffects() {
+  const data = state.effectsClipboard;
+  const targets = M.selectedClips().filter(c => M.trackKind(c.trackId) === "video");
+  if (!data || !targets.length) return;
+  M.edit("Paste effects", () => {
+    for (const t of targets) {
+      const c = M.getClip(t.id);
+      for (const fx of data.effects) {
+        const id = uid("fx");
+        c.effects = [...(c.effects || []), { ...JSON.parse(JSON.stringify(fx)), id }];
+        for (const [lane, ks] of Object.entries(data.lanes)) {
+          const [, oldId, key] = lane.split(":");
+          if (oldId !== fx.id) continue;
+          const d = M.clipDur(c);
+          const kept = ks.filter(k => k.t <= d + 1e-6);
+          if (kept.length) { c.keys ||= {}; c.keys[M.effectLane(id, key)] = JSON.parse(JSON.stringify(kept)); }
+        }
+      }
+    }
+  });
+  toast(`Pasted effects onto ${targets.length} clip${targets.length > 1 ? "s" : ""}`);
+}
+function removeEffects() {
+  M.edit("Remove effects", () => { for (const c of M.selectedClips()) for (const f of [...(c.effects || [])]) M.removeEffect(c.id, f.id); });
+}
+
 function copyGrade() { app.colour.copy(); }
 function pasteGrade() { app.colour.paste(); }
 
@@ -306,7 +341,7 @@ function menuItems(name) {
     { label: "Add marker", kbd: "Shift+M", action: addMarker },
     { label: "Freeze frame at playhead", kbd: "Shift+F", action: freezeFrame },
     { label: "Reverse selected clips", kbd: "Shift+R", action: toggleReverse },
-    { label: "Add title at playhead", kbd: "Shift+T", action: () => app.bin.addTitle() },
+    { label: "Add title at playhead", kbd: "Shift+T", action: () => app.effects.addGenerator(M.TITLE_MEDIA.id) },
     { label: "Detect shots in selected clip…", kbd: "Shift+D", action: detectShots },
     "-",
     { label: "Mark in", kbd: "I", action: setIn },
@@ -439,8 +474,11 @@ function contextMenu(x, y, hit) {
       hit.row.kind === "video" ? { label: "Detect shots…", kbd: "Shift+D", disabled: M.isStill(clip), action: () => openShotDetect(app, clip.id) } : null,
       hit.row.kind === "video" ? { label: "Copy grade", action: copyGrade } : null,
       hit.row.kind === "video" ? { label: "Paste grade", action: pasteGrade } : null,
+      hit.row.kind === "video" ? { label: "Copy effects", disabled: !(clip.effects || []).length, action: copyEffects } : null,
+      hit.row.kind === "video" ? { label: "Paste effects", disabled: !state.effectsClipboard, action: pasteEffects } : null,
+      hit.row.kind === "video" ? { label: "Remove all effects", disabled: !(clip.effects || []).length, action: removeEffects } : null,
       "-",
-      { label: "Show in media bin", action: () => { state.selectedMedia = clip.mediaId; app.docks.show("media"); bus.emit("media"); } },
+      M.isGenerator(clip) ? null : { label: "Show in media bin", action: () => { state.selectedMedia = clip.mediaId; app.docks.show("media"); bus.emit("media"); } },
       { label: "Properties", action: () => app.docks.show("inspector") },
       "-",
       ...laneItems(clip, hit.row),
@@ -525,7 +563,7 @@ function onKey(e) {
     case "s": case "S": handled(); toggleSnap(); break;
     case "m": case "M": handled(); e.shiftKey ? addMarker() : toggleMagnetic(); break;
     case "f": case "F": if (e.shiftKey) { handled(); freezeFrame(); } break;
-    case "t": case "T": if (e.shiftKey) { handled(); app.bin.addTitle(); } break;
+    case "t": case "T": if (e.shiftKey) { handled(); app.effects.addGenerator(M.TITLE_MEDIA.id); } break;
     case "d": case "D": if (e.shiftKey) { handled(); detectShots(); } break;
     case "Delete": case "Backspace": handled(); deleteSelection(e.shiftKey); break;
     case "Escape": M.clearSelection(); state.range = null; bus.emit("range"); break;
@@ -567,10 +605,12 @@ async function main() {
   app.scopes = new ScopesPanel(app);
   app.mixer = new MixerPanel(app);
   app.transitions = new TransitionsPanel(app);
+  app.effects = new EffectsPanel(app);
   app.markers = new MarkersPanel(app);
   app.docks = new Docks([
     { id: "media", title: "Media", node: app.bin.node, dock: "left" },
     { id: "transitions", title: "Transitions", node: app.transitions.node, dock: "left" },
+    { id: "effects", title: "Effects", node: app.effects.node, dock: "left" },
     { id: "inspector", title: "Inspector", node: app.inspector.node, dock: "right" },
     { id: "colour", title: "Colour", node: app.colour.node, dock: "right" },
     { id: "scopes", title: "Scopes", node: app.scopes.node, dock: "right", onShow: () => { app.scopes.visible = true; app.scopes.update(true); }, onHide: () => { app.scopes.visible = false; } },

@@ -161,6 +161,12 @@ textarea { resize: vertical; width: 100%; user-select: text; }
 .ttile:hover { border-color: var(--accent); }
 .ttile.active { border-color: var(--sel); }
 .ttile canvas { width: 100%; height: 44px; border-radius: 3px; display: block; margin-bottom: 4px; }
+.fxtile canvas { height: auto; aspect-ratio: 16 / 9; }
+.fxcard { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin: 6px 0; background: var(--panel2); }
+.fxcard.off .field, .fxcard.off .fxname { opacity: .5; }
+.fxhead { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+.fxhead .fxname { font-weight: 600; font-size: 12px; margin-left: 2px; }
+.fxhead .spacer { flex: 1; }
 .tsection { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 4px 0 6px; }
 
 /* menus, modals, toasts */
@@ -271,7 +277,6 @@ canvas.speedgraph { width: 100%; height: 56px; display: block; border-radius: 4p
 .mdot:hover { opacity: 1; outline: 1px solid #fff; }
 
 /* title generator tile */
-.media-item.title .thumb { background: linear-gradient(135deg, #5a3a1a, #2e2012); }
 
 /* tonal (Final Cut style) wheels */
 .wheels.zones { grid-template-columns: repeat(2, 1fr); gap: 10px 8px; }

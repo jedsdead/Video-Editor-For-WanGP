@@ -2,7 +2,7 @@
 
 A multi-track video editor that runs as a plugin inside [WanGP](https://github.com/deepbeepmeep/Wan2GP), in its own tab. Cut your generations together, grade them, mix the audio and export, without leaving WanGP.
 
-**Version 0.5** · by jedsdeadbaby · MIT licence
+**Version 0.6** · by jedsdeadbaby · MIT licence
 
 ## Features
 
@@ -26,8 +26,18 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - Position, scale, rotation and crop for every video clip, all keyframeable.
 - Handles on the viewer: drag to move, corners to scale, the knob to rotate (Shift snaps to 15°), and crop mode (C) for edge handles. Clicking in the viewer selects the clip under the pointer.
 
+**Effects panel**
+- **Generators:** drag onto a video track, or double-click to add at the playhead on the top track (a new track is added if that one is busy).
+  - **Title** (also Shift+T)
+  - **Solid colour** and **Gradient** (two colours at any angle)
+  - **Adjustment layer:** its colour grade and effects apply to everything on the tracks below it for as long as it lasts, with opacity and fades to mix it in.
+- **Video effects:** Blur, Sharpen, Vignette, Film grain, Black & white, Chroma key (with spill removal), Flip, Pixelate, Chromatic aberration and Letterbox (2.76, 2.39, 2, 1.85, 16:9, 4:3 or 1:1, any bar colour).
+  - Drag an effect onto a clip, or click it to add it to the selected clips.
+  - In the Inspector, effects stack in order after the colour grade: switch each on or off, move it up or down, reset or remove it. Every slider keyframes with ◆.
+  - Right-click a clip to copy, paste or remove its effects.
+
 **Titles**
-- Drag the **Title** generator from the Media panel (or press Shift+T). Set the text, font, size, bold and italic, colour, alignment, line height, outline, drop shadow and background box in the Inspector, and animate it with the transform keyframes.
+- Drag the **Title** generator from the Effects panel (or press Shift+T). Set the text, font, size, bold and italic, colour, alignment, line height, outline, drop shadow and background box in the Inspector, and animate it with the transform keyframes.
 
 **Speed**
 - A constant speed, or a speed curve with keyframes that can go anywhere from 0% (a freeze frame) to 1000%. Presets: *Ramp to stop*, *Ease to slow-mo* and *Speed up*, starting at the playhead. A graph in the Inspector shows the curve.
@@ -72,7 +82,7 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - Rendered on the GPU from the original files.
 
 **Layout**
-- Media, Transitions, Markers, Inspector, Colour, Scopes and Mixer panels can each be moved to the left, right or bottom dock, **floated** as a movable, resizable window, or hidden.
+- Media, Transitions, Effects, Markers, Inspector, Colour, Scopes and Mixer panels can each be moved to the left, right or bottom dock, **floated** as a movable, resizable window, or hidden.
 - Use the **View** menu or right-click a panel tab. The layout is remembered.
 
 ## Installation

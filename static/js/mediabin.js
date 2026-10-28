@@ -33,26 +33,7 @@ export class MediaBin {
     this.grid.innerHTML = "";
     const items = this.items().filter(i => !this.filter || i.name.toLowerCase().includes(this.filter));
     this.hint.hidden = items.length > 0 && !this.filter ? false : false;
-    const title = P().media[M.TITLE_MEDIA.id];
-    if (title && (!this.filter || "title".includes(this.filter))) this.grid.append(this.titleTile(title));
     for (const item of items) this.grid.append(this.tile(item));
-  }
-
-  // The title generator: drag onto a video track (or double-click) for a new text clip.
-  titleTile(item) {
-    const thumb = el("div.thumb.title-thumb", {}, el("span.kind", {}, "GENERATOR"), el("div.busy", { style: { background: "transparent", fontSize: "30px", fontWeight: "700", color: "#ffd9a8" } }, "T"));
-    return el("div.media-item.title", {
-      draggable: true, title: "Title: drag onto a video track, or double-click to add it at the playhead on the top video track",
-      ondragstart: (e) => { e.dataTransfer.setData("text/x-ve-media", item.id); e.dataTransfer.effectAllowed = "copy"; window.__veDragMedia = item.id; },
-      ondragend: () => { window.__veDragMedia = null; },
-      ondblclick: () => this.addTitle(),
-    }, thumb, el("div.name", {}, "Title"));
-  }
-
-  addTitle(at = null) {
-    const tracks = M.videoTracks();
-    const clips = M.edit("Add title", () => M.placeMedia(P().media[M.TITLE_MEDIA.id], tracks[tracks.length - 1].id, at ?? state.playhead));
-    if (clips) { M.select(clips.map(c => c.id)); this.app.docks.show("inspector"); }
   }
 
   tile(item) {

@@ -8,7 +8,7 @@ import { transitionLabel, isAudioTransition } from "./transitions.js";
 import { isNeutral } from "./grade.js";
 
 const RULER_H = 28, VIDEO_H = 64, AUDIO_H = 52, GAP_H = 8, EDGE = 7, SNAP_PX = 9;
-const COLORS = { video: "#34588f", videoHead: "#284774", image: "#5f4489", imageHead: "#4b356d", title: "#8a5a2c", titleHead: "#6d4520", audio: "#2c6a4c", audioHead: "#215239",
+const COLORS = { video: "#34588f", videoHead: "#284774", image: "#5f4489", imageHead: "#4b356d", title: "#8a5a2c", titleHead: "#6d4520", gen: "#4a4f5c", genHead: "#3a3e48", adjust: "#5a4a6e", adjustHead: "#463a57", audio: "#2c6a4c", audioHead: "#215239",
                  wave: "rgba(170,240,200,.85)", sel: "#ffcc4d", trans: "rgba(201,141,44,.85)", playhead: "#ff4d4d", snap: "#ffe14d" };
 
 export class Timeline {
@@ -376,7 +376,7 @@ export class Timeline {
     const x0 = this.x(clip.start), x1 = this.x(M.clipEnd(clip));
     const w = Math.max(1, x1 - x0);
     const top = y + 2, h = row.h - 5;
-    const kind = item.kind === "image" ? "image" : item.kind === "title" ? "title" : row.kind;
+    const kind = item.kind === "image" ? "image" : item.kind === "title" ? "title" : item.kind === "adjust" ? "adjust" : M.GENERATOR_KINDS.has(item.kind) ? "gen" : row.kind;
     const selected = state.selection.has(clip.id);
     ctx.save();
     ctx.beginPath(); ctx.rect(x0, top, w, h); ctx.clip();
@@ -400,6 +400,14 @@ export class Timeline {
       ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.font = "bold 13px Segoe UI, system-ui, sans-serif";
       ctx.fillText(String(clip.title?.text || "").split("\n")[0].slice(0, 60), Math.max(x0, 0) + 6, top + headH + 6);
       ctx.font = "11px Segoe UI, system-ui, sans-serif";
+    } else if (row.kind === "video" && (item.kind === "solid" || item.kind === "gradient")) {
+      const g = clip.gen || {};
+      if (item.kind === "solid") ctx.fillStyle = g.color || "#000";
+      else { const gr = ctx.createLinearGradient(x0, 0, x1, 0); gr.addColorStop(0, g.color || "#000"); gr.addColorStop(1, g.color2 || "#fff"); ctx.fillStyle = gr; }
+      ctx.fillRect(x0, top + headH, w, h - headH);
+    } else if (row.kind === "video" && item.kind === "adjust") {
+      ctx.fillStyle = "rgba(255,255,255,.06)";
+      for (let sx = Math.floor(Math.max(x0, 0) / 12) * 12; sx < Math.min(x1, this.width); sx += 12) ctx.fillRect(sx, top + headH, 6, h - headH);
     } else if (row.kind === "video" && item.kind === "image") {
       ctx.fillStyle = "rgba(255,255,255,.06)";
       ctx.fillRect(x0, top + headH, w, h - headH);
@@ -432,6 +440,7 @@ export class Timeline {
     if (row.kind === "video" && clip.grade && !isNeutral(clip.grade)) badges.push("CC");
     if (clip.parentId) badges.push("⤓");
     if (clip.reverse) badges.push("◀◀");
+    if ((clip.effects || []).some(f => f.on !== false)) badges.push("fx");
     ctx.fillStyle = "#e9ecf2";
     const label = `${badges.join(" ")}${badges.length ? "  " : ""}${clip.name || item.name || "clip"}`;
     ctx.fillText(label, Math.max(x0, 0) + 4, top + 2);
@@ -973,10 +982,10 @@ export class Timeline {
   // ---------------------------------------------------------------- drag & drop from the media bin / OS
   dragOver(e) {
     const types = [...e.dataTransfer.types];
-    if (!types.includes("text/x-ve-media") && !types.includes("text/x-ve-transition") && !types.includes("Files")) return;
+    if (!types.includes("text/x-ve-media") && !types.includes("text/x-ve-transition") && !types.includes("text/x-ve-effect") && !types.includes("Files")) return;
     e.preventDefault();
     const [x, y] = this.local(e);
-    if (types.includes("text/x-ve-transition")) { e.dataTransfer.dropEffect = "copy"; this.ghost = null; this.hover = this.hit(x, y); this.draw(); return; }
+    if (types.includes("text/x-ve-transition") || types.includes("text/x-ve-effect")) { e.dataTransfer.dropEffect = "copy"; this.ghost = null; this.hover = this.hit(x, y); this.draw(); return; }
     e.dataTransfer.dropEffect = "copy";
     const id = window.__veDragMedia;
     const item = id && P().media[id];
@@ -1012,6 +1021,8 @@ export class Timeline {
     if (state.readOnly) return;
     const transitionId = e.dataTransfer.getData("text/x-ve-transition");
     if (transitionId) { bus.emit("drop-transition", { type: transitionId, hit: this.hit(x, y) }); return; }
+    const effectType = e.dataTransfer.getData("text/x-ve-effect");
+    if (effectType) { bus.emit("drop-effect", { type: effectType, hit: this.hit(x, y) }); this.draw(); return; }
     const mediaId = e.dataTransfer.getData("text/x-ve-media");
     if (mediaId && P().media[mediaId]) {
       const row = ghost ? ghost.row : (this.rowAt(y) || this.nearestRow(y));

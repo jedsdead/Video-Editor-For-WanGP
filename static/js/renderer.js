@@ -1,5 +1,6 @@
 // WebGL2 compositor for the viewer: draws graded, transformed clip layers bottom-to-top and blends transitions.
 import { TRANSITION_GLSL, transitionUniforms } from "./transitions.js";
+import { EFFECT_FS } from "./effects.js";
 
 // A layer is a (possibly cropped) image of size uSize centred at uCenter, rotated clockwise by uRot (radians);
 // uUv selects the visible part of the texture. render.py's Compositor.place uses the same geometry.
@@ -26,6 +27,7 @@ uniform sampler3D uLut;
 uniform bool uLutOn;
 uniform float uLutMix, uLutSize;
 uniform float uAlpha;
+uniform bool uPremul;
 uniform bool uGrade;
 uniform float uExposure, uContrast, uSat;
 uniform vec3 uWB, uLift, uGain, uGammaInv;
@@ -36,6 +38,7 @@ uniform float uZoneLo, uZoneHi;
 out vec4 o;
 void main() {
   vec4 t = texture(uTex, vUv);
+  if (uPremul) { o = t * uAlpha; return; }   // an already premultiplied effect buffer
   vec3 c = t.rgb;
   if (uGrade) {
     c = c * uExposure * uWB;
@@ -84,6 +87,13 @@ out vec4 o;
 ${TRANSITION_GLSL}
 void main() { o = transition(vUv); }`;
 
+const COPY_FS = `#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uSrc;
+out vec4 o;
+void main() { o = vec4(texture(uSrc, vUv).rgb, 1.0); }`;
+
 function compile(gl, vs, fs) {
   const make = (type, src) => {
     const s = gl.createShader(type);
@@ -112,6 +122,9 @@ export class Renderer {
     this.gl = gl;
     this.layer = compile(gl, LAYER_VS, LAYER_FS);
     this.trans = compile(gl, FULL_VS, TRANS_FS);
+    this.effect = compile(gl, FULL_VS, EFFECT_FS);
+    this.copy = compile(gl, FULL_VS, COPY_FS);
+    this.pool = new Map();   // offscreen buffers by name and size
     this.quad = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
@@ -146,24 +159,47 @@ export class Renderer {
   hasLut(name) { return this.luts.has(name); }
 
   setSize(w, h) {
-    if (this.canvas.width === w && this.canvas.height === h) return;
+    if (this.canvas.width === w && this.canvas.height === h && this.acc) return;
     this.canvas.width = w; this.canvas.height = h;
     const gl = this.gl;
     for (const f of this.fbos) { gl.deleteFramebuffer(f.fb); gl.deleteTexture(f.tex); }
-    this.fbos = [0, 1].map(() => {
-      const tex = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      const fb = gl.createFramebuffer();
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-      return { fb, tex };
-    });
+    this.fbos = [0, 1, 2].map(() => this.makeTarget(w, h));
+    this.acc = this.fbos[2];   // the composite; adjustment layers read it, then it is copied to the screen
+    for (const t of this.pool.values()) { gl.deleteFramebuffer(t.fb); gl.deleteTexture(t.tex); }
+    this.pool.clear();
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  makeTarget(w, h) {
+    const gl = this.gl;
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    return { fb, tex, w, h };
+  }
+
+  // Offscreen buffer for effects, reused while the size stays the same. Unused sizes are dropped after a while.
+  target(name, w, h) {
+    const key = `${name}:${w}x${h}`;
+    let t = this.pool.get(key);
+    if (!t) {
+      t = this.makeTarget(w, h);
+      this.pool.set(key, t);
+      if (this.pool.size > 24) {
+        const gl = this.gl;
+        const [oldKey, old] = [...this.pool].sort((a, b) => a[1].used - b[1].used)[0];
+        gl.deleteFramebuffer(old.fb); gl.deleteTexture(old.tex); this.pool.delete(oldKey);
+      }
+    }
+    t.used = performance.now();
+    return t;
   }
 
   texture(source) {
@@ -201,9 +237,9 @@ export class Renderer {
     return entry.ready ? entry.tex : null;
   }
 
-  drawLayer(item) {
+  drawLayer(item, size = null) {
     const gl = this.gl;
-    const tex = this.texture(item.source);
+    const tex = item.tex || this.texture(item.source);
     if (!tex) return false;
     const { program, u } = this.layer;
     gl.useProgram(program);
@@ -214,8 +250,9 @@ export class Renderer {
     gl.uniform2f(u.uSize, item.size[0], item.size[1]);
     gl.uniform1f(u.uRot, item.rotation || 0);
     gl.uniform4f(u.uUv, ...(item.uv || [0, 0, 1, 1]));
-    gl.uniform2f(u.uCanvas, this.canvas.width, this.canvas.height);
-    const lut = item.lut && this.luts.get(item.lut.name);
+    gl.uniform2f(u.uCanvas, size ? size[0] : this.canvas.width, size ? size[1] : this.canvas.height);
+    gl.uniform1i(u.uPremul, item.premul ? 1 : 0);
+    const lut = !item.premul && item.lut && this.luts.get(item.lut.name);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_3D, (lut || this.emptyLut).tex);
     gl.uniform1i(u.uLut, 1);
@@ -224,7 +261,7 @@ export class Renderer {
     gl.uniform1f(u.uLutSize, (lut || this.emptyLut).size);
     gl.activeTexture(gl.TEXTURE0);
     gl.uniform1f(u.uAlpha, item.alpha);
-    const g = item.grade;
+    const g = item.premul ? null : item.grade;
     gl.uniform1i(u.uGrade, g ? 1 : 0);
     if (g) {
       gl.uniform1f(u.uExposure, g.exposure);
@@ -246,27 +283,102 @@ export class Renderer {
     return true;
   }
 
-  // entries: [{type:'clip', ...layer}] or [{type:'transition', kind, p, a, b}] in bottom-to-top order
-  render(entries) {
+  // Run effect passes on a buffer pair; returns the buffer holding the result.
+  runEffects(src, other, passes) {
+    const gl = this.gl;
+    const { program, u } = this.effect;
+    gl.disable(gl.BLEND);
+    gl.useProgram(program);
+    for (const pass of passes) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, other.fb);
+      gl.viewport(0, 0, other.w, other.h);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, src.tex);
+      gl.uniform1i(u.uSrc, 0);
+      gl.uniform1i(u.uType, pass.type);
+      gl.uniform4f(u.uA, ...pass.a);
+      if (u.uCol) gl.uniform3f(u.uCol, ...(pass.col || [0, 0, 0]));
+      if (u.uDir) gl.uniform2f(u.uDir, ...(pass.dir || [0, 0]));
+      if (u.uTexel) gl.uniform2f(u.uTexel, 1 / src.w, 1 / src.h);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      [src, other] = [other, src];
+    }
+    gl.enable(gl.BLEND);
+    return src;
+  }
+
+  // A layer with effects: grade the whole source image into a buffer at its on-screen size, run the effects, and
+  // return a premultiplied layer that draws that buffer with the clip's crop, position and opacity.
+  effectLayer(item) {
+    const gl = this.gl;
+    const w = Math.max(1, Math.min(4096, Math.round(item.full[0]))), h = Math.max(1, Math.min(4096, Math.round(item.full[1])));
+    const a = this.target(`fx${item.slot || 0}a`, w, h), b = this.target(`fx${item.slot || 0}b`, w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, a.fb);
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    if (!this.drawLayer({ ...item, center: [w / 2, h / 2], size: [w, h], rotation: 0, uv: [0, 0, 1, 1], alpha: 1 }, [w, h])) return null;
+    const out = this.runEffects(a, b, item.effects(w, h));
+    const [l, t, r, bo] = item.uv || [0, 0, 1, 1];
+    return { ...item, tex: out.tex, premul: true, uv: [l, 1 - t, r, 1 - bo] };
+  }
+
+  // Draw a layer (with its effects, if any) into a target.
+  drawInto(item, target) {
+    const gl = this.gl;
+    let layer = item;
+    if (item.effects) {
+      layer = this.effectLayer(item);
+      if (!layer) return false;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fb);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    return this.drawLayer(layer);
+  }
+
+  // Adjustment layer: grade and run effects on everything composited so far, then mix it back by the layer's opacity.
+  applyAdjust(entry) {
     const gl = this.gl;
     const w = this.canvas.width, h = this.canvas.height;
+    const a = this.target("adjA", w, h), b = this.target("adjB", w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, a.fb);
     gl.viewport(0, 0, w, h);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.disable(gl.BLEND);
+    this.drawLayer({ tex: this.acc.tex, center: [w / 2, h / 2], size: [w, h], rotation: 0, uv: [0, 1, 1, 0], alpha: 1, grade: entry.grade, lut: entry.lut });
+    gl.enable(gl.BLEND);
+    const out = entry.effects ? this.runEffects(a, b, entry.effects(w, h)) : a;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.acc.fb);
+    gl.viewport(0, 0, w, h);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    this.drawLayer({ tex: out.tex, premul: true, center: [w / 2, h / 2], size: [w, h], rotation: 0, uv: [0, 1, 1, 0], alpha: entry.alpha });
+  }
+
+  // entries: [{type:'clip', ...layer}], [{type:'transition', kind, p, a, b}] or [{type:'adjust', ...}] in bottom-to-top order
+  render(entries) {
+    const gl = this.gl;
+    if (!this.acc) this.setSize(this.canvas.width, this.canvas.height);
+    const w = this.canvas.width, h = this.canvas.height;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.acc.fb);
+    gl.viewport(0, 0, w, h);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     let pending = false;
     for (const entry of entries) {
-      if (entry.type === "clip") { if (!this.drawLayer(entry)) pending = true; continue; }
+      if (entry.type === "clip") { if (!this.drawInto(entry, this.acc)) pending = true; continue; }
+      if (entry.type === "adjust") { this.applyAdjust(entry); continue; }
       const layers = [entry.a, entry.b];
       layers.forEach((layer, i) => {
         gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbos[i].fb);
+        gl.viewport(0, 0, w, h);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
-        if (layer && !this.drawLayer(layer)) pending = true;
+        if (layer && !this.drawInto(layer, this.fbos[i])) pending = true;
       });
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.acc.fb);
+      gl.viewport(0, 0, w, h);
       const { program, u } = this.trans;
       gl.useProgram(program);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.fbos[0].tex);
@@ -288,6 +400,16 @@ export class Renderer {
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       gl.activeTexture(gl.TEXTURE0);
     }
+    // copy the composite to the screen
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, w, h);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.copy.program);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.acc.tex);
+    gl.uniform1i(this.copy.u.uSrc, 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.enable(gl.BLEND);
     return !pending;
   }
 }

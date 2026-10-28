@@ -128,7 +128,7 @@ def key_integral(keys, t):
 
 
 def is_still(kind):
-    return kind in ("image", "title")
+    return kind in ("image", "title", "solid", "gradient", "adjust")
 
 
 def keys_of(clip, name):

@@ -33,6 +33,18 @@ export function defaultTitle() {
            box: { on: false, color: "#000000", opacity: 0.5, padding: 24 } };
 }
 export const TITLE_MEDIA = { id: "__title__", kind: "title", name: "Title", duration: 0, generator: true };
+// Generators live in the Effects panel: built-in "media" that make clips without a file.
+export const GENERATOR_MEDIA = [TITLE_MEDIA,
+  { id: "__solid__", kind: "solid", name: "Solid colour", duration: 0, generator: true },
+  { id: "__gradient__", kind: "gradient", name: "Gradient", duration: 0, generator: true },
+  { id: "__adjust__", kind: "adjust", name: "Adjustment layer", duration: 0, generator: true }];
+export const GENERATOR_KINDS = new Set(GENERATOR_MEDIA.map(g => g.kind));
+const generatorMedia = () => Object.fromEntries(GENERATOR_MEDIA.map(g => [g.id, { ...g }]));
+export function defaultGen(kind) {
+  if (kind === "solid") return { color: "#1b2a49" };
+  if (kind === "gradient") return { color: "#1b2a49", color2: "#c86b3c", angle: 90 };
+  return {};
+}
 
 export const state = {
   project: null,
@@ -60,7 +72,7 @@ export function newProject(name = "Untitled") {
       { id: uid("a"), kind: "audio", name: "", mute: false, solo: false, locked: false, volume: 0, pan: 0, fx: defaultFx(), keys: {} },
       { id: uid("a"), kind: "audio", name: "", mute: false, solo: false, locked: false, volume: 0, pan: 0, fx: defaultFx(), keys: {} },
     ],
-    clips: [], transitions: [], media: { [TITLE_MEDIA.id]: { ...TITLE_MEDIA } }, master: { volume: 0, fx: defaultFx() }, markers: [],
+    clips: [], transitions: [], media: generatorMedia(), master: { volume: 0, fx: defaultFx() }, markers: [],
     magnetic: true, snapping: true, inPoint: null, outPoint: null, exportDefaults: null,
   };
 }
@@ -72,7 +84,8 @@ export const frameDur = () => 1 / fps();
 export const snapFrame = (t) => Math.round(t * fps()) / fps();
 export const mediaOf = (clip) => P().media[clip.mediaId];
 export const kindOf = (clip) => (mediaOf(clip) || {}).kind;
-export const isStillKind = (kind) => kind === "image" || kind === "title";
+export const isStillKind = (kind) => kind === "image" || GENERATOR_KINDS.has(kind);
+export const isGenerator = (clip) => GENERATOR_KINDS.has(kindOf(clip));
 export const isStill = (clip) => isStillKind(kindOf(clip));
 export const getClip = (id) => P().clips.find(c => c.id === id);
 export const getTrack = (id) => P().tracks.find(t => t.id === id);
@@ -106,6 +119,7 @@ export const keysOf = (clip, prop) => (clip.keys && clip.keys[prop]) || [];
 export const hasKeys = (clip, prop) => keysOf(clip, prop).length > 0;
 export const hasSpeedKeys = (clip) => hasKeys(clip, "speed") && !isStill(clip);
 export function prop(clip, name, tau) {
+  if (name.startsWith("fx:")) return effectParam(clip, name, tau);
   const fallback = clip[name] ?? KEYABLE[name].fallback;
   return keyValue(keysOf(clip, name), tau, fallback);
 }
@@ -138,6 +152,57 @@ export function mergeGrade(g) {
   for (const k of ["lift", "gamma", "gain", "master", "shadows", "mids", "highs"]) out[k] = { ...d[k], ...(g[k] || {}) };
   return out;
 }
+// ---- effects: clip.effects = [{id, type, on, params}], keyframed as lanes "fx:<id>:<param>"
+export const effectLane = (fxId, key) => `fx:${fxId}:${key}`;
+function parseLane(name) { const [, id, key] = name.split(":"); return { id, key }; }
+export function effectParam(clip, name, tau) {
+  const { id, key } = parseLane(name);
+  const fx = (clip.effects || []).find(f => f.id === id);
+  const base = fx ? Number(fx.params?.[key]) || 0 : 0;
+  return keyValue(keysOf(clip, name), tau, base);
+}
+// Resolved parameters of an effect at clip time tau.
+export function effectParamsAt(clip, fx, tau) {
+  const out = { ...(fx.params || {}) };
+  for (const key of Object.keys(out)) { const ks = keysOf(clip, effectLane(fx.id, key)); if (ks.length) out[key] = keyValue(ks, tau); }
+  return out;
+}
+export function addEffect(clipIds, type, params) {
+  const added = [];
+  for (const id of clipIds) {
+    const c = getClip(id);
+    if (!c || trackKind(c.trackId) !== "video") continue;
+    c.effects = [...(c.effects || []), { id: uid("fx"), type, on: true, params: { ...params } }];
+    added.push(c);
+  }
+  return added;
+}
+export function removeEffect(clipId, fxId) {
+  const c = getClip(clipId);
+  if (!c) return;
+  c.effects = (c.effects || []).filter(f => f.id !== fxId);
+  for (const name of Object.keys(c.keys || {})) if (name.startsWith(`fx:${fxId}:`)) delete c.keys[name];
+}
+export function moveEffect(clipId, fxId, delta) {
+  const c = getClip(clipId);
+  if (!c) return;
+  const list = [...(c.effects || [])];
+  const i = list.findIndex(f => f.id === fxId), j = i + delta;
+  if (i < 0 || j < 0 || j >= list.length) return;
+  [list[i], list[j]] = [list[j], list[i]];
+  c.effects = list;
+}
+export function updateEffect(clipId, fxId, fn) {
+  const c = getClip(clipId);
+  const fx = c && (c.effects || []).find(f => f.id === fxId);
+  if (!fx) return;
+  const copy = { ...fx, params: { ...fx.params } };
+  fn(copy);
+  c.effects = c.effects.map(f => f.id === fxId ? copy : f);
+}
+export function setEffectStatic(clip, name, value) { const { id, key } = parseLane(name); updateEffect(clip.id, id, f => { f.params[key] = value; }); }
+export const hasEffects = (clip) => (clip.effects || []).some(f => f.on !== false);
+
 export function gradeFieldValue(grade, field) { const v = getPath(grade, field); return typeof v === "number" ? v : getPath(defaultGrade(), field); }
 export { setPath as setGradePath };
 
@@ -476,7 +541,9 @@ export function newClipsForMedia(item, videoTrackId, audioTrackId, start) {
   if (item.kind === "video" || isStillKind(item.kind)) {
     const clip = { ...base, id: uid("c"), trackId: videoTrackId, in: 0, out: length, linkId,
                    opacity: 1, scale: 1, x: 0, y: 0, rotation: 0, cropL: 0, cropR: 0, cropT: 0, cropB: 0, grade: defaultGrade() };
+    clip.effects = [];
     if (item.kind === "title") { clip.title = defaultTitle(); clip.name = "Title"; }
+    else if (GENERATOR_KINDS.has(item.kind)) { clip.gen = defaultGen(item.kind); clip.name = item.name; }
     clips.push(clip);
   }
   if (item.kind === "audio" || (item.kind === "video" && item.has_audio)) {
@@ -505,7 +572,7 @@ export function placeMedia(item, trackId, time) {
   let vTrack, aTrack;
   if (item.kind === "audio") {
     aTrack = kind === "audio" ? trackId : audioTracks()[0].id;
-  } else if (item.kind === "title") {
+  } else if (GENERATOR_KINDS.has(item.kind)) {
     vTrack = kind === "video" ? trackId : videoTracks()[videoTracks().length - 1].id;
   } else {
     vTrack = kind === "video" ? trackId : primaryId();
@@ -773,7 +840,8 @@ export function removeKey(clipId, name, index) {
   const ks = K.sorted(keysOf(clip, name));
   if (!ks[index]) return;
   const after = KeyOps.remove(ks, index);
-  if (!after.length && name !== "speed" && !name.startsWith("grade:")) clip[name] = ks[index].v;
+  if (!after.length && name !== "speed" && !name.startsWith("grade:") && !name.startsWith("fx:")) clip[name] = ks[index].v;
+  if (!after.length && name.startsWith("fx:")) { const { id, key } = parseLane(name); updateEffect(clip.id, id, f => { f.params[key] = ks[index].v; }); }
   if (!after.length && name.startsWith("grade:")) { clip.grade = { ...(clip.grade || defaultGrade()) }; setPath(clip.grade, name.slice(6), ks[index].v); }
   storeKeys(clip, name, after);
 }
@@ -802,6 +870,7 @@ export function setPropAt(clipId, name, tau, value) {
   if (!clip) return;
   if (hasKeys(clip, name)) { if (tau >= -1e-6 && tau <= clipDur(clip) + 1e-6) setKeyAt(clipId, name, snapFrame(clamp(tau, 0, clipDur(clip))), value); }
   else if (name === "speed") setSpeed([clipId], Math.max(0.01, value));
+  else if (name.startsWith("fx:")) setEffectStatic(clip, name, value);
   else clip[name] = value;
 }
 
@@ -1108,7 +1177,7 @@ export function normalizeProject(project) {
   const base = newProject(project.name || "Untitled");
   for (const key of Object.keys(base)) if (project[key] === undefined) project[key] = base[key];
   project.settings = { ...base.settings, ...project.settings };
-  project.media[TITLE_MEDIA.id] = { ...TITLE_MEDIA };
+  Object.assign(project.media, generatorMedia());
   project.markers ??= [];
   project.master = { volume: 0, ...(project.master || {}) };
   project.master.fx = mergeFx(project.master.fx);
@@ -1128,7 +1197,10 @@ export function normalizeProject(project) {
     if (project.tracks.find(t => t.id === c.trackId)?.kind === "video") {
       c.opacity ??= 1; c.scale ??= 1; c.x ??= 0; c.y ??= 0; c.rotation ??= 0; c.cropL ??= 0; c.cropR ??= 0; c.cropT ??= 0; c.cropB ??= 0;
       c.grade = mergeGrade(c.grade);
-      if (project.media[c.mediaId]?.kind === "title") c.title = mergeTitle(c.title);
+      c.effects = Array.isArray(c.effects) ? c.effects : [];
+      const kind = project.media[c.mediaId]?.kind;
+      if (kind === "title") c.title = mergeTitle(c.title);
+      else if (GENERATOR_KINDS.has(kind)) c.gen = { ...defaultGen(kind), ...(c.gen || {}) };
     } else c.volume ??= 0;
   }
   return project;

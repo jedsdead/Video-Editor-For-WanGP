@@ -29,7 +29,7 @@ export class TransformOverlay {
     const layers = [];
     for (const e of this.app.playback.lastLayers || []) {
       if (e.type === "clip") layers.push(e);
-      else { if (e.a) layers.push(e.a); if (e.b) layers.push(e.b); }
+      else if (e.type === "transition") { if (e.a) layers.push(e.a); if (e.b) layers.push(e.b); }
     }
     const layer = layers.slice().reverse().find(l => state.selection.has(l.clip.id));
     return layer ? this.toCss(layer) : null;
@@ -143,7 +143,7 @@ export class TransformOverlay {
     const layers = [];
     for (const e of this.app.playback.lastLayers || []) {
       if (e.type === "clip") layers.push(e);
-      else { if (e.b) layers.push(e.b); if (e.a) layers.push(e.a); }
+      else if (e.type === "transition") { if (e.b) layers.push(e.b); if (e.a) layers.push(e.a); }
     }
     for (const layer of layers.slice().reverse()) {
       if (layer.alpha <= 0.01) continue;

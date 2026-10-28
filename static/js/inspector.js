@@ -4,6 +4,7 @@ import { state, P, bus } from "./model.js";
 import { api, el, toast, timecode, shortTime, clamp } from "./util.js";
 import { CURVES, FADE_CURVES } from "./keys.js";
 import { FONT_FALLBACK } from "./titles.js";
+import { EFFECTS, EFFECT_ORDER, defaultEffectParams } from "./effects.js";
 import { FAMILIES, AUDIO_TRANSITIONS, DISSOLVE_STYLES, IRIS_SHAPES, ANGLE_PRESETS, DEFAULT_PARAMS, MAX_BORDER, isAudioTransition, hasEdge } from "./transitions.js";
 
 const RES_PRESETS = [[1280, 720], [1920, 1080], [3840, 2160], [832, 480], [480, 832], [720, 1280], [1080, 1920], [1024, 1024], [2560, 1080]];
@@ -30,7 +31,7 @@ export class Inspector {
 
   signature() {
     if (!P()) return "";
-    const clips = M.selectedClips().map(c => `${c.id}:${c.trackId}`).join(",");
+    const clips = M.selectedClips().map(c => `${c.id}:${c.trackId}:${(c.effects || []).map(f => f.id).join(".")}`).join(",");
     return `${clips}|${state.selTransition}|${state.selectedMedia}|${P().tracks.length}`;
   }
 
@@ -86,7 +87,9 @@ export class Inspector {
   // ---------------------------------------------------------------- clips
   renderClips(clips) {
     const first = clips[0];
-    const video = clips.filter(c => M.trackKind(c.trackId) === "video");
+    const videoAll = clips.filter(c => M.trackKind(c.trackId) === "video");
+    const adjust = videoAll.filter(c => M.kindOf(c) === "adjust");
+    const video = videoAll.filter(c => M.kindOf(c) !== "adjust");
     const audio = clips.filter(c => M.trackKind(c.trackId) === "audio");
     const each = (list, fn) => () => list.forEach(c => { const live = M.getClip(c.id); if (live) fn(live); });
     const live = (c) => M.getClip(c.id) || c;
@@ -134,8 +137,12 @@ export class Inspector {
         this.keyHelp());
     }
 
+    if (adjust.length) this.renderAdjust(adjust);
+    const gens = clips.filter(c => M.kindOf(c) === "solid" || M.kindOf(c) === "gradient");
+    if (gens.length === 1) this.renderGenerator(gens[0]);
     const titles = clips.filter(c => M.kindOf(c) === "title");
     if (titles.length) this.renderTitle(titles);
+    if (videoAll.length) this.renderEffects(videoAll);
 
     const timed = clips.filter(c => !M.isStill(c));
     if (timed.length) this.renderSpeed(timed);
@@ -188,6 +195,7 @@ export class Inspector {
           const l = live(c);
           if (M.hasKeys(l, name)) { if (inside(c)) M.setKeyAt(l.id, name, M.snapFrame(tauOf(c)), v); }
           else if (name === "speed") M.setSpeed([l.id], Math.max(0.01, v));
+          else if (name.startsWith("fx:")) M.setEffectStatic(l, name, v);
           else l[name] = v;
         }
       }, min, max, step, format, editLabel: label,
@@ -265,6 +273,103 @@ export class Inspector {
     }
     parts.push(el("div.dim", { style: { fontSize: "11px", marginTop: "6px" } }, "Regenerating a shot from these details is coming in a later version."));
     this.section("Shot", ...parts);
+  }
+
+  // ---------------------------------------------------------------- adjustment layers & generators
+  renderAdjust(list) {
+    const fps = M.fps();
+    const each = (fn) => () => list.forEach(c => { const l = M.getClip(c.id); if (l) fn(l); });
+    this.defaults = { ...(this.defaults || {}), Opacity: 100 };
+    this.section("Adjustment layer",
+      el("div.dim", { style: { fontSize: "11px", marginBottom: "6px", lineHeight: "1.45" } },
+        "Its colour grade and effects apply to everything on the tracks below it, for as long as it lasts. Opacity mixes the result with the original."),
+      this.keySlider("Opacity", list, "opacity", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 100, step: 0.5 }),
+      this.slider("Fade in", { get: () => (M.getClip(list[0].id) || list[0]).fadeIn || 0, set: (v) => each(c => { c.fadeIn = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 1 / fps, format: (v) => v.toFixed(2), editLabel: "Fade in" }),
+      this.curveSelect("Fade in shape", list, "fadeInCurve"),
+      this.slider("Fade out", { get: () => (M.getClip(list[0].id) || list[0]).fadeOut || 0, set: (v) => each(c => { c.fadeOut = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 1 / fps, format: (v) => v.toFixed(2), editLabel: "Fade out" }),
+      this.curveSelect("Fade out shape", list, "fadeOutCurve"),
+      el("div.btnrow", {}, el("button.small", { onclick: () => this.app.docks.show("colour") }, "Colour…"), el("button.small", { onclick: () => this.app.docks.show("effects") }, "Effects…")));
+  }
+
+  renderGenerator(clip) {
+    const live = () => M.getClip(clip.id) || clip;
+    const kind = M.kindOf(clip);
+    const set = (key, value, label) => M.edit(label, () => { const l = live(); l.gen = { ...(l.gen || {}), [key]: value }; }, { coalesceKey: `gen-${key}-${clip.id}` });
+    const colour = (key, label) => {
+      const input = el("input", { type: "color", value: live().gen?.[key] || "#000000", oninput: (e) => set(key, e.target.value, label) });
+      this.refreshers.push(() => { if (document.activeElement !== input) input.value = live().gen?.[key] || "#000000"; });
+      return el("div.field.wide", {}, el("label", {}, label), input);
+    };
+    const parts = kind === "solid" ? [colour("color", "Colour")] : [colour("color", "Start colour"), colour("color2", "End colour"),
+      this.slider("Angle", { get: () => Number(live().gen?.angle) || 0, set: (v) => { const l = live(); l.gen = { ...(l.gen || {}), angle: v }; }, min: 0, max: 359, step: 1, format: (v) => Math.round(v), editLabel: "Gradient angle" }),
+      el("div.dim", { style: { fontSize: "11px" } }, "The direction the gradient runs from the start colour to the end colour: 0° is left to right, 90° is bottom to top.")];
+    this.section(kind === "solid" ? "Solid colour" : "Gradient", ...parts);
+  }
+
+  // ---------------------------------------------------------------- effects
+  renderEffects(list) {
+    const holder = this.section("Effects");
+    const add = el("select", { onchange: (e) => {
+      const type = e.target.value;
+      e.target.value = "";
+      if (!type) return;
+      M.edit(`Add ${EFFECTS[type].label}`, () => M.addEffect(list.map(c => c.id), type, defaultEffectParams(type)));
+      this.render();
+    } }, el("option", { value: "" }, "Add effect…"), EFFECT_ORDER.map(id => el("option", { value: id }, EFFECTS[id].label)));
+    holder.append(el("div.field.wide", {}, el("label", {}, ""), add));
+    if (list.length > 1) {
+      const count = list.reduce((n, c) => n + (c.effects || []).length, 0);
+      holder.append(el("div.dim", { style: { fontSize: "11px" } }, `${count} effect${count === 1 ? "" : "s"} across ${list.length} clips. Select one clip to edit its effects; Add effect adds to every selected clip.`),
+        count ? el("div.btnrow", {}, el("button.small.danger", { onclick: () => { M.edit("Remove effects", () => { for (const c of list) { const l = M.getClip(c.id); if (l) for (const f of [...(l.effects || [])]) M.removeEffect(l.id, f.id); } }); this.render(); } }, "Remove all effects")) : null);
+      return;
+    }
+    const clip = list[0];
+    const live = () => M.getClip(clip.id) || clip;
+    const effects = live().effects || [];
+    if (!effects.length) holder.append(el("div.dim", { style: { fontSize: "11px" } }, "No effects. Pick one above, or drag one from the Effects panel onto the clip."));
+    effects.forEach((fx, index) => {
+      const def = EFFECTS[fx.type];
+      if (!def) return;
+      const fxLive = () => (live().effects || []).find(f => f.id === fx.id) || fx;
+      const change = (label, fn) => M.edit(label, () => M.updateEffect(clip.id, fx.id, fn));
+      const on = el("input", { type: "checkbox", checked: fx.on !== false, title: "Turn the effect on or off", onchange: (e) => change(`${def.label} on/off`, f => { f.on = e.target.checked; }) });
+      this.refreshers.push(() => { on.checked = fxLive().on !== false; });
+      const head = el("div.fxhead", {}, on, el("span.fxname", {}, def.label), el("div.spacer"),
+        el("button.small.kbtn", { title: "Move up (earlier in the chain)", disabled: index === 0, onclick: () => { M.edit("Reorder effects", () => M.moveEffect(clip.id, fx.id, -1)); this.render(); } }, "▲"),
+        el("button.small.kbtn", { title: "Move down (later in the chain)", disabled: index === effects.length - 1, onclick: () => { M.edit("Reorder effects", () => M.moveEffect(clip.id, fx.id, 1)); this.render(); } }, "▼"),
+        el("button.small.kbtn", { title: "Reset to defaults", onclick: () => { M.edit(`Reset ${def.label}`, () => {
+          const l = live();
+          for (const name of Object.keys(l.keys || {})) if (name.startsWith(`fx:${fx.id}:`)) delete l.keys[name];
+          M.updateEffect(clip.id, fx.id, f => { f.params = defaultEffectParams(fx.type); });
+        }); this.render(); } }, "↺"),
+        el("button.small.kbtn", { title: "Remove the effect", onclick: () => { M.edit(`Remove ${def.label}`, () => M.removeEffect(clip.id, fx.id)); this.render(); } }, "✕"));
+      const rows = [];
+      for (const p of def.params) {
+        const value = () => fxLive().params?.[p.key] ?? p.def;
+        if (p.type === "check") {
+          const box = el("input", { type: "checkbox", checked: !!value(), onchange: (e) => change(`${def.label} ${p.label}`, f => { f.params[p.key] = e.target.checked; }) });
+          this.refreshers.push(() => { box.checked = !!value(); });
+          rows.push(el("div.field.wide", {}, el("label", {}, ""), el("label", { style: { display: "flex", gap: "6px", alignItems: "center", color: "inherit" } }, box, p.label)));
+        } else if (p.type === "color") {
+          const input = el("input", { type: "color", value: value(), oninput: (e) => M.edit(`${def.label} ${p.label}`, () => M.updateEffect(clip.id, fx.id, f => { f.params[p.key] = e.target.value; }), { coalesceKey: `fxc-${fx.id}-${p.key}` }) });
+          this.refreshers.push(() => { if (document.activeElement !== input) input.value = value(); });
+          rows.push(el("div.field.wide", {}, el("label", {}, p.label), input));
+        } else if (p.type === "select") {
+          const sel = el("select", { onchange: (e) => change(`${def.label} ${p.label}`, f => { f.params[p.key] = parseFloat(e.target.value); }) },
+            p.options.map(([v, label]) => el("option", { value: v, selected: Math.abs(v - value()) < 1e-6 }, label)));
+          rows.push(el("div.field.wide", {}, el("label", {}, p.label), sel));
+        } else {
+          const lane = M.effectLane(fx.id, p.key);
+          const label = p.label + "\u200b".repeat(index);   // keeps slider labels unique between effects
+          this.defaults = { ...(this.defaults || {}), [label]: p.def };
+          rows.push(this.keySlider(label, [clip], lane, { toUi: (v) => Math.round(v * 10) / 10, fromUi: (v) => v, min: p.min, max: p.max, step: p.step, format: (v) => (+v).toFixed(p.step < 1 ? 1 : 0) }));
+        }
+      }
+      const card = el(`div.fxcard${fx.on === false ? ".off" : ""}`, {}, head, ...rows);
+      this.refreshers.push(() => card.classList.toggle("off", fxLive().on === false));
+      holder.append(card);
+    });
+    if (effects.length) holder.append(el("div.dim", { style: { fontSize: "11px", marginTop: "4px" } }, "Effects run top to bottom, after the colour grade. Sliders keyframe with ◆ like any other property."));
   }
 
   // ---------------------------------------------------------------- titles
