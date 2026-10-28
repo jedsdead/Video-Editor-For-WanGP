@@ -4,21 +4,30 @@
 // new clip continues out of / runs into them. Results come back as clips (or takes) placed by RegenJobs.applyCompose.
 import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
-import { api, el, modal, toast, clamp, debounce } from "./util.js";
+import { api, el, modal, toast, clamp, debounce, timecode } from "./util.js";
 
 const PREFS = "ve_gen_prefs";
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS) || "{}"); } catch (_) { return {}; } };
 const savePrefs = (p) => { try { localStorage.setItem(PREFS, JSON.stringify({ ...loadPrefs(), ...p })); } catch (_) { /* storage blocked */ } };
 
-export const MODE_LABEL = { extend: "Extend", prepend: "Prepend", bridge: "Bridge", replace: "Replace", fill: "Fill gap", loop: "Loop" };
+export const MODE_LABEL = { new: "New shot", extend: "Extend", prepend: "Prepend", bridge: "Bridge", replace: "Replace", fill: "Fill gap", loop: "Loop" };
 
 // Which clips a mode pins, from where the user asked. Returns {left, right, anchor, trackId, gap} or a reason.
-export function sides(mode, { clipId = null, trackId = null, t = null } = {}) {
+export function sides(mode, { clipId = null, trackId = null, t = null, targetId = null } = {}) {
   const clip = clipId ? M.getClip(clipId) : null;
   trackId = trackId || clip?.trackId;
   if (!trackId || M.trackKind(trackId) !== "video") return { reason: "Generations work on video tracks" };
   const touch = clip ? M.touchingNeighbours(clip) : {};
   const list = M.clipsOn(trackId).filter(c => !M.isStill(c));
+  if (mode === "new") {
+    // a shot from nothing, placed where asked (a reroll of one passes the clip as targetId and gets a new take on it)
+    const target = targetId ? M.getClip(targetId) : null;
+    const at = target ? target.start : Math.max(0, t ?? 0);
+    const gap = target ? null : M.gapAt(trackId, at);
+    if (!target && !gap) return { reason: "Right-click empty space on a video track" };
+    const near = gap ? [gap.prev, gap.next].find(c => c && M.mediaOf(c)?.has_metadata) : M.mediaOf(target)?.has_metadata ? target : null;
+    return { left: null, right: null, anchor: target || null, trackId, gap, at, target, near };
+  }
   if (mode === "extend") return { left: clip, right: null, anchor: clip, trackId };
   if (mode === "prepend") return { left: null, right: clip, anchor: clip, trackId };
   if (mode === "bridge") return touch.next ? { left: clip, right: touch.next, anchor: clip, trackId } : { reason: "No clip right after this one to bridge into" };
@@ -60,14 +69,17 @@ export async function openGenerate(app, mode, where) {
   const prefs = loadPrefs();
   const leftItem = s.left && M.mediaOf(s.left), rightItem = s.right && M.mediaOf(s.right);
   const replaceItem = s.replace && P().media[M.originalOf(s.replace).mediaId];
-  const settingsItem = [replaceItem, leftItem, rightItem].find(i => i && i.has_metadata) || null;
+  const fresh = mode === "new";
+  const settingsItem = fresh ? (s.near ? P().media[M.originalOf(s.near).mediaId] : null) : [replaceItem, leftItem, rightItem].find(i => i && i.has_metadata) || null;
   // the prompt starts from the clip the new footage continues (or replaces)
   const promptClip = s.replace || s.left || s.right;
-  const promptRange = s.replace ? [M.originalOf(s.replace).in, M.originalOf(s.replace).out]
+  const promptRange = fresh ? null : s.replace ? [M.originalOf(s.replace).in, M.originalOf(s.replace).out]
     : s.left ? [Math.max(startSource(s.left), endSource(s.left) - 0.25), endSource(s.left)]
     : [startSource(s.right), startSource(s.right) + 0.25];
   const gapLen = s.gap && Number.isFinite(s.gap.end) ? s.gap.end - s.gap.start : null;
-  const defaultSeconds = s.replace ? M.clipDur(s.replace) : gapLen ?? (prefs.newSeconds || 3);
+  const roomLen = fresh && s.gap && Number.isFinite(s.gap.end) ? s.gap.end - s.at : null;
+  const defaultSeconds = fresh ? (s.target ? M.clipDur(s.target) : roomLen && roomLen > 0.5 && roomLen < 30 ? roomLen : prefs.freshSeconds || 5)
+    : s.replace ? M.clipDur(s.replace) : gapLen ?? (prefs.newSeconds || 3);
 
   let status = { available: false, reason: "Checking…", current: null, h3: {} };
   try { status = await api("api/regen/status"); } catch (_) { /* shown below */ }
@@ -77,6 +89,8 @@ export async function openGenerate(app, mode, where) {
     return { input, row: el("label.rrow", {}, input, el("span", {}, label)) };
   };
   const what = {
+    new: s.target ? `A new take of “${s.target.name}”, generated from scratch with no pinned frames.`
+      : `Generate a new shot from scratch and ${P().magnetic && s.trackId === M.primaryId() ? (s.gap?.prev ? "add it after the last clip" : "start the sequence with it") : `place it at ${timecode(s.at, P().fps || 24)}`}. Nothing is pinned, so it doesn't continue from other clips; use Extend, Prepend or Bridge for that.`,
     extend: `Continue “${s.left?.name || "the clip"}” from its last frames.`,
     prepend: `Generate what happens before “${s.right?.name || "the clip"}”, running into its first frames.`,
     bridge: `Generate a new piece between “${s.left?.name}” and “${s.right?.name}”, joining both.`,
@@ -87,14 +101,14 @@ export async function openGenerate(app, mode, where) {
 
   const windowSel = el("select", {}, [22, 39, 56].map(f => el("option", { value: f }, `${f} frames`)));
   windowSel.value = String(prefs.window || 22);
-  const seconds = el("input", { type: "number", min: 0.5, max: 19, step: 0.1, value: (+defaultSeconds).toFixed(2), style: { width: "76px" } });
+  const seconds = el("input", { type: "number", min: 0.5, max: fresh ? 120 : 19, step: 0.1, value: (+defaultSeconds).toFixed(2), style: { width: "76px" } });
   const lengthNote = el("div.dim.small");
   const pinsBox = el("div.gpins");
   const keepCut = el("input", { type: "checkbox", checked: !!prefs.keepCut });
   const carryAudio = el("input", { type: "checkbox", checked: prefs.carryAudio !== false });
-  const srcClip = radio("g_src", "clip", settingsItem ? "The clip's settings" : "The clip's settings (not a WanGP clip)", !!settingsItem && !prefs.useCurrent, { disabled: !settingsItem });
+  const srcClip = radio("g_src", "clip", fresh ? (settingsItem ? `The same settings as “${s.near.name}”` : "A neighbouring clip's settings (none here)") : settingsItem ? "The clip's settings" : "The clip's settings (not a WanGP clip)", !!settingsItem && !prefs.useCurrent, { disabled: !settingsItem });
   const srcCurrent = radio("g_src", "current", status.current ? `Current Media Generator settings (${status.current.name})` : "Current Media Generator settings (open the Video Generator tab first)",
-    !settingsItem || !!prefs.useCurrent, { disabled: !status.current });
+    !settingsItem || !!prefs.useCurrent || fresh, { disabled: !status.current });
   const modelNote = el("div.dim.small");
   const seedSel = el("select", {}, el("option", { value: "new" }, "New random seed"), el("option", { value: "same" }, "Same seed as the clip"), el("option", { value: "custom" }, "Custom seed…"));
   seedSel.value = prefs.seed === "custom" ? "custom" : "new";
@@ -102,7 +116,7 @@ export async function openGenerate(app, mode, where) {
   const promptBox = el("textarea.rgprompt", { rows: 10, spellcheck: false });
   const promptNote = el("div.dim.small");
   const error = el("div.warn");
-  const addonNote = status.h3?.installed ? null : el("div.warn", { style: { marginBottom: "8px" } },
+  const addonNote = status.h3?.installed || fresh ? null : el("div.warn", { style: { marginBottom: "8px" } },
     `The editor's H3 add-on isn't active in WanGP${status.h3?.problems?.length ? `: ${status.h3.problems.join("; ")}` : ""}. Restart WanGP after updating the plugin.`);
 
   const field = (label, ...children) => el("div.rgfield", {}, el("label.rglabel", {}, label), el("div.rgctl", {}, ...children));
@@ -110,11 +124,11 @@ export async function openGenerate(app, mode, where) {
     el("div", { style: { marginBottom: "8px" } }, what),
     status.available ? null : el("div.warn", { style: { marginBottom: "8px" } }, status.reason || "Generation is unavailable"),
     addonNote,
-    field("Pinned frames", el("div", { style: { display: "flex", gap: "8px", alignItems: "center" } }, windowSel, el("span.dim.small", {}, "of each neighbour held as fixed context")),
+    fresh ? null : field("Pinned frames", el("div", { style: { display: "flex", gap: "8px", alignItems: "center" } }, windowSel, el("span.dim.small", {}, "of each neighbour held as fixed context")),
       pinsBox,
       el("label.rrow", {}, keepCut, el("span", {}, "Keep my exact cuts (pixel grade instead of moving a cut onto H3's grid)")),
       el("label.rrow", {}, carryAudio, el("span", {}, "Carry the pinned audio too"))),
-    field("New footage", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seconds, el("span.dim", {}, "seconds")), lengthNote),
+    field(fresh ? "Length" : "New footage", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seconds, el("span.dim", {}, "seconds")), lengthNote),
     field("Settings", srcClip.row, srcCurrent.row, modelNote),
     field("Seed", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seedSel, seedInput)),
     field("Prompt", promptBox, promptNote),
@@ -133,7 +147,8 @@ export async function openGenerate(app, mode, where) {
     replaceId: s.replace?.id || null,
     gap: s.gap ? { start: s.gap.start, end: Number.isFinite(s.gap.end) ? s.gap.end : null } : null,
     window: parseInt(windowSel.value, 10), newSeconds: clamp(parseFloat(seconds.value) || 3, 0.2, 30),
-    useCurrent: srcCurrent.input.checked, settingsFrom: settingsItem?.id || (s.left || s.right).mediaId, promptRange,
+    useCurrent: srcCurrent.input.checked, settingsFrom: settingsItem?.id || (s.left || s.right)?.mediaId || null, promptRange,
+    at: s.at ?? null, targetId: s.target?.id || null,
   });
 
   const describePin = (p) => {
@@ -152,12 +167,14 @@ export async function openGenerate(app, mode, where) {
       pinsBox.innerHTML = "";
       for (const p of info.pins) pinsBox.append(describePin(p));
       const L = info.lengths;
-      lengthNote.textContent = `One run of ${L.totalSeconds.toFixed(2)}s (${L.total} frames): ${L.before ? `${(L.before / info.fps).toFixed(2)}s pinned + ` : ""}${L.newSeconds.toFixed(2)}s new${L.after ? ` + ${(L.after / info.fps).toFixed(2)}s pinned` : ""}. H3 runs in steps of 17 frames, so the new part is the nearest legal length.`;
+      if (fresh) lengthNote.textContent = `${L.totalSeconds.toFixed(2)}s (${L.total} frames). ${L.note}`;
+      else lengthNote.textContent = `One run of ${L.totalSeconds.toFixed(2)}s (${L.total} frames): ${L.before ? `${(L.before / info.fps).toFixed(2)}s pinned + ` : ""}${L.newSeconds.toFixed(2)}s new${L.after ? ` + ${(L.after / info.fps).toFixed(2)}s pinned` : ""}. ${L.note}`;
       modelNote.textContent = `Model: ${info.model.name}`;
       for (const r of info.refmods || []) modelNote.append(el(r.status === "relinked" ? "div" : "div.warn", {},
         r.status === "relinked" ? `RefMod '${r.mod}' has moved: using ${r.now}.` : `RefMod '${r.mod}' can't be found, so it will be skipped.`));
       if (!promptEdited) promptBox.value = info.prompt || "";
-      promptNote.textContent = `Describe the whole run, pinned frames included: ${L.before ? `the first ${(L.before / info.fps).toFixed(2)}s are the previous clip's last frames` : ""}${L.before && L.after ? " and " : ""}${L.after ? `the last ${(L.after / info.fps).toFixed(2)}s are the next clip's first frames` : ""}. Started from ${promptClip?.name || "the clip"}'s prompt.`;
+      if (fresh) promptNote.textContent = settingsItem && !srcCurrent.input.checked ? `Started from ${s.near.name}'s prompt.` : "Started from the Media Generator's prompt.";
+      else promptNote.textContent = `Describe the whole run, pinned frames included: ${L.before ? `the first ${(L.before / info.fps).toFixed(2)}s are the previous clip's last frames` : ""}${L.before && L.after ? " and " : ""}${L.after ? `the last ${(L.after / info.fps).toFixed(2)}s are the next clip's first frames` : ""}. Started from ${promptClip?.name || "the clip"}'s prompt.`;
       seedSel.options[1].textContent = info.originalSeed != null ? `Same seed as the clip (${info.originalSeed})` : "Same seed as the clip";
     } catch (e) { info = null; error.textContent = e.message; }
     update();
@@ -165,7 +182,7 @@ export async function openGenerate(app, mode, where) {
 
   const update = () => {
     seedInput.hidden = seedSel.value !== "custom";
-    go.disabled = !info || !status.available || !status.h3?.installed;
+    go.disabled = !info || !status.available || (!fresh && !status.h3?.installed);
   };
   for (const c of [windowSel, seconds, keepCut, carryAudio, srcClip.input, srcCurrent.input]) c.addEventListener("change", prepare);
   seedSel.addEventListener("change", update);
@@ -179,7 +196,8 @@ export async function openGenerate(app, mode, where) {
       if (!Number.isFinite(seed) || seed < 0) { error.textContent = "Enter a seed of 0 or more"; return; }
     }
     const req = { ...request(), seed, prompt: promptBox.value };
-    savePrefs({ window: req.window, newSeconds: s.gap || s.replace ? prefs.newSeconds : req.newSeconds, keepCut: keepCut.checked, carryAudio: carryAudio.checked,
+    savePrefs({ window: req.window, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
+      freshSeconds: fresh && !s.target ? req.newSeconds : prefs.freshSeconds, keepCut: keepCut.checked, carryAudio: carryAudio.checked,
       useCurrent: req.useCurrent, seed: seedSel.value === "custom" ? "custom" : "new", customSeed: seedInput.value });
     go.disabled = true;
     try {
@@ -198,6 +216,7 @@ export async function openGenerate(app, mode, where) {
 export function rerollFor(app, clip) {
   const g = clip?.gen;
   if (!g) return;
+  if (g.mode === "new") { openGenerate(app, "new", { trackId: clip.trackId, targetId: clip.id }); return; }
   const where = g.mode === "fill" ? { trackId: clip.trackId, t: clip.start } : { clipId: g.mode === "prepend" ? g.child : g.mode === "replace" ? clip.id : g.parent || clip.id };
   if (g.mode === "fill") {
     // the gap is now filled by this clip: regenerate it as a replacement between its neighbours

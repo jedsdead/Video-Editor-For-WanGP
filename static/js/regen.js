@@ -93,7 +93,8 @@ export class RegenJobs {
     const left = job.left && M.getClip(job.left.clipId), right = job.right && M.getClip(job.right.clipId);
     const lineage = { mode: job.mode, parent: job.left?.clipId || null, child: job.right?.clipId || null, jobId: job.id, seed: job.seed, pins: job.pins };
     let target = null, placedNote = "";
-    if ((job.left && !left) || (job.right && !right) || (job.mode === "replace" && !M.getClip(job.request?.replaceId))) {
+    const targetId = job.request?.targetId;
+    if ((job.left && !left) || (job.right && !right) || (job.mode === "replace" && !M.getClip(job.request?.replaceId)) || (targetId && !M.getClip(targetId))) {
       toast(`A ${job.mode} generation finished, but the clips it joins have changed; it was added to the Media panel`, "warn");
     } else {
       M.edit(`Add ${job.mode}`, () => {
@@ -107,7 +108,7 @@ export class RegenJobs {
           target.gen = { ...lineage, mode: "replace" };
           return;
         }
-        const existing = M.generatedIn(job.mode, lineage.parent, lineage.child);
+        const existing = job.mode === "new" ? (targetId ? M.getClip(targetId) : null) : M.generatedIn(job.mode, lineage.parent, lineage.child);
         if (existing) {
           target = existing;
           M.addTake(existing.id, { mediaId: item.id, in: inT, length, label: takeLabel(existing), seed: job.seed, audio: "new", jobId: job.id });
@@ -116,14 +117,18 @@ export class RegenJobs {
         }
         const L = left && M.getClip(left.id), R = right && M.getClip(right.id);
         let at, room = 0;
-        if (job.mode === "prepend") at = R.start;
+        if (job.mode === "new") {
+          at = Math.max(0, +job.request?.at || 0);
+          const gap = M.gapAt(job.trackId, at);
+          room = gap && Number.isFinite(gap.end) ? Math.max(0, gap.end - at) : Infinity;
+        } else if (job.mode === "prepend") at = R.start;
         else if (job.mode === "fill") {
           const gap = M.gapAt(job.trackId, L ? M.clipEnd(L) + 1e-4 : Math.max(0, R.start - 1e-4));
           at = gap ? gap.start : (L ? M.clipEnd(L) : R.start);
           room = gap && Number.isFinite(gap.end) ? gap.end - gap.start : 0;
         } else at = M.clipEnd(L);
         const clips = M.insertMedia(item, job.trackId, at, inT, outT, { room, close: job.mode === "fill" });
-        for (const c of clips) { c.gen = lineage; c.name = `${(L || R)?.name?.split(" · ")[0] || item.name} · ${job.mode}`; }
+        for (const c of clips) { c.gen = lineage; c.name = job.mode === "new" ? item.name : `${(L || R)?.name?.split(" · ")[0] || item.name} · ${job.mode}`; }
         target = clips[0];
       });
       if (target) {

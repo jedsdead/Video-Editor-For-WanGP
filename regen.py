@@ -554,11 +554,15 @@ class RegenService:
     def _compose(self, req):
         ok, reason = self.host.available()
         mode = req.get("mode")
-        if mode not in ("extend", "prepend", "bridge", "fill", "loop", "replace"):
+        if mode not in ("new", "extend", "prepend", "bridge", "fill", "loop", "replace"):
             raise ValueError("Unknown generation mode")
-        source = self._item(req.get("settingsFrom") or (req.get("left") or req.get("right") or {}).get("mediaId"))
-        meta = self._meta(source) or {}
-        settings = self._settings_for(source, bool(req.get("useCurrent")))
+        fresh = mode == "new"
+        source_id = req.get("settingsFrom") or (req.get("left") or req.get("right") or {}).get("mediaId")
+        source = self._item(source_id) if source_id else None
+        if source is None and not fresh:
+            raise ValueError("Nothing to pin: this needs a clip on the side it continues from")
+        meta = (self._meta(source) if source else None) or {}
+        settings = self._settings_for(source, bool(req.get("useCurrent")) or source is None)
         settings, refmods = relink_refmods(settings)
         model_type = settings.get("model_type")
         model_def = self.host.model_def(model_type) or {}
@@ -566,24 +570,38 @@ class RegenService:
         gen_fps = caps["fps"]
         window = int(req.get("window") or 22)
         pins = []
-        if req.get("left") and mode in ("extend", "bridge", "fill", "loop", "replace"):
-            pins.append(self._pin(req["left"], "before", window, gen_fps))
-        if req.get("right") and mode in ("prepend", "bridge", "fill", "loop", "replace"):
-            pins.append(self._pin(req["right"], "after", window, gen_fps))
-        if not pins:
-            raise ValueError("Nothing to pin: this needs a clip on the side it continues from")
+        if not fresh:
+            if req.get("left") and mode in ("extend", "bridge", "fill", "loop", "replace"):
+                pins.append(self._pin(req["left"], "before", window, gen_fps))
+            if req.get("right") and mode in ("prepend", "bridge", "fill", "loop", "replace"):
+                pins.append(self._pin(req["right"], "after", window, gen_fps))
+            if not pins:
+                raise ValueError("Nothing to pin: this needs a clip on the side it continues from")
         before = sum(p["frames"] for p in pins if p["place"] == "before")
         after = sum(p["frames"] for p in pins if p["place"] == "after")
-        lengths = C.plan_lengths(float(req.get("newSeconds") or 3.0), gen_fps, before, after, caps["framesMinimum"], nearest=True)
         window_max = int(((model_def or {}).get("sliding_window_defaults") or {}).get("window_max") or 0)
-        if window_max and lengths["total"] > window_max:
-            raise ValueError(f"that's {lengths['total']} frames in one run; this model allows {window_max} ({window_max / gen_fps:.1f}s) including the pins")
-        a, b = sorted(float(x) for x in (req.get("promptRange") or [0, 0]))
-        prompt_fps = caps["fps"] if not str(meta.get("force_fps") or "").strip().isdigit() else float(meta["force_fps"])
-        prompt, shots = shot_prompt(meta.get("prompt") or settings.get("prompt") or "", prompt_fps, a, b, meta.get("sliding_window_overlap") or 0) if b > a else (meta.get("prompt") or "", [])
+        if fresh:
+            # a new shot: no pins, the model's own legal lengths, and WanGP's sliding windows may run it as long as asked
+            h3 = "minimax_h3" in str(model_type or "")
+            step = C.GRID if h3 else max(1, caps["framesSteps"])
+            minimum = caps["framesMinimum"]
+            total = C.nearest_total(float(req.get("newSeconds") or 5.0) * gen_fps, minimum, step=step, offset=minimum % step)
+            lengths = {"total": total, "new": total, "before": 0, "after": 0}
+            step_note = f"{model_def.get('name') or 'This model'} runs in steps of {step} frames, so this is the nearest legal length."
+        else:
+            lengths = C.plan_lengths(float(req.get("newSeconds") or 3.0), gen_fps, before, after, caps["framesMinimum"], nearest=True)
+            if window_max and lengths["total"] > window_max:
+                raise ValueError(f"that's {lengths['total']} frames in one run; this model allows {window_max} ({window_max / gen_fps:.1f}s) including the pins")
+            step_note = "H3 runs in steps of 17 frames, so the new part is the nearest legal length."
+        if fresh:
+            prompt, shots = str(settings.get("prompt") or meta.get("prompt") or ""), []
+        else:
+            a, b = sorted(float(x) for x in (req.get("promptRange") or [0, 0]))
+            prompt_fps = caps["fps"] if not str(meta.get("force_fps") or "").strip().isdigit() else float(meta["force_fps"])
+            prompt, shots = shot_prompt(meta.get("prompt") or settings.get("prompt") or "", prompt_fps, a, b, meta.get("sliding_window_overlap") or 0) if b > a else (meta.get("prompt") or "", [])
         info = {"mode": mode, "model": {"type": model_type, "name": self.host.model_name(model_type)}, "capabilities": caps,
                 "fps": gen_fps, "pins": pins, "lengths": {**lengths, "newSeconds": lengths["new"] / gen_fps, "totalSeconds": lengths["total"] / gen_fps,
-                                                          "trimHead": before / gen_fps, "trimTail": after / gen_fps},
+                                                          "trimHead": before / gen_fps, "trimTail": after / gen_fps, "note": step_note},
                 "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "refmods": refmods,
                 "available": ok, "reason": reason, "h3": self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}}
         return info, settings, model_def
@@ -596,7 +614,7 @@ class RegenService:
         info, settings, model_def = self._compose(req)
         if not info["available"]:
             raise ValueError(info["reason"])
-        if not (info.get("h3") or {}).get("installed"):
+        if info["pins"] and not (info.get("h3") or {}).get("installed"):
             raise ValueError("The editor's H3 add-on isn't active in WanGP (see the console), so pinned generations can't run")
         seed = req.get("seed")
         if seed in (None, "", "new") or int(seed) < 0:
@@ -605,7 +623,8 @@ class RegenService:
         lengths = info["lengths"]
         prompt = str(req.get("prompt") or "").strip() or info["prompt"]
         task = build_task(settings, prompt=prompt, seed=seed, frames=lengths["total"], fps=info["fps"], model_def=model_def)
-        task["sliding_window_size"] = max(int(task.get("sliding_window_size") or 0), lengths["total"])   # one window: pins only apply to window 1
+        if info["pins"]:
+            task["sliding_window_size"] = max(int(task.get("sliding_window_size") or 0), lengths["total"])   # one window: pins only apply to window 1
         spec = {"pins": [{k: p[k] for k in ("place", "file", "fps", "frames", "start_frame", "sha", "audio")} for p in info["pins"]],
                 "mode": info["mode"]}
         job_id = uuid.uuid4().hex[:12]

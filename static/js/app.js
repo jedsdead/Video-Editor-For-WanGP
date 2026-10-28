@@ -523,8 +523,9 @@ function contextMenu(x, y, hit) {
     const gap = hit.row && hit.row.kind === "video" ? M.gapAt(hit.row.track.id, hit.t) : null;
     const fill = gap && (gap.prev || gap.next) ? { label: gap.prev && gap.next ? "Fill gap with a generation, joining both clips…" : "Fill with a generation…",
       action: () => openGenerate(app, "fill", { trackId: hit.row.track.id, t: hit.t }) } : null;
+    const fresh = hit.row && hit.row.kind === "video" && gap ? { label: "Generate a new shot here…", action: () => openGenerate(app, "new", { trackId: hit.row.track.id, t: hit.t }) } : null;
     showMenu(x, y, [
-      fill, fill ? "-" : null,
+      fresh, fill, fresh || fill ? "-" : null,
       { label: "Paste at playhead", disabled: !state.clipboard, action: paste },
       state.range ? { label: "Delete range", action: () => deleteSelection(false) } : null,
       state.range ? { label: "Ripple delete range", action: () => deleteSelection(true) } : null,
