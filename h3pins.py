@@ -84,6 +84,10 @@ def legal_pin_frames(frames):
     return frames >= 5 and (frames - 5) % GRID == 0
 
 
+def legal_motion_frames(frames):
+    return frames >= GRID + 1 and (frames - 1) % GRID == 0
+
+
 def on_grid(frame):
     return int(frame) % GRID == 0
 
@@ -462,24 +466,38 @@ def _plan_pins(pipeline, spec, kwargs):
     used = 0
     keep_audio = "S" in str(kwargs.get("audio_prompt_type") or "")
     pipeline._use_shared_components()
+    alf = float(getattr(pm, "AUDIO_LATENT_FPS", AUDIO_LATENT_FPS))
+    sr = int(getattr(pm, "AUDIO_SAMPLE_RATE", 32000))
     for pin in pins:
         frames = int(pin["frames"])
-        if not legal_pin_frames(frames):
-            raise ValueError(f"a pin must be 5 + 17n frames long (got {frames})")
-        n = latent_count(frames)
-        used += n
+        motion = pin.get("kind") == "motion" and pin["place"] == "before"
+        if motion:
+            # H3's native continuation: 17k frames of history (motion context, before the run on H3's timeline) plus
+            # the join frame pinned as the run's first frame, exactly as Wan2GP lays out a sliding-window overlap
+            if not legal_motion_frames(frames):
+                raise ValueError(f"motion context must be 17k + 1 frames long (got {frames})")
+            history_latents = (frames - 1) // GRID * LATENTS_PER_CLIP
+            n = history_latents + 1
+            used += 1
+        else:
+            if not legal_pin_frames(frames):
+                raise ValueError(f"a pin must be 5 + 17n frames long (got {frames})")
+            n = latent_count(frames)
+            used += n
         if used > total_latents:
             raise ValueError("the pins are longer than the clip being generated")
         path, start = pin["file"], int(pin["start_frame"])
         src_fps = float(pin.get("fps") or fps)
         latents = None
         saved = None
+        window = None
         if pin.get("sha") and STORE is not None and abs(src_fps - fps) < 1e-3:
             window, reason = find_window(STORE.manifest(pin["sha"]), start, frames)
             if window is None:
                 plan.notes.append(f"{pin['place']} pin: pixel grade ({reason})")
             else:
                 saved = STORE.load(pin["sha"])
+        entry = None
         if saved is not None:
             entry = saved["windows"][window["index"]]
             lat0 = window["rel"] // GRID * LATENTS_PER_CLIP
@@ -492,44 +510,58 @@ def _plan_pins(pipeline, spec, kwargs):
                     per_stage.append(entry["p1"][:, lat0:lat0 + n].float().unsqueeze(0))
                 else:
                     per_stage.append(None)   # this stage is encoded from pixels below
-            latents = per_stage
-            plan.notes.append(f"{pin['place']} pin: latent grade ({frames} frames{', from Latent Carry' if window.get('source') == 'latent_carry' else ''})")
+            if any(lat is not None and lat.shape[2] != n for lat in per_stage):
+                per_stage = [None] * len(plan.stages)
+                plan.notes.append(f"{pin['place']} pin: pixel grade (the saved window is shorter than the pin)")
+            else:
+                latents = per_stage
+                plan.notes.append(f"{pin['place']} pin: latent grade ({frames} frames{' of motion context' if motion else ''}"
+                                  f"{', from Latent Carry' if window.get('source') == 'latent_carry' else ''})")
         pixels = None
-        stage_latents = []
         for si, (h, w) in enumerate(stages):
             if latents is not None and latents[si] is not None:
-                stage_latents.append(latents[si])
-                continue
-            if pixels is None:
-                pixels = read_frames(path, start / src_fps, frames, fps, target_w, target_h)
-            video = pixels if (h, w) == (target_h, target_w) else pm._resize_video(pixels, h, w)
-            stage_latents.append(pipeline._encode_video(video, keep_all_latents=True))
-        for si, lat in enumerate(stage_latents):
+                lat = latents[si]
+            else:
+                if pixels is None:
+                    pixels = read_frames(path, start / src_fps, frames, fps, target_w, target_h)
+                video = pixels if (h, w) == (target_h, target_w) else pm._resize_video(pixels, h, w)
+                if motion:
+                    lat = torch.cat([pipeline._encode_video(video[:, :frames - 1], keep_all_latents=True),
+                                     pipeline._encode_video(video[:, frames - 1:])], dim=2)
+                else:
+                    lat = pipeline._encode_video(video, keep_all_latents=True)
             if lat.shape[2] != n:
                 raise ValueError(f"a {frames}-frame pin encoded to {lat.shape[2]} latents instead of {n}")
-            plan.video.setdefault(si, []).append((pin["place"], lat))
+            if motion:
+                plan.video.setdefault(si, []).append(("history", lat[:, :, :n - 1]))
+                plan.video[si].append(("before", lat[:, :, n - 1:]))
+            else:
+                plan.video.setdefault(si, []).append((pin["place"], lat))
         if latents is None and not any("pixel" in note for note in plan.notes if note.startswith(pin["place"])):
-            plan.notes.append(f"{pin['place']} pin: pixel grade ({frames} frames)")
+            plan.notes.append(f"{pin['place']} pin: pixel grade ({frames} frames{' of motion context' if motion else ''})")
         # audio: the pinned seconds of the clip's soundtrack, held at the same place
         if pin.get("audio", True) and not keep_audio:
-            alf = float(getattr(pm, "AUDIO_LATENT_FPS", 40))
-            sr = int(getattr(pm, "AUDIO_SAMPLE_RATE", 32000))
             audio_latents = None
-            if saved is not None and entry.get("audio") is not None and entry.get("audio_ok"):
+            count = int(round(frames / fps * alf))
+            if entry is not None and entry.get("audio") is not None and entry.get("audio_ok"):
                 a0 = int(round((window["rel"] - float(entry.get("audio_origin") or 0.0)) / fps * alf))
-                count = int(round(frames / fps * alf))
                 if 0 <= a0 and a0 + count <= int(entry["audio"].shape[-1]):
                     audio_latents = entry["audio"][..., a0:a0 + count].float().unsqueeze(0)   # stored without the batch axis
             if audio_latents is None:
                 wave = read_audio(path, start / src_fps, frames / fps, sr)
                 audio_latents = pipeline._encode_audio(pipeline._waveform(wave, sr))
             count = int(audio_latents.shape[-1])
-            if pin["place"] == "before":
-                anchor = {"anchor": "first", "latent_frame_count": count}
+            if motion:
+                # as Wan2GP does: the join frame's share of audio is pinned at the run's start, the rest is history
+                boundary = min(count, max(1, round(alf / fps)))
+                if count > boundary:
+                    plan.audio.append(({"anchor": "history", "latent_frame_count": count - boundary}, audio_latents[..., :count - boundary]))
+                plan.audio.append(({"anchor": "first", "latent_frame_count": boundary}, audio_latents[..., count - boundary:]))
+            elif pin["place"] == "before":
+                plan.audio.append(({"anchor": "first", "latent_frame_count": count}, audio_latents))
             else:
                 start_index = int(round((frame_num - frames) / fps * alf))
-                anchor = {"anchor": f"tail@{start_index}", "latent_frame_count": count}
-            plan.audio.append((anchor, audio_latents))
+                plan.audio.append(({"anchor": f"tail@{start_index}", "latent_frame_count": count}, audio_latents))
     return plan
 
 
@@ -585,9 +617,17 @@ def _impl_prepare_condition_rows(self, inner, visual_latents, audio_latents, gen
         if pins:
             lh, lw = plan.stages[stage]
             insert_at = len(keyframes)
+            history_at = 0
             for place, lat in pins:
                 if tuple(lat.shape[-2:]) != (lh, lw):
                     raise ValueError(f"Video Editor pins: a pin is {tuple(lat.shape[-2:])} latents but this stage is {(lh, lw)}")
+                if place == "history":
+                    # motion context goes first, where Wan2GP puts a sliding window's history
+                    visual_latents.insert(history_at, lat)
+                    keyframes.insert(history_at, {"anchor": "history", "latent_frame_count": int(lat.shape[2])})
+                    history_at += 1
+                    insert_at += 1
+                    continue
                 visual_latents.insert(insert_at, lat)
                 keyframes.append({"anchor": "first" if place == "before" else "tail", "latent_frame_count": int(lat.shape[2])})
                 insert_at += 1

@@ -101,6 +101,10 @@ export async function openGenerate(app, mode, where) {
 
   const windowSel = el("select", {}, [22, 39, 56].map(f => el("option", { value: f }, `${f} frames`)));
   windowSel.value = String(prefs.window || 22);
+  const modeSel = el("select", {}, el("option", { value: "motion" }, "Motion context: H3's native continuation (recommended)"),
+    el("option", { value: "pinned" }, "Pinned frames inside the run"));
+  modeSel.value = prefs.pinMode === "pinned" ? "pinned" : "motion";
+  const modeNote = el("div.dim.small", {}, "Motion context hands H3 the previous clip's last frames the way Wan2GP continues a sliding window, so the run starts at the cut. Pinned frames regenerate those frames inside the run and trim them off.");
   const seconds = el("input", { type: "number", min: 0.5, max: fresh ? 120 : 19, step: 0.1, value: (+defaultSeconds).toFixed(2), style: { width: "76px" } });
   const lengthNote = el("div.dim.small");
   const pinsBox = el("div.gpins");
@@ -125,6 +129,7 @@ export async function openGenerate(app, mode, where) {
     status.available ? null : el("div.warn", { style: { marginBottom: "8px" } }, status.reason || "Generation is unavailable"),
     addonNote,
     fresh ? null : field("Pinned frames", el("div", { style: { display: "flex", gap: "8px", alignItems: "center" } }, windowSel, el("span.dim.small", {}, "of each neighbour held as fixed context")),
+      s.left ? el("div", { style: { margin: "6px 0 2px" } }, modeSel) : null, s.left ? modeNote : null,
       pinsBox,
       el("label.rrow", {}, keepCut, el("span", {}, "Keep my exact cuts (pixel grade instead of moving a cut onto H3's grid)")),
       el("label.rrow", {}, carryAudio, el("span", {}, "Carry the pinned audio too"))),
@@ -146,7 +151,7 @@ export async function openGenerate(app, mode, where) {
     right: s.right ? { clipId: s.right.id, mediaId: s.right.mediaId, cut: startSource(s.right), pixel: keepCut.checked, audio: carryAudio.checked } : null,
     replaceId: s.replace?.id || null,
     gap: s.gap ? { start: s.gap.start, end: Number.isFinite(s.gap.end) ? s.gap.end : null } : null,
-    window: parseInt(windowSel.value, 10), newSeconds: clamp(parseFloat(seconds.value) || 3, 0.2, 30),
+    window: parseInt(windowSel.value, 10), pinMode: modeSel.value, newSeconds: clamp(parseFloat(seconds.value) || 3, 0.2, 30),
     useCurrent: srcCurrent.input.checked, settingsFrom: settingsItem?.id || (s.left || s.right)?.mediaId || null, promptRange,
     at: s.at ?? null, targetId: s.target?.id || null,
   });
@@ -157,7 +162,7 @@ export async function openGenerate(app, mode, where) {
     const grade = p.grade === "latent" ? el("span.grade.latent", {}, "latent grade") : el("span.grade.pixel", {}, "pixel grade");
     const extra = (p.grade === "latent" && p.shift ? ` · the cut moves ${(p.shift / fps).toFixed(2)}s ${p.place === "before" ? "earlier" : "later"} onto H3's grid` : "")
       + (p.reason ? ` · ${p.reason}` : "");
-    return el("div.gpin", {}, el("b", {}, `${who}: `), `${p.frames} frames, `, grade, extra);
+    return el("div.gpin", {}, el("b", {}, `${who}: `), p.kind === "motion" ? `${p.frames} frames as motion context, ` : `${p.frames} frames, `, grade, extra);
   };
 
   const prepare = debounce(async () => {
@@ -168,12 +173,14 @@ export async function openGenerate(app, mode, where) {
       for (const p of info.pins) pinsBox.append(describePin(p));
       const L = info.lengths;
       if (fresh) lengthNote.textContent = `${L.totalSeconds.toFixed(2)}s (${L.total} frames). ${L.note}`;
-      else lengthNote.textContent = `One run of ${L.totalSeconds.toFixed(2)}s (${L.total} frames): ${L.before ? `${(L.before / info.fps).toFixed(2)}s pinned + ` : ""}${L.newSeconds.toFixed(2)}s new${L.after ? ` + ${(L.after / info.fps).toFixed(2)}s pinned` : ""}. ${L.note}`;
+      const motionPin = info.pins.some(p => p.kind === "motion");
+      if (!fresh) lengthNote.textContent = `One run of ${L.totalSeconds.toFixed(2)}s (${L.total} frames): ${motionPin ? "the join frame + " : L.before ? `${(L.before / info.fps).toFixed(2)}s pinned + ` : ""}${L.newSeconds.toFixed(2)}s new${L.after ? ` + ${(L.after / info.fps).toFixed(2)}s pinned` : ""}. ${L.note}`;
       modelNote.textContent = `Model: ${info.model.name}`;
       for (const r of info.refmods || []) modelNote.append(el(r.status === "relinked" ? "div" : "div.warn", {},
         r.status === "relinked" ? `RefMod '${r.mod}' has moved: using ${r.now}.` : `RefMod '${r.mod}' can't be found, so it will be skipped.`));
       if (!promptEdited) promptBox.value = info.prompt || "";
       if (fresh) promptNote.textContent = settingsItem && !srcCurrent.input.checked ? `Started from ${s.near.name}'s prompt.` : "Started from the Media Generator's prompt.";
+      else if (motionPin) promptNote.textContent = `Describe the run: it starts on the previous clip's last frame and carries on from its motion${L.after ? `; the last ${(L.after / info.fps).toFixed(2)}s are the next clip's first frames` : ""}. Started from ${promptClip?.name || "the clip"}'s prompt.`;
       else promptNote.textContent = `Describe the whole run, pinned frames included: ${L.before ? `the first ${(L.before / info.fps).toFixed(2)}s are the previous clip's last frames` : ""}${L.before && L.after ? " and " : ""}${L.after ? `the last ${(L.after / info.fps).toFixed(2)}s are the next clip's first frames` : ""}. Started from ${promptClip?.name || "the clip"}'s prompt.`;
       seedSel.options[1].textContent = info.originalSeed != null ? `Same seed as the clip (${info.originalSeed})` : "Same seed as the clip";
     } catch (e) { info = null; error.textContent = e.message; }
@@ -184,7 +191,7 @@ export async function openGenerate(app, mode, where) {
     seedInput.hidden = seedSel.value !== "custom";
     go.disabled = !info || !status.available || (!fresh && !status.h3?.installed);
   };
-  for (const c of [windowSel, seconds, keepCut, carryAudio, srcClip.input, srcCurrent.input]) c.addEventListener("change", prepare);
+  for (const c of [windowSel, modeSel, seconds, keepCut, carryAudio, srcClip.input, srcCurrent.input]) c.addEventListener("change", prepare);
   seedSel.addEventListener("change", update);
 
   async function submit() {
@@ -196,7 +203,7 @@ export async function openGenerate(app, mode, where) {
       if (!Number.isFinite(seed) || seed < 0) { error.textContent = "Enter a seed of 0 or more"; return; }
     }
     const req = { ...request(), seed, prompt: promptBox.value };
-    savePrefs({ window: req.window, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
+    savePrefs({ window: req.window, pinMode: req.pinMode, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
       freshSeconds: fresh && !s.target ? req.newSeconds : prefs.freshSeconds, keepCut: keepCut.checked, carryAudio: carryAudio.checked,
       useCurrent: req.useCurrent, seed: seedSel.value === "custom" ? "custom" : "new", customSeed: seedInput.value });
     go.disabled = true;

@@ -524,14 +524,16 @@ class RegenService:
             self._sha_cache[key] = sha256_file(path)
         return self._sha_cache[key]
 
-    def _pin(self, side, place, window, gen_fps):
+    def _pin(self, side, place, window, gen_fps, motion=False):
         """Plan one pin from {mediaId, cut (seconds in its file)}: which frames, at what grade, and how far the cut moves."""
         item = self._item(side["mediaId"])
         src_fps = float(item.get("fps") or gen_fps)
         file_frames = int(round(float(item.get("duration") or 0) * src_fps))
         cut = int(round(float(side["cut"]) * src_fps))
         available = cut if place == "before" else max(0, file_frames - cut)
-        frames = C.fit_window(int(window), int(available * gen_fps / src_fps))
+        motion = motion and place == "before"
+        fit = C.motion_window if motion else C.fit_window
+        frames = fit(int(window), int(available * gen_fps / src_fps))
         if frames < 5:
             raise ValueError(f"the {'previous' if place == 'before' else 'next'} clip has too few frames {'before' if place == 'before' else 'after'} the cut to pin")
         manifest, sha = None, None
@@ -551,7 +553,10 @@ class RegenService:
         return {"place": place, "mediaId": item["id"], "file": item["path"], "fps": src_fps, "frames": frames,
                 "start_frame": int(aligned["start"]), "cut_frame": int(aligned["cut"]), "cut": aligned["cut"] / src_fps,
                 "shift": int(aligned["shift"]), "grade": aligned["grade"], "reason": aligned["reason"],
-                "sha": sha if aligned["grade"] == "latent" else None, "audio": bool(side.get("audio", True))}
+                "sha": sha if aligned["grade"] == "latent" else None, "audio": bool(side.get("audio", True)),
+                "kind": "motion" if motion else "pinned",
+                # frames of this pin that are part of the generated run (and trimmed off it)
+                "inRun": 1 if motion else frames}
 
     def _compose(self, req):
         ok, reason = self.host.available()
@@ -574,13 +579,13 @@ class RegenService:
         pins = []
         if not fresh:
             if req.get("left") and mode in ("extend", "bridge", "fill", "loop", "replace"):
-                pins.append(self._pin(req["left"], "before", window, gen_fps))
+                pins.append(self._pin(req["left"], "before", window, gen_fps, motion=req.get("pinMode", "motion") == "motion"))
             if req.get("right") and mode in ("prepend", "bridge", "fill", "loop", "replace"):
                 pins.append(self._pin(req["right"], "after", window, gen_fps))
             if not pins:
                 raise ValueError("Nothing to pin: this needs a clip on the side it continues from")
-        before = sum(p["frames"] for p in pins if p["place"] == "before")
-        after = sum(p["frames"] for p in pins if p["place"] == "after")
+        before = sum(p["inRun"] for p in pins if p["place"] == "before")
+        after = sum(p["inRun"] for p in pins if p["place"] == "after")
         window_max = int(((model_def or {}).get("sliding_window_defaults") or {}).get("window_max") or 0)
         if fresh:
             # a new shot: no pins, the model's own legal lengths, and WanGP's sliding windows may run it as long as asked
@@ -627,7 +632,7 @@ class RegenService:
         task = build_task(settings, prompt=prompt, seed=seed, frames=lengths["total"], fps=info["fps"], model_def=model_def)
         if info["pins"]:
             task["sliding_window_size"] = max(int(task.get("sliding_window_size") or 0), lengths["total"])   # one window: pins only apply to window 1
-        spec = {"pins": [{k: p[k] for k in ("place", "file", "fps", "frames", "start_frame", "sha", "audio")} for p in info["pins"]],
+        spec = {"pins": [{k: p[k] for k in ("place", "file", "fps", "frames", "start_frame", "sha", "audio", "kind")} for p in info["pins"]],
                 "mode": info["mode"]}
         job_id = uuid.uuid4().hex[:12]
         folder = os.path.join(self.root, job_id)
@@ -639,7 +644,7 @@ class RegenService:
                "clipId": req.get("clipId"), "trackId": req.get("trackId"), "place": req.get("place"),
                "left": {**(req.get("left") or {}), "cut": next((p["cut"] for p in info["pins"] if p["place"] == "before"), None)} if req.get("left") else None,
                "right": {**(req.get("right") or {}), "cut": next((p["cut"] for p in info["pins"] if p["place"] == "after"), None)} if req.get("right") else None,
-               "pins": [{k: p[k] for k in ("place", "grade", "frames", "shift", "reason")} for p in info["pins"]],
+               "pins": [{k: p[k] for k in ("place", "grade", "frames", "shift", "reason", "kind")} for p in info["pins"]],
                "trimHead": lengths["trimHead"], "trimTail": lengths["trimTail"], "newSeconds": lengths["newSeconds"],
                "prompt": prompt, "model": info["model"]["name"], "audio": "new", "media": None, "error": None,
                "request": {k: v for k, v in req.items() if k not in ("prompt",)}}

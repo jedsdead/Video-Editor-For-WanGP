@@ -50,6 +50,17 @@ def fit_window(window, available):
     return max(sizes) if sizes else 0
 
 
+MOTION_WINDOWS = (18, 35, 52)      # motion context: 17k frames of history + the join frame
+
+
+def motion_window(window, available):
+    """The motion-context size for a pin-window choice (22/39/56 -> 18/35/52) that fits in `available` frames (or 0)."""
+    k = max(1, (int(window) - 5) // GRID)
+    sizes = [w for w in MOTION_WINDOWS if w <= available]
+    sizes = [w for w in sizes if (w - 1) // GRID <= k] or sizes[:1]
+    return max(sizes) if sizes else 0
+
+
 def align_before_pin(manifest, cut, frames):
     """An extend's pin: the `frames` frames ending at source frame `cut`. Latent grade needs the pin to start on the
     saved window's grid, so the cut may move earlier. Returns {"start", "cut", "grade", "shift", "reason"}."""
