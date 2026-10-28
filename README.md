@@ -2,7 +2,7 @@
 
 A multi-track video editor that runs as a plugin inside [WanGP](https://github.com/deepbeepmeep/Wan2GP), in its own tab. Cut your generations together, grade them, mix the audio and export, without leaving WanGP.
 
-**Version 0.7** · by jedsdeadbaby · MIT licence
+**Version 1.0** · by jedsdeadbaby · MIT licence
 
 ## Features
 

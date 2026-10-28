@@ -11,7 +11,7 @@ class VideoEditorPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Video Editor"
-        self.version = "0.7"
+        self.version = "1.0"
         self.description = ("Multi-track video editor: magnetic or free timeline, blade and range tools, transitions, "
                             "colour wheels, scopes, audio mixer, speed ramps with optical flow and export.")
 

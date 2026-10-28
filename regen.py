@@ -268,6 +268,11 @@ def build_task(base, *, prompt, seed, frames, fps, start_image=None, end_image=N
     window_max = int(((model_def or {}).get("sliding_window_defaults") or {}).get("window_max") or 0)
     if window and frames > window:
         settings["sliding_window_size"] = min(frames, window_max) if window_max else frames
+    # Discard Last Frames only matters between sliding windows (Latent Carry's seamless joins use it there). A run that
+    # fits in one window would just lose its last frames, so it keeps them.
+    window = int(settings.get("sliding_window_size") or 0)
+    if not video_source and (not window or frames <= window):
+        settings["sliding_window_discard_last_frames"] = 0
     letters = ""
     if video_source:
         letters += "V"
