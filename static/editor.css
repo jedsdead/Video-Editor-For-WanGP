@@ -171,7 +171,10 @@ textarea { resize: vertical; width: 100%; user-select: text; }
 
 /* menus, modals, toasts */
 #menuLayer { position: fixed; inset: 0; pointer-events: none; z-index: 50; }
-.menu { position: absolute; pointer-events: auto; background: var(--panel2); border: 1px solid var(--border2); border-radius: 6px; padding: 4px; min-width: 220px; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
+.menu { position: absolute; pointer-events: auto; background: var(--panel2); border: 1px solid var(--border2); border-radius: 6px; padding: 4px; min-width: 220px; box-shadow: 0 8px 30px rgba(0,0,0,.5);
+        max-height: calc(100vh - 12px); overflow-y: auto; overscroll-behavior: contain; }
+.menu .mi.subopen { background: var(--panel3); }
+.menu .mi .subarrow { font-size: 14px; line-height: 1; }
 .menu .mi { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
 .menu .mi:hover { background: var(--accent); color: #fff; }
 .menu .mi.disabled { opacity: .4; pointer-events: none; }

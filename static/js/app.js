@@ -261,14 +261,14 @@ app.prepareReverse = prepareReverse;
 // Regeneration and takes in the clip menu.
 function regenItems(clip, row) {
   if (row.kind !== "video" || !canRegenerate(clip)) return [];
-  const items = ["-", { head: "Regenerate" },
+  const items = [{ label: "Regenerate", submenu: [
     { label: "Re-generate shot with new seed…", action: () => openRegenDialog(app, clip.id, "new") },
     { label: "Re-generate shot with same seed…", action: () => openRegenDialog(app, clip.id, "same") },
-    { label: "Regenerate / extend shot…", action: () => openRegenDialog(app, clip.id) }];
+    { label: "Regenerate / extend shot…", action: () => openRegenDialog(app, clip.id) }] }];
   if (clip.takes?.length) {
-    items.push({ head: "Takes" });
-    clip.takes.forEach((t, i) => items.push({ label: `${i + 1}. ${t.label}${t.seed != null ? ` (seed ${t.seed})` : ""}`, check: (clip.takeIndex || 0) === i,
-      action: () => M.edit("Switch take", () => M.setTake(clip.id, i)) }));
+    items.push({ label: `Takes (${(clip.takeIndex || 0) + 1} of ${clip.takes.length})`, submenu: clip.takes.map((t, i) => ({
+      label: `${i + 1}. ${t.label}${t.seed != null ? ` (seed ${t.seed})` : ""}`, check: (clip.takeIndex || 0) === i,
+      action: () => M.edit("Switch take", () => M.setTake(clip.id, i)) })) });
   }
   return items;
 }
@@ -393,7 +393,7 @@ function openMenu(btn) {
 function laneItems(clip, row) {
   const kind = row.kind;
   const current = app.timeline.lane(clip, row);
-  const items = [{ head: "Show keyframes for" }];
+  const items = [];
   for (const [name, def] of Object.entries(M.KEYABLE)) {
     if (!(def.kind === kind || def.kind === "any")) continue;
     if (name === "speed" && M.isStill(clip)) continue;
@@ -401,7 +401,8 @@ function laneItems(clip, row) {
     items.push({ label: `${def.label}${n ? `  (${n})` : ""}`, check: current === name,
       action: () => { const c = M.getClip(clip.id); if (c) { c.lane = name; bus.emit("change"); } } });
   }
-  return items;
+  const label = M.KEYABLE[current]?.label;
+  return [{ label: `Show keyframes for${label ? `: ${label}` : ""}`, submenu: items }];
 }
 
 function contextMenu(x, y, hit) {
@@ -489,11 +490,13 @@ function contextMenu(x, y, hit) {
       hit.row.kind === "video" ? { label: "Freeze frame at playhead", kbd: "Shift+F", disabled: M.isStill(clip), action: freezeFrame } : null,
       hit.row.kind === "video" ? { label: "Detect shots…", kbd: "Shift+D", disabled: M.isStill(clip), action: () => openShotDetect(app, clip.id) } : null,
       ...regenItems(clip, hit.row),
-      hit.row.kind === "video" ? { label: "Copy grade", action: copyGrade } : null,
-      hit.row.kind === "video" ? { label: "Paste grade", action: pasteGrade } : null,
-      hit.row.kind === "video" ? { label: "Copy effects", disabled: !(clip.effects || []).length, action: copyEffects } : null,
-      hit.row.kind === "video" ? { label: "Paste effects", disabled: !state.effectsClipboard, action: pasteEffects } : null,
-      hit.row.kind === "video" ? { label: "Remove all effects", disabled: !(clip.effects || []).length, action: removeEffects } : null,
+      hit.row.kind === "video" ? { label: "Grade & effects", submenu: [
+        { label: "Copy grade", kbd: K("Ctrl+Alt+C"), action: copyGrade },
+        { label: "Paste grade", kbd: K("Ctrl+Alt+V"), action: pasteGrade },
+        "-",
+        { label: "Copy effects", disabled: !(clip.effects || []).length, action: copyEffects },
+        { label: "Paste effects", disabled: !state.effectsClipboard, action: pasteEffects },
+        { label: "Remove all effects", disabled: !(clip.effects || []).length, action: removeEffects }] } : null,
       "-",
       M.isGenerator(clip) ? null : { label: "Show in media bin", action: () => { state.selectedMedia = clip.mediaId; app.docks.show("media"); bus.emit("media"); } },
       { label: "Properties", action: () => app.docks.show("inspector") },
@@ -535,7 +538,25 @@ function showShortcuts() {
 }
 
 // ------------------------------------------------------------------ keyboard
+// Space plays / pauses from anywhere in the editor except text boxes. A focused button, checkbox, slider or dropdown
+// would otherwise take the key (a focused Play button would even toggle twice), so it loses focus first.
+function isTextEntry(target) {
+  return !!target && ((target.tagName === "INPUT" && !["range", "checkbox", "button", "radio", "color"].includes(target.type)) || target.tagName === "TEXTAREA" || target.isContentEditable);
+}
+function spaceToggles(e) {
+  if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || !P()) return false;
+  if (isTextEntry(e.target) || document.querySelector(".modal-backdrop")) return false;
+  e.preventDefault(); e.stopPropagation();
+  if (!e.repeat) {
+    const t = e.target;
+    if (t && t !== document.body && typeof t.blur === "function" && t.matches?.("button, select, input, [tabindex]")) t.blur();
+    app.playback.toggle();
+  }
+  return true;
+}
+
 function onKey(e) {
+  if (e.defaultPrevented && e.key === " ") return;   // handled by spaceToggles
   if (isTyping(e) || !P()) return;
   if (document.querySelector(".modal-backdrop")) return;
   const ctrl = e.ctrlKey || e.metaKey;
@@ -694,7 +715,20 @@ async function main() {
   bus.on("change", () => { if (!loading && P()) { setSaveState("Unsaved changes"); save(); } });
 
   // keyboard & window
+  document.addEventListener("keydown", (e) => { spaceToggles(e); }, true);   // before any focused control sees it
   document.addEventListener("keydown", onKey);
+  // a button activates on Space when the key comes up: swallow that too
+  document.addEventListener("keyup", (e) => { if (e.key === " " && !isTextEntry(e.target)) e.preventDefault(); }, true);
+  // Inside WanGP the editor is in a frame: Space pressed while WanGP's own page has focus (after clicking the tab,
+  // say) also plays, as long as the editor is the tab on screen.
+  try {
+    const host = window.frameElement && window.parent && window.parent.document;
+    if (host) host.addEventListener("keydown", (e) => {
+      const frame = window.frameElement;
+      if (!frame || !frame.isConnected || frame.offsetParent === null || frame.getClientRects().length === 0) return;
+      if (e.key === " " && !isTextEntry(e.target) && !e.target.closest?.("select, [role=button], button:not([role=tab])")) spaceToggles(e);
+    }, true);
+  } catch (_) { /* different origin: nothing to listen to */ }
   document.addEventListener("dragover", (e) => e.preventDefault());
   document.addEventListener("drop", (e) => e.preventDefault());
   window.addEventListener("beforeunload", () => { if (P() && !state.readOnly) { try { navigator.sendBeacon && fetch(`api/projects/${encodeURIComponent(P().name)}`, { method: "PUT", body: JSON.stringify(P()), headers: { "Content-Type": "application/json" }, keepalive: true }); } catch (_) { /* ignore */ } } });

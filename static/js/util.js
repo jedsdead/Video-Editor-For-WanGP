@@ -101,30 +101,76 @@ export function isTyping(event) {
 // ------------------------------------------------------------ menus & modals
 
 let openMenuNode = null;
-export function closeMenu() { if (openMenuNode) { openMenuNode.remove(); openMenuNode = null; document.querySelectorAll(".menu-btn.open").forEach(b => b.classList.remove("open")); } }
+let subMenus = [];   // open submenus, outermost first
+export function closeMenu() {
+  for (const m of subMenus) m.remove();
+  subMenus = [];
+  if (openMenuNode) { openMenuNode.remove(); openMenuNode = null; document.querySelectorAll(".menu-btn.open").forEach(b => b.classList.remove("open")); }
+}
 
-// items: [{label, kbd, action, disabled, check}, "-", {head}]
-export function showMenu(x, y, items) {
-  closeMenu();
-  const layer = document.getElementById("menuLayer");
+// Fit a menu inside the window: below/right of (x, y) when there is room, otherwise moved in; tall menus scroll.
+function placeMenu(menu, x, y, alignRight = null) {
+  const rect = menu.getBoundingClientRect();
+  let left = x;
+  if (alignRight !== null && left + rect.width > window.innerWidth - 6) left = alignRight - rect.width;
+  menu.style.left = `${Math.max(6, Math.min(left, window.innerWidth - rect.width - 6))}px`;
+  menu.style.top = `${Math.max(6, Math.min(y, window.innerHeight - rect.height - 6))}px`;
+}
+
+function buildMenu(items, level) {
   const menu = el("div.menu");
-  for (const item of items) {
+  for (const item of items.filter(Boolean)) {
     if (item === "-") { menu.append(el("div.msep")); continue; }
     if (item.head) { menu.append(el("div.mhead", {}, item.head)); continue; }
     if (item.custom) { menu.append(item.custom); continue; }
-    const row = el("div.mi", {}, el("span.check", {}, item.check === undefined ? "" : (item.check ? "✓" : "")), el("span", {}, item.label), item.kbd ? el("span.kbd", {}, item.kbd) : null);
-    if (item.disabled) row.classList.add("disabled");
-    row.addEventListener("click", (e) => { e.stopPropagation(); closeMenu(); item.action && item.action(); });
+    const sub = item.submenu && item.submenu.filter(Boolean);
+    const row = el("div.mi", {}, el("span.check", {}, item.check === undefined ? "" : (item.check ? "✓" : "")), el("span", {}, item.label),
+      sub ? el("span.kbd.subarrow", {}, "›") : item.kbd ? el("span.kbd", {}, item.kbd) : null);
+    if (item.disabled || (sub && !sub.length)) row.classList.add("disabled");
+    if (sub) {
+      row.classList.add("hassub");
+      const open = () => openSubmenu(row, sub, level + 1);
+      row.addEventListener("mouseenter", open);
+      row.addEventListener("click", (e) => { e.stopPropagation(); open(); });
+    } else {
+      row.addEventListener("mouseenter", () => closeSubmenusFrom(level + 1));
+      row.addEventListener("click", (e) => { e.stopPropagation(); closeMenu(); item.action && item.action(); });
+    }
     menu.append(row);
   }
-  layer.append(menu);
-  const rect = menu.getBoundingClientRect();
-  menu.style.left = `${Math.min(x, window.innerWidth - rect.width - 6)}px`;
-  menu.style.top = `${Math.min(y, window.innerHeight - rect.height - 6)}px`;
+  return menu;
+}
+
+function closeSubmenusFrom(level) {
+  while (subMenus.length >= level) subMenus.pop().remove();
+  document.querySelectorAll(".menu .mi.subopen").forEach(r => { if (!r.isConnected || Number(r.dataset.level) >= level) r.classList.remove("subopen"); });
+}
+
+function openSubmenu(row, items, level) {
+  if (row.classList.contains("subopen") && subMenus[level - 1]) return;
+  closeSubmenusFrom(level);
+  row.closest(".menu").querySelectorAll(":scope > .mi.subopen").forEach(r => r.classList.remove("subopen"));
+  row.classList.add("subopen");
+  row.dataset.level = String(level);
+  const menu = buildMenu(items, level);
+  document.getElementById("menuLayer").append(menu);
+  subMenus.push(menu);
+  const r = row.getBoundingClientRect();
+  placeMenu(menu, r.right - 2, r.top - 5, r.left + 2);
+}
+
+// items: [{label, kbd, action, disabled, check, submenu: [...]}, "-", {head}]
+export function showMenu(x, y, items) {
+  closeMenu();
+  const menu = buildMenu(items, 0);
+  document.getElementById("menuLayer").append(menu);
+  placeMenu(menu, x, y);
   openMenuNode = menu;
   return menu;
 }
-document.addEventListener("pointerdown", (e) => { if (openMenuNode && !openMenuNode.contains(e.target) && !e.target.closest(".menu-btn")) closeMenu(); });
+document.addEventListener("pointerdown", (e) => {
+  if (openMenuNode && !openMenuNode.contains(e.target) && !subMenus.some(m => m.contains(e.target)) && !e.target.closest(".menu-btn")) closeMenu();
+});
 
 export function modal({ title, body, buttons = [], narrow = false, onClose }) {
   const layer = document.getElementById("modalLayer");
