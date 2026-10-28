@@ -610,8 +610,12 @@ def _impl_generate(self, original, *args, **kwargs):
     window_no = kwargs.get("window_no")
     record = {"window_no": window_no, "fps": float(kwargs.get("fps") or 24), "video": None, "audio": None, "p1": None,
               "fp": None, "continuation": kwargs.get("input_video") is not None and int(kwargs.get("prefix_frames_count") or 0) > 0,
-              "plan": None}
+              "plan": None, "pipeline": self, "frame_num": int(kwargs.get("frame_num") or 0)}
     spec = (job or {}).get("spec")
+    if spec and spec.get("mode") == "render":
+        # a final render: phase 1 is a token single step, and the latent upscaler is handed the stretch's drafts
+        record["render"] = spec
+        _count("render")
     if spec and (window_no is None or int(window_no) <= 1):
         try:
             record["plan"] = _plan_pins(self, spec, kwargs)
@@ -809,10 +813,39 @@ def _half():
     return torch.float16
 
 
+def _render_source(record, normalized):
+    """The final render's replacement for phase 1's latent: the stretch's draft frames at phase 1's size, encoded by
+    the model's VAE (as WanGP encodes a control video) and normalised as the upscaler expects."""
+    import torch
+    pm = _pipeline_module()
+    pipeline = record["pipeline"]
+    spec = record["render"]
+    latent_t, (lh, lw) = int(normalized.shape[2]), normalized.shape[-2:]
+    frames = read_frames(spec["draft"], 0.0, int(record["frame_num"]) or latent_t, float(record["fps"]), lw * 16, lh * 16)
+    latents = pm._encode_video_source(pipeline.vae, frames, pipeline.device, None)
+    latents = latents.to(device=normalized.device, dtype=torch.float32)[:, :, :latent_t]
+    if latents.shape[2] < latent_t:
+        latents = torch.cat([latents, latents[:, :, -1:].expand(-1, -1, latent_t - latents.shape[2], -1, -1)], dim=2)
+    if tuple(latents.shape[-2:]) != (lh, lw):
+        raise ValueError(f"the draft encoded to {tuple(latents.shape[-2:])} latents, phase 1 is {(lh, lw)}")
+    mean = normalized.new_tensor(pm.LATENTS_MEAN, dtype=torch.bfloat16).view(1, -1, 1, 1, 1)
+    std = normalized.new_tensor(pm.LATENTS_STD, dtype=torch.bfloat16).view(1, -1, 1, 1, 1)
+    return ((latents.to(torch.bfloat16) - mean) / std).to(normalized.dtype)
+
+
 def _capture_phase_1(module, args):
     record = _GEN.get()
     if record is None or _JOB.get() is None or not args:
         return None
+    if record.get("render"):
+        try:
+            replaced = _render_source(record, args[0])
+            _count("render_source")
+            _log(f"final render: phase 2 refines the drafts ({replaced.shape[2]} latents at {tuple(replaced.shape[-2:])})")
+            return (replaced,) + tuple(args[1:])
+        except Exception as error:
+            traceback.print_exc()
+            raise RuntimeError(f"Video Editor final render could not load the drafts: {error!r}")
     try:
         import torch
         pm = _pipeline_module()

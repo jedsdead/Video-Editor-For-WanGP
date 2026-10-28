@@ -1,6 +1,7 @@
 // Shot regeneration: the dialog that sets up a regeneration, and the job tracker that turns finished generations into
 // takes on their clips. Generations run in WanGP's main queue (see regen.py / host.py).
 import * as M from "./model.js";
+import { applyRender } from "./finalrender.js";
 import { state, P, bus } from "./model.js";
 import { api, el, modal, toast, timecode, clamp } from "./util.js";
 
@@ -28,7 +29,7 @@ export class RegenJobs {
     this.poll();
   }
 
-  forClip(clipId) { return this.jobs.filter(j => j.clipId === clipId && ["queued", "running", "error"].includes(j.status)); }
+  forClip(clipId) { return this.jobs.filter(j => (j.clipId === clipId || (j.parts || []).some(p => p.clipId === clipId)) && ["queued", "running", "error"].includes(j.status)); }
   pending() { return this.jobs.filter(j => j.status === "queued" || j.status === "running"); }
 
   schedule(ms) { clearTimeout(this.timer); this.timer = setTimeout(() => this.poll(), ms); }
@@ -48,6 +49,14 @@ export class RegenJobs {
   // A finished generation becomes a take on its clip (or, for an extension without the original frames, a clip after it).
   async apply(job) {
     if (job.kind === "compose") return this.applyCompose(job);
+    if (job.kind === "render") {
+      this.applying.add(job.id);
+      applyRender(this.app, job);
+      try { await api(`api/regen/jobs/${job.id}/dismiss`, { method: "POST" }); } catch (_) { /* kept for next time */ }
+      this.jobs = this.jobs.filter(j => j.id !== job.id);
+      bus.emit("regen-jobs");
+      return;
+    }
     this.applying.add(job.id);
     const app = this.app;
     app.bin.register([job.media], null);

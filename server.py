@@ -293,6 +293,20 @@ def create_app(get_config, host=None):
         except ValueError as error:
             raise HTTPException(400, str(error))
 
+    @app.post("/api/render/prepare")
+    def render_prepare(payload: dict = Body(...)):
+        try:
+            return service.regen.render_prepare(payload)
+        except (ValueError, KeyError) as error:
+            raise HTTPException(400, str(error))
+
+    @app.post("/api/render/submit")
+    def render_submit(payload: dict = Body(...)):
+        try:
+            return service.regen.render_submit(payload)
+        except (ValueError, KeyError) as error:
+            raise HTTPException(400, str(error))
+
     @app.post("/api/gen/seam")
     def gen_seam(payload: dict = Body(...)):
         try:

@@ -151,7 +151,7 @@ export class MediaBin {
       for (const [id, info] of Object.entries(res)) {
         if (!P().media[id] || P().media[id].generator) continue;
         if (!info) P().media[id].missing = true;
-        else P().media[id] = { ...P().media[id], ...info };
+        else P().media[id] = { ...P().media[id], ...info, missing: !!info.missing };   // a file that came back is no longer missing
       }
       // a video measured shorter than before (its picture, not a longer soundtrack): pull clips back inside it
       const over = P().clips.filter(c => { const m = P().media[c.mediaId]; return m && m.kind === "video" && m.duration > 0 && Math.max(c.in, c.out) > m.duration + 1e-3; });

@@ -7,6 +7,7 @@ import { FONT_FALLBACK } from "./titles.js";
 import { EFFECTS, EFFECT_ORDER, defaultEffectParams } from "./effects.js";
 import { openRegenDialog, canRegenerate } from "./regen.js";
 import { openGenerate, rerollFor, sides, MODE_LABEL } from "./gendialog.js";
+import { genSection, isStale, finalIndex } from "./finalrender.js";
 import { FAMILIES, AUDIO_TRANSITIONS, DISSOLVE_STYLES, IRIS_SHAPES, ANGLE_PRESETS, DEFAULT_PARAMS, MAX_BORDER, isAudioTransition, hasEdge } from "./transitions.js";
 
 const RES_PRESETS = [[1280, 720], [1920, 1080], [3840, 2160], [832, 480], [480, 832], [720, 1280], [1080, 1920], [1024, 1024], [2560, 1080]];
@@ -444,8 +445,8 @@ export class Inspector {
     const rows = takes.map((t, i) => {
       const active = (live().takeIndex || 0) === i;
       return el(`div.take${active ? ".active" : ""}`, { onclick: () => { if (!active) M.edit("Switch take", () => M.setTake(clip.id, i)); this.app.regen.rateSeams(clip.id); if (live().gen && live().level?.on !== false) this.app.regen.matchJoins(clip.id); } },
-        el("span.takeno", {}, String(i + 1)),
-        el("span.takelabel", {}, t.label, t.seed != null ? el("span.dim", {}, ` · seed ${t.seed}`) : null,
+        el("span.takeno", {}, t.final ? "F" : String(i + 1)),
+        el("span.takelabel", {}, t.label, t.final && isStale(live()) ? el("span.warn", {}, " · out of date") : null, t.seed != null ? el("span.dim", {}, ` · seed ${t.seed}`) : null,
           i > 0 ? el("span.dim", {}, ` · ${t.audio === "keep" ? "original audio" : "new audio"}`) : null),
         el("span.dim", {}, `${Math.abs(t.out - t.in).toFixed(1)}s`),
         i > 0 ? el("button.small.kbtn", { title: "Remove this take from the clip (the file stays in the Media panel)",
@@ -695,6 +696,7 @@ export class Inspector {
       el("div.field.wide", {}, el("label", {}, ""), fpsSel),
       this.readout("Length", () => timecode(M.timelineEnd(), M.fps())),
       this.readout("Clips", () => `${P().clips.length} on ${P().tracks.length} tracks`));
+    genSection(this);
     this.section("Tips", el("div.dim", { style: { fontSize: "12px", lineHeight: "1.5" } },
       "Drag media onto the timeline. V/B/R switch between Select, Blade and Range. M toggles the magnetic timeline, S toggles snapping. Right-click clips and panel tabs for more options. Help → Shortcuts lists every key."));
   }

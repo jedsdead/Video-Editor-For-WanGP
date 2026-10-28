@@ -240,6 +240,35 @@ def write_masked_guides(folder, pins, total, fps, width, height):
     return guide, mask
 
 
+def apply_gen_size(task, gen):
+    """The project's generation size for an editor generation: {width, height, phases, vaeX2}."""
+    if not isinstance(gen, dict) or not gen.get("width") or not gen.get("height"):
+        return task
+    task["resolution"] = f"{int(gen['width']) // 32 * 32}x{int(gen['height']) // 32 * 32}"
+    task["guidance_phases"] = 2 if int(gen.get("phases") or 1) > 1 else 1
+    task["spatial_upsampling"] = "h3_vae*2" if gen.get("vaeX2") else ""
+    return task
+
+
+def write_draft(path, parts, total, fps, width, height):
+    """A stretch's drafts as the timeline plays them (each clip's source range, back to back), at width x height and
+    fps, held on its last frame to `total` frames: the picture the final render refines."""
+    import subprocess
+    inputs, filters, labels = [], [], []
+    for i, part in enumerate(parts):
+        inputs += ["-ss", f"{part['start']:.6f}", "-i", part["path"]]
+        filters.append(f"[{i}:v]fps={fps},scale={width}:{height}:flags=bicubic,format=yuv420p,trim=end_frame={part['frames']},setpts=PTS-STARTPTS[v{i}]")
+        labels.append(f"[v{i}]")
+    pad = max(0, total - sum(p["frames"] for p in parts))
+    graph = ";".join(filters) + f";{''.join(labels)}concat=n={len(parts)}:v=1:a=0,tpad=stop_mode=clone:stop={pad}[out]"
+    run = subprocess.run([M.ffmpeg_path(), "-v", "error", "-y", *inputs, "-filter_complex", graph, "-map", "[out]",
+                          "-c:v", "libx264", "-preset", "veryfast", "-crf", "6", "-pix_fmt", "yuv420p", "-r", f"{fps}",
+                          "-frames:v", str(total), path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, **M.popen_kwargs())
+    if run.returncode or not os.path.isfile(path):
+        raise ValueError("couldn't build the stretch's draft video: " + run.stderr.decode(errors="ignore")[-400:])
+    return path
+
+
 def capabilities(model_def):
     """What a model supports for regeneration."""
     model_def = model_def or {}
@@ -757,6 +786,7 @@ class RegenService:
         lengths = info["lengths"]
         prompt = str(req.get("prompt") or "").strip() or info["prompt"]
         task = build_task(settings, prompt=prompt, seed=seed, frames=lengths["total"], fps=info["fps"], model_def=model_def)
+        apply_gen_size(task, req.get("gen"))
         if info["pins"]:
             task["sliding_window_size"] = max(int(task.get("sliding_window_size") or 0), lengths["total"])   # one window: pins only apply to window 1
             # and nothing discarded: Discard Last Frames would cut the end of the run, where an arriving pin sits, and
@@ -789,6 +819,107 @@ class RegenService:
             self.jobs[job_id] = job
             self._save()
         threading.Thread(target=self._run, args=(job_id, task, {"video_editor": spec}), daemon=True, name=f"video_editor_gen_{job_id}").start()
+        return job
+
+    # ---- final render: the drafts of a stretch refined as one piece, at twice the size (and the VAE's x2 on decode)
+    def _render_plan(self, req):
+        clips = req.get("clips") or []
+        if not clips:
+            raise ValueError("Nothing to render")
+        first = self._item(req.get("settingsFrom") or clips[0]["mediaId"])
+        meta = self._meta(first) or {}
+        if not meta.get("model_type"):
+            raise ValueError("The stretch's first clip has no WanGP settings to render with")
+        settings, refmods = relink_refmods(dict(meta))
+        model_def = self.host.model_def(settings.get("model_type")) or {}
+        if "minimax_h3" not in str(settings.get("model_type") or ""):
+            raise ValueError("Final renders need a MiniMax H3 model")
+        caps = capabilities(model_def)
+        fps = caps["fps"]
+        frames = 0
+        parts = []
+        for c in clips:
+            item = self._item(c["mediaId"])
+            a, b = sorted((float(c["in"]), float(c["out"])))
+            n = int(round((b - a) * fps))
+            if n <= 0:
+                continue
+            parts.append({"clipId": c.get("clipId"), "path": item["path"], "start": a, "frames": n, "offset": frames})
+            frames += n
+        if frames < 5:
+            raise ValueError("The stretch is too short to render")
+        total = C.legal_total(frames, minimum=caps["framesMinimum"])
+        window_max = int(((model_def or {}).get("sliding_window_defaults") or {}).get("window_max") or 0)
+        if window_max and total > window_max:
+            raise ValueError(f"This stretch is {total / fps:.1f}s; this first version renders up to {window_max / fps:.1f}s in one piece")
+        width, height = (int(v) for v in req.get("size") or (0, 0))
+        if width < 64 or height < 64:
+            raise ValueError("Choose the final size")
+        width, height = width // 32 * 32, height // 32 * 32
+        strength = float(req.get("strength") if req.get("strength") is not None else (meta.get("switch_threshold") or 0.6))
+        steps2 = int(req.get("steps") or meta.get("num_inference_steps2") or 3)
+        prompt = str(req.get("prompt") or "").strip() or str(meta.get("prompt") or "")
+        return {"settings": settings, "model_def": model_def, "fps": fps, "parts": parts, "frames": frames, "total": total,
+                "width": width, "height": height, "strength": max(0.05, min(1.0, strength)), "steps": max(1, steps2),
+                "vae_x2": bool(req.get("vaeX2")), "prompt": prompt, "refmods": refmods, "meta": meta}
+
+    def render_prepare(self, req):
+        plan = self._render_plan(req)
+        meta = plan["meta"]
+        ok, reason = self.host.available()
+        return {"available": ok, "reason": reason, "frames": plan["frames"], "total": plan["total"], "fps": plan["fps"],
+                "seconds": plan["frames"] / plan["fps"], "size": [plan["width"], plan["height"]],
+                "phase1": [max(32, round(plan["height"] / 2 / 32) * 32), max(32, round(plan["width"] / 2 / 32) * 32)][::-1],
+                "output": [plan["width"] * (2 if plan["vae_x2"] else 1), plan["height"] * (2 if plan["vae_x2"] else 1)],
+                "strength": plan["strength"], "steps": plan["steps"], "prompt": plan["prompt"], "refmods": plan["refmods"],
+                "model": self.host.model_name(plan["settings"].get("model_type")),
+                "loras": meta.get("activated_loras") or [], "h3": self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}}
+
+    def render_submit(self, req):
+        plan = self._render_plan(req)
+        ok, reason = self.host.available()
+        if not ok:
+            raise ValueError(reason)
+        if not (self.host.h3_status() if hasattr(self.host, "h3_status") else {}).get("installed"):
+            raise ValueError("The editor's H3 add-on isn't active in WanGP, so final renders can't run")
+        seed = req.get("seed")
+        if seed in (None, "", "new") or int(seed) < 0:
+            seed = random.randint(0, 2 ** 31 - 1)
+        seed = int(seed)
+        job_id = uuid.uuid4().hex[:12]
+        folder = os.path.join(self.root, job_id)
+        os.makedirs(folder, exist_ok=True)
+        # the stretch as the timeline shows it, at the first phase's size: what phase 2 will refine
+        p1w, p1h = max(32, round(plan["width"] / 2 / 32) * 32), max(32, round(plan["height"] / 2 / 32) * 32)
+        draft = os.path.join(folder, "draft.mp4")
+        write_draft(draft, plan["parts"], plan["total"], plan["fps"], p1w, p1h)
+        task = build_task(plan["settings"], prompt=plan["prompt"], seed=seed, frames=plan["total"], fps=plan["fps"], model_def=plan["model_def"])
+        task.update({"resolution": f"{plan['width']}x{plan['height']}", "guidance_phases": 2, "num_inference_steps": 1,
+                     "switch_threshold": plan["strength"], "num_inference_steps2": plan["steps"],
+                     "spatial_upsampling": "h3_vae*2" if plan["vae_x2"] else "",
+                     "sliding_window_size": plan["total"], "sliding_window_discard_last_frames": 0,
+                     "image_prompt_type": ""})
+        vpt = str(task.get("video_prompt_type") or "")
+        task["video_prompt_type"] = "".join(ch for ch in vpt if ch not in "VGUFAN+*-1~")
+        if not req.get("keepLoras"):
+            # the drafts already carry the action and style; the refine only redraws detail. RefMods (custom settings)
+            # and references stay; WanGP's phase-2 Turbo is automatic, and plugin settings such as its multiplier stay.
+            task["activated_loras"] = []
+            task["loras_multipliers"] = ""
+        spec = {"mode": "render", "draft": draft, "frames": plan["frames"], "pins": []}
+        with open(os.path.join(folder, "task.json"), "w", encoding="utf-8") as handle:
+            json.dump({"settings": task, "plugin_data": {"video_editor": spec}}, handle, indent=1, default=str)
+        job = {"id": job_id, "status": "queued", "progress": 0.0, "message": "Queued in WanGP…", "created": time.time(),
+               "project": req.get("project"), "kind": "render", "seed": seed, "mode": "render",
+               "parts": [{"clipId": p["clipId"], "offset": p["offset"], "frames": p["frames"]} for p in plan["parts"]],
+               "fps": plan["fps"], "frames": plan["frames"], "strength": plan["strength"],
+               "size": [plan["width"], plan["height"]], "vaeX2": plan["vae_x2"], "draftSig": req.get("draftSig"),
+               "prompt": plan["prompt"], "model": self.host.model_name(plan["settings"].get("model_type")), "media": None, "error": None,
+               "request": {k: v for k, v in req.items() if k not in ("prompt",)}}
+        with self.lock:
+            self.jobs[job_id] = job
+            self._save()
+        threading.Thread(target=self._run, args=(job_id, task, {"video_editor": spec}), daemon=True, name=f"video_editor_render_{job_id}").start()
         return job
 
     def preview_path(self, job_id):

@@ -15,6 +15,7 @@ import { TransitionsPanel } from "./transitionspanel.js";
 import { EffectsPanel } from "./effectspanel.js";
 import { initCollapsible } from "./collapse.js";
 import { openExportDialog } from "./exportdialog.js";
+import { openRenderDialog, showFinals, ensureGenSettings } from "./finalrender.js";
 import { CURVES, FADE_CURVES } from "./keys.js";
 import { TransformOverlay } from "./transform.js";
 import { MarkersPanel } from "./markers.js";
@@ -67,6 +68,7 @@ function setProject(project) {
   app.playback.layout();
   setTimeout(() => app.timeline.zoomToFit(), 50);
   app.bin.refreshAll();
+  ensureGenSettings().catch(() => {});
   loading = false;
   setSaveState("Saved");
   claim();
@@ -342,6 +344,7 @@ function menuItems(name) {
     { label: "Browse WanGP outputs…", action: () => app.bin.browse() },
     "-",
     { label: "Project settings", action: () => { M.clearSelection(); state.selectedMedia = null; app.docks.show("inspector"); bus.emit("selection"); } },
+    { label: "Render final…", action: () => openRenderDialog(app) },
     { label: "Export…", kbd: K("Ctrl+E"), action: () => openExportDialog(app) },
   ];
   if (name === "edit") return [
@@ -378,6 +381,7 @@ function menuItems(name) {
     "-",
     { label: "Audio scrubbing", check: app.playback.scrubAudio, action: () => { app.playback.scrubAudio = !app.playback.scrubAudio; localStorage.setItem("ve_scrub", app.playback.scrubAudio ? "1" : "0"); } },
     { label: "Crop handles on the viewer", kbd: "C", check: app.overlay.cropMode, action: () => app.overlay.setCropMode(!app.overlay.cropMode) },
+    { label: "Show final renders", check: !!P()?.settings?.showFinal, action: () => { showFinals(!P().settings.showFinal); toast(P().settings.showFinal ? "Showing final renders (clips whose final is out of date stay on their draft)" : "Showing drafts"); } },
     { label: "Snap cuts to H3's 17-frame grid", check: state.h3Snap, action: () => { state.h3Snap = !state.h3Snap; localStorage.setItem("ve_h3snap", state.h3Snap ? "1" : "0");
       toast(state.h3Snap ? "Cuts on WanGP clips snap to H3's 17-frame grid, so extends and prepends from them stay latent grade" : "H3 grid snapping off"); } },
     "-",

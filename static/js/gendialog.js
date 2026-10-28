@@ -5,6 +5,7 @@
 import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { api, el, modal, toast, clamp, debounce, timecode } from "./util.js";
+import { ensureGenSettings, genLabel, genOutput } from "./finalrender.js";
 
 const PREFS = "ve_gen_prefs";
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS) || "{}"); } catch (_) { return {}; } };
@@ -81,6 +82,7 @@ export async function openGenerate(app, mode, where) {
   const defaultSeconds = fresh ? (s.target ? M.clipDur(s.target) : roomLen && roomLen > 0.5 && roomLen < 30 ? roomLen : prefs.freshSeconds || 5)
     : s.replace ? M.clipDur(s.replace) : gapLen ?? (prefs.newSeconds || 3);
 
+  const gen = await ensureGenSettings();
   let status = { available: false, reason: "Checking…", current: null, h3: {} };
   try { status = await api("api/regen/status"); } catch (_) { /* shown below */ }
 
@@ -121,6 +123,16 @@ export async function openGenerate(app, mode, where) {
   const srcCurrent = radio("g_src", "current", status.current ? `Current Media Generator settings (${status.current.name})` : "Current Media Generator settings (open the Video Generator tab first)",
     !settingsItem || !!prefs.useCurrent || fresh, { disabled: !status.current });
   const modelNote = el("div.dim.small");
+  const sizeSel = el("select", {}, el("option", { value: "project" }, `Project size: ${genLabel(gen)}`), el("option", { value: "clip" }, "The settings' own size"));
+  sizeSel.value = gen && prefs.size !== "clip" ? "project" : "clip";
+  if (!gen) sizeSel.options[0].disabled = true;
+  const sizeNote = el("div.dim.small");
+  const updateSizeNote = () => {
+    const out = sizeSel.value === "project" ? genOutput(gen) : null;
+    const nb = [s.left, s.right].filter(Boolean).map(c => M.mediaOf(c)).filter(Boolean);
+    const odd = out && nb.some(i => i.width && (i.width !== out[0] || i.height !== out[1]));
+    sizeNote.textContent = odd ? "The clips it joins are a different size, so their frames are pinned from pixels and this stretch can't be rendered final together with them." : "";
+  };
   const seedSel = el("select", {}, el("option", { value: "new" }, "New random seed"), el("option", { value: "same" }, "Same seed as the clip"), el("option", { value: "custom" }, "Custom seed…"));
   seedSel.value = prefs.seed === "custom" ? "custom" : "new";
   const seedInput = el("input", { type: "number", min: 0, step: 1, style: { width: "130px" }, value: prefs.customSeed || "" });
@@ -144,6 +156,7 @@ export async function openGenerate(app, mode, where) {
       el("label.rrow", {}, crossfade, el("span", {}, "Blend the joins: crossfade across the frames both sides rendered (pinned frames inside the run only)"))),
     field(fresh ? "Length" : "New footage", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seconds, el("span.dim", {}, "seconds")), lengthNote),
     field("Settings", srcClip.row, srcCurrent.row, modelNote),
+    field("Size", sizeSel, sizeNote),
     field("Seed", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seedSel, seedInput)),
     field("Prompt", promptBox, promptNote),
     error);
@@ -163,6 +176,7 @@ export async function openGenerate(app, mode, where) {
     window: parseInt(windowSel.value, 10), leaveMode: leaveSel.value, arriveMode: arriveSel.value, crossfade: crossfade.checked, joinMatch: joinMatch.checked, newSeconds: clamp(parseFloat(seconds.value) || 3, 0.2, 30),
     useCurrent: srcCurrent.input.checked, settingsFrom: settingsItem?.id || (s.left || s.right)?.mediaId || null, promptRange,
     at: s.at ?? null, targetId: s.target?.id || null,
+    gen: sizeSel.value === "project" ? gen : null,
   });
 
   const describePin = (p) => {
@@ -202,6 +216,8 @@ export async function openGenerate(app, mode, where) {
     seedInput.hidden = seedSel.value !== "custom";
     go.disabled = !info || !status.available || (!fresh && !status.h3?.installed);
   };
+  sizeSel.addEventListener("change", () => { updateSizeNote(); prepare(); });
+  updateSizeNote();
   for (const c of [windowSel, leaveSel, arriveSel, seconds, keepCut, carryAudio, srcClip.input, srcCurrent.input]) c.addEventListener("change", prepare);
   seedSel.addEventListener("change", update);
 
@@ -214,7 +230,7 @@ export async function openGenerate(app, mode, where) {
       if (!Number.isFinite(seed) || seed < 0) { error.textContent = "Enter a seed of 0 or more"; return; }
     }
     const req = { ...request(), seed, prompt: promptBox.value };
-    savePrefs({ window: req.window, leaveMode: req.leaveMode, arriveMode: req.arriveMode, crossfade: req.crossfade, joinMatch: req.joinMatch, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
+    savePrefs({ size: sizeSel.value, window: req.window, leaveMode: req.leaveMode, arriveMode: req.arriveMode, crossfade: req.crossfade, joinMatch: req.joinMatch, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
       freshSeconds: fresh && !s.target ? req.newSeconds : prefs.freshSeconds, keepCut: keepCut.checked, carryAudio: carryAudio.checked,
       useCurrent: req.useCurrent, seed: seedSel.value === "custom" ? "custom" : "new", customSeed: seedInput.value });
     go.disabled = true;

@@ -1038,9 +1038,12 @@ export function setTake(clipId, index) {
   if (hasSpeedKeys(clip)) syncSpeedOut(clip);
   clip.takeIndex = index;
   const original = clip.takes[0].partners || [];
+  // a take can borrow another take's sound (a final render keeps the sound of the draft it was rendered over)
+  const soundIndex = take.audioFrom != null && clip.takes[take.audioFrom] && take.audioFrom !== index ? take.audioFrom : index;
+  const sound = clip.takes[soundIndex];
   for (const p of before) {
     const o = original.find(x => x.id === p.id);
-    if (index > 0 && take.audio === "new") { p.mediaId = take.mediaId; p.in = take.in; p.out = take.out; }
+    if (soundIndex > 0 && sound.audio === "new") { p.mediaId = sound.mediaId; p.in = sound.in; p.out = sound.out; }
     else if (o) { p.mediaId = o.mediaId; p.in = o.in; p.out = o.out; }
     p.speed = clip.speed;
     if (hasSpeedKeys(clip)) { p.keys = { ...(p.keys || {}), speed: JSON.parse(JSON.stringify(clip.keys.speed)) }; p.dur = clip.dur; }
