@@ -158,9 +158,15 @@ export class MediaBin {
       // cut points a hair off their file's frame grid (from a rounded duration): put them back on it
       const grid = (c) => { const f = P().media[c.mediaId]?.fps; return f > 0 ? f : 0; };
       const near = (x, f) => Math.abs(x * f - Math.round(x * f)) > 1e-6 && Math.abs(x * f - Math.round(x * f)) < 0.01;
-      const offGrid = P().clips.filter(c => { const f = grid(c); return f && P().media[c.mediaId]?.kind === "video" && (near(c.in, f) || near(c.out, f)); });
+      const tf = M.fps();
+      const offGrid = P().clips.filter(c => { const f = grid(c); return near(c.start, tf) || (f && P().media[c.mediaId]?.kind === "video" && (near(c.in, f) || near(c.out, f))); });
       if (offGrid.length) M.edit("Snap cuts to frames", () => {
-        for (const c of offGrid) { const f = grid(c); if (near(c.in, f)) c.in = Math.round(c.in * f) / f; if (near(c.out, f)) c.out = Math.round(c.out * f) / f; }
+        for (const c of offGrid) {
+          const f = grid(c);
+          if (f && near(c.in, f)) c.in = Math.round(c.in * f) / f;
+          if (f && near(c.out, f)) c.out = Math.round(c.out * f) / f;
+          if (near(c.start, tf)) c.start = Math.round(c.start * tf) / tf;
+        }
       });
       if (over.length) M.edit("Fit clips to their media", () => {
         for (const c of over) {
