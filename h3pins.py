@@ -46,7 +46,7 @@ import traceback
 
 import numpy as np
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 PLUGIN_KEY = "video_editor"                 # plugin_data key the editor's tasks carry
 GRID = 17                                   # pixel frames per VAE clip
 LATENTS_PER_CLIP = 5
@@ -117,6 +117,20 @@ def fingerprints(frames):
             small = F.adaptive_avg_pool2d(grey.to("cpu"), FP_SIZE)
             out.append(small.reshape(small.shape[0], -1).clamp(0, 1).numpy())
     return np.concatenate(out, 0).astype(np.float32) if out else np.zeros((0, FP_SIZE[0] * FP_SIZE[1]), np.float32)
+
+
+def file_fingerprints(path):
+    """The same fingerprints as `fingerprints`, read from a video file: the mean of R, G and B, area-averaged to
+    FP_SIZE, in 0..1."""
+    h, w = FP_SIZE
+    args = [_ffmpeg(), "-v", "error", "-i", path, "-an", "-vf", f"scale={w}:{h}:flags=area,format=rgb24",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+    raw = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+    n = len(raw) // (w * h * 3)
+    if n == 0:
+        raise RuntimeError("no frames")
+    rgb = np.frombuffer(raw[:n * w * h * 3], np.uint8).reshape(n, h, w, 3).astype(np.float32) / 255.0
+    return rgb.mean(axis=3).reshape(n, -1)
 
 
 def locate(window_fp, file_fp, probe=8, accept=0.035, keep=0.05):
@@ -852,6 +866,10 @@ def _wrap_save_video(original):
     def save_video(*args, **kwargs):
         job = _JOB.get()
         _count("save_video")
+        if job is None:
+            _count("save_video_no_job")
+        elif not job["windows"]:
+            _count("save_video_before_generation")
         if job is not None and job["windows"]:
             try:
                 values = _bind(original, args, kwargs)
@@ -877,7 +895,7 @@ def _wrap_record_file_metadata(original):
     def record_file_metadata(*args, **kwargs):
         result = original(*args, **kwargs)
         job = _JOB.get()
-        if job is not None and job["windows"] and job.get("final_fp") is not None:
+        if job is not None:
             try:
                 values = _bind(original, args, kwargs)
                 if not values.get("is_image") and not values.get("audio_only"):
@@ -902,6 +920,14 @@ def _finish(job):
     path, file_fp, configs = job["saves"][-1]
     if not os.path.isfile(path):
         return
+    if file_fp is None:
+        # the frames weren't seen on their way to the file: read the file's own frames instead
+        try:
+            file_fp = file_fingerprints(path)
+            _count("fingerprinted_from_file")
+        except Exception as error:
+            _log(f"latents not saved for {os.path.basename(path)}: could not read its frames ({error!r})")
+            return
     try:
         windows, tensors = [], []
         for w in job["windows"]:
