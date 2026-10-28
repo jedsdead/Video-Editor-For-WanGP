@@ -141,7 +141,7 @@ export class RegenJobs {
         M.select([tid]);
         toast(`${job.mode[0].toUpperCase() + job.mode.slice(1)} added${placedNote} · seed ${job.seed}`);
         this.rateSeams(tid);
-        if (job.request?.levelLock !== false) this.matchJoins(tid);
+        if ((job.request?.joinMatch ?? job.request?.levelLock) !== false) this.matchJoins(tid);
         else M.edit("Join match", () => { const l = M.getClip(tid); if (l) delete l.level; });
       }
     }
