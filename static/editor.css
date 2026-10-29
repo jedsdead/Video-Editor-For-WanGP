@@ -252,6 +252,13 @@ canvas.speedgraph { width: 100%; height: 56px; display: block; border-radius: 4p
 /* viewer transform overlay */
 #viewerStage { position: relative; }
 .xf-overlay { position: absolute; z-index: 3; touch-action: none; }
+/* zoomed viewer: the frame at a percentage of the project's resolution, scrolled inside the stage */
+#viewerStage.zoomed { display: block; overflow: auto; }
+#viewerStage.zoomed #previewCanvas { display: block; margin: auto; max-width: none; max-height: none; }
+#viewerZoom { width: auto; }
+/* full screen: the whole viewer, so the transport stays usable */
+#viewer:fullscreen { background: #000; }
+#viewer:fullscreen #transport { background: rgba(20,21,25,.92); }
 .rate-badge { font-family: var(--mono); font-size: 12px; color: var(--sel); min-width: 44px; }
 
 /* floating panels */

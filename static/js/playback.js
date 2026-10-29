@@ -53,8 +53,15 @@ export class Playback {
     const { width, height } = P().settings;
     const box = this.stage.getBoundingClientRect();
     if (!box.width || !box.height) return;
-    const scale = Math.min(box.width / width, box.height / height);
+    // Fit (the default) or a fixed percentage of the project's resolution (100%: one picture pixel per screen pixel)
+    const zoom = state.viewerZoom && state.viewerZoom !== "fit" ? parseFloat(state.viewerZoom) : 0;
+    const scale = zoom ? zoom / (window.devicePixelRatio || 1) : Math.min(box.width / width, box.height / height);
+    this.stage.classList.toggle("zoomed", !!zoom);
     const cssW = Math.max(16, Math.floor(width * scale)), cssH = Math.max(16, Math.floor(height * scale));
+    if (zoom) {
+      // centred while it fits, scrollable once it's bigger than the viewer
+      this.renderer.canvas.style.marginTop = `${Math.max(0, (box.height - cssH) / 2)}px`;
+    } else this.renderer.canvas.style.marginTop = "";
     const canvas = this.renderer.canvas;
     canvas.style.width = `${cssW}px`;
     canvas.style.height = `${cssH}px`;
@@ -433,7 +440,8 @@ export class Playback {
     const canvas = this.renderer.canvas;
     const k = canvas.width / p.settings.width;
     const fit = Math.min(p.settings.width / srcW, p.settings.height / srcH) * Math.max(0, prop(clip, "scale", kt));
-    const w = srcW * fit * k, h = srcH * fit * k;
+    // each axis can be stretched on its own (an anamorphic clip desqueezed, say)
+    const w = srcW * fit * k * Math.max(0, prop(clip, "scaleX", kt)), h = srcH * fit * k * Math.max(0, prop(clip, "scaleY", kt));
     const cl = clamp(prop(clip, "cropL", kt), 0, 1), cr = clamp(prop(clip, "cropR", kt), 0, 1);
     const ct = clamp(prop(clip, "cropT", kt), 0, 1), cb = clamp(prop(clip, "cropB", kt), 0, 1);
     const rot = (prop(clip, "rotation", kt) || 0) * Math.PI / 180;

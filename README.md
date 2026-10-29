@@ -2,7 +2,7 @@
 
 A multi-track video editor that runs as a plugin inside [WanGP](https://github.com/deepbeepmeep/Wan2GP), in its own tab. Cut your generations together, grade them, mix the audio and export, without leaving WanGP.
 
-**Version 1.5** · by jedsdeadbaby · MIT licence
+**Version 1.6** · by jedsdeadbaby · MIT licence
 
 ## Features
 
@@ -24,7 +24,9 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - Fades have shapes too: right-click a fade handle, or use the Inspector.
 
 **Transform**
-- Position, scale, rotation and crop for every video clip, all keyframeable.
+- Position, scale, rotation and crop for every video clip, all keyframeable. **Scale X** and **Scale Y** stretch each axis on its own, with one-click **Fit**, **Fill**, **Stretch**, **Fill width**, **Fill height** and **Anamorphic** desqueeze (1.25× to 2×).
+- The viewer shows the frame at **Fit** or at 25% to 400% of the project's resolution (scroll when it's bigger), from the menu under the frame. **Full screen** keeps the transport, so you can play and leave without the keyboard.
+- **Lock the aspect ratio** in the project settings to change width and height together.
 - Handles on the viewer: drag to move, corners to scale, the knob to rotate (Shift snaps to 15°), and crop mode (C) for edge handles. Clicking in the viewer selects the clip under the pointer.
 
 **Effects panel**

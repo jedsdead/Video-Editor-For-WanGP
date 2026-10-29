@@ -60,7 +60,8 @@ export class TransformOverlay {
     const preview = this.app.renderer.canvas;
     const sr = this.stage.getBoundingClientRect(), pr = preview.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    Object.assign(this.canvas.style, { left: `${pr.left - sr.left}px`, top: `${pr.top - sr.top}px`, width: `${pr.width}px`, height: `${pr.height}px` });
+    // inside a scrolled (zoomed) viewer the overlay scrolls with the frame
+    Object.assign(this.canvas.style, { left: `${pr.left - sr.left + this.stage.scrollLeft}px`, top: `${pr.top - sr.top + this.stage.scrollTop}px`, width: `${pr.width}px`, height: `${pr.height}px` });
     const w = Math.round(pr.width * dpr), h = Math.round(pr.height * dpr);
     if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
     return dpr;

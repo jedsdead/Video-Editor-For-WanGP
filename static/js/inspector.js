@@ -156,10 +156,13 @@ export class Inspector {
 
     if (video.length) {
       const pw = P().settings.width, ph = P().settings.height;
-      this.defaults = { Opacity: 100, Scale: 100, "Position X": 0, "Position Y": 0 };
+      this.defaults = { Opacity: 100, Scale: 100, "Scale X": 100, "Scale Y": 100, "Position X": 0, "Position Y": 0 };
       this.section("Video",
         this.keySlider("Opacity", video, "opacity", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 100, step: 0.5 }),
         this.keySlider("Scale", video, "scale", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 400, step: 0.5 }),
+        this.keySlider("Scale X", video, "scaleX", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 400, step: 0.5 }),
+        this.keySlider("Scale Y", video, "scaleY", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 400, step: 0.5 }),
+        this.fitRow(video),
         this.keySlider("Position X", video, "x", { toUi: (v) => Math.round(v), fromUi: (v) => v, min: -pw, max: pw, step: 1 }),
         this.keySlider("Position Y", video, "y", { toUi: (v) => Math.round(v), fromUi: (v) => v, min: -ph, max: ph, step: 1 }),
         this.keySlider("Rotation", video, "rotation", { toUi: (v) => Math.round(v * 10) / 10, fromUi: (v) => v, min: -360, max: 360, step: 0.5, format: (v) => v.toFixed(1) }),
@@ -172,8 +175,8 @@ export class Inspector {
         this.slider("Fade out", { get: () => (M.getClip(video[0].id) || video[0]).fadeOut || 0, set: (v) => each(video, c => { c.fadeOut = Math.min(v, M.clipDur(c)); })(), min: 0, max: 10, step: 1 / fps, format: (v) => v.toFixed(2), editLabel: "Video fade out" }),
         this.curveSelect("Fade out shape", video, "fadeOutCurve"),
         el("div.btnrow", {}, el("button.small", { onclick: () => M.edit("Reset transform", each(video, c => {
-            Object.assign(c, { opacity: 1, scale: 1, x: 0, y: 0, rotation: 0, cropL: 0, cropR: 0, cropT: 0, cropB: 0 });
-            for (const n of ["opacity", "scale", "x", "y", "rotation", "cropL", "cropR", "cropT", "cropB"]) if (c.keys) delete c.keys[n];
+            Object.assign(c, { opacity: 1, scale: 1, scaleX: 1, scaleY: 1, x: 0, y: 0, rotation: 0, cropL: 0, cropR: 0, cropT: 0, cropB: 0 });
+            for (const n of ["opacity", "scale", "scaleX", "scaleY", "x", "y", "rotation", "cropL", "cropR", "cropT", "cropB"]) if (c.keys) delete c.keys[n];
           })) }, "Reset transform"),
           el("button.small", { title: "Show crop handles on the viewer (C)", onclick: () => this.app.overlay.setCropMode(!this.app.overlay.cropMode) }, "Crop on viewer"),
           el("button.small", { onclick: () => this.app.docks.show("colour") }, "Colour…")),
@@ -207,6 +210,44 @@ export class Inspector {
       const item = M.mediaOf(first);
       if (item && item.has_metadata) this.renderGeneration(item);
     }
+  }
+
+  // Fit and fill: set the scales so the picture fits or fills the frame, as a whole or one axis at a time, and
+  // desqueeze anamorphic footage. At the playhead when the scales are keyframed.
+  fitRow(list) {
+    const apply = (label, fn) => M.edit(label, () => {
+      const p = P();
+      const pw = p.settings.width, ph = p.settings.height;
+      for (const c0 of list) {
+        const c = M.getClip(c0.id);
+        if (!c) continue;
+        const item = M.mediaOf(c);
+        const own = item && !M.GENERATOR_KINDS.has(item.kind) && item.kind !== "title" && item.width && item.height;
+        const sw = own ? item.width : pw, sh = own ? item.height : ph;
+        const fit = Math.min(pw / sw, ph / sh);
+        const w0 = sw * fit, h0 = sh * fit;   // its size at 100%
+        const tau = clamp(state.playhead - c.start, 0, M.clipDur(c));
+        const v = (n) => M.prop(c, n, tau);
+        const set = (n, value) => M.setPropAt(c.id, n, tau, Math.round(value * 10000) / 10000);
+        fn({ w0, h0, pw, ph, v, set });
+      }
+    });
+    const btn = (label, title, fn) => el("button.small", { title, onclick: () => apply(label, fn) }, label);
+    const centre = (set) => { set("x", 0); set("y", 0); };
+    const anamorphic = el("select", { title: "Desqueeze anamorphic footage: stretches the width by the lens's squeeze factor", onchange: (e) => {
+      const f = parseFloat(e.target.value);
+      e.target.value = "";
+      if (f) apply("Desqueeze", ({ set }) => { set("scaleX", f); set("scaleY", 1); });
+    } }, el("option", { value: "" }, "Anamorphic…"), [["1", "None (1×)"], ["1.25", "1.25×"], ["1.33", "1.33×"], ["1.5", "1.5×"], ["1.65", "1.65×"], ["1.8", "1.8×"], ["2", "2×"]]
+      .map(([v, l]) => el("option", { value: v }, l)));
+    return el("div.field.wide", {}, el("label", {}, "Fit"), el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
+      btn("Fit", "Fit the whole picture inside the frame (keeps its shape, including any stretch)", ({ w0, h0, pw, ph, v, set }) => { set("scale", Math.min(pw / (w0 * v("scaleX")), ph / (h0 * v("scaleY")))); centre(set); }),
+      btn("Fill", "Fill the frame, cropping what spills over (keeps its shape)", ({ w0, h0, pw, ph, v, set }) => { set("scale", Math.max(pw / (w0 * v("scaleX")), ph / (h0 * v("scaleY")))); centre(set); }),
+      btn("Stretch", "Stretch each axis to the frame exactly", ({ w0, h0, pw, ph, v, set }) => { set("scaleX", pw / (w0 * v("scale"))); set("scaleY", ph / (h0 * v("scale"))); centre(set); }),
+      btn("Fill width", "Stretch the width only, to the frame's width", ({ w0, pw, v, set }) => { set("scaleX", pw / (w0 * v("scale"))); set("x", 0); }),
+      btn("Fill height", "Stretch the height only, to the frame's height", ({ h0, ph, v, set }) => { set("scaleY", ph / (h0 * v("scale"))); set("y", 0); }),
+      btn("1:1", "Reset Scale X and Y to 100% (keeps Scale)", ({ set }) => { set("scaleX", 1); set("scaleY", 1); }),
+      anamorphic));
   }
 
   // ---------------------------------------------------------------- keyframed fields
@@ -770,8 +811,19 @@ export class Inspector {
       el("option", { value: "" }, "Presets…"), FPS_PRESETS.map(f => el("option", { value: f }, `${f} fps`)));
     this.section("Project",
       el("div.dim", { style: { marginBottom: "6px", fontSize: "12px" } }, s.auto ? "The first video you add sets the resolution and frame rate." : ""),
-      this.numberField("Width", { get: () => s.width, set: (v) => { s.width = Math.round(v / 2) * 2; s.auto = false; bus.emit("settings"); }, min: 64, max: 8192, step: 2, editLabel: "Resolution" }),
-      this.numberField("Height", { get: () => s.height, set: (v) => { s.height = Math.round(v / 2) * 2; s.auto = false; bus.emit("settings"); }, min: 64, max: 8192, step: 2, editLabel: "Resolution" }),
+      this.numberField("Width", { get: () => s.width, set: (v) => {
+        const w = Math.round(v / 2) * 2;
+        if (s.lockAspect && s.width) s.height = Math.max(64, Math.round(s.height * w / s.width / 2) * 2);   // keep the shape
+        s.width = w; s.auto = false; bus.emit("settings");
+      }, min: 64, max: 8192, step: 2, editLabel: "Resolution" }),
+      this.numberField("Height", { get: () => s.height, set: (v) => {
+        const h = Math.round(v / 2) * 2;
+        if (s.lockAspect && s.height) s.width = Math.max(64, Math.round(s.width * h / s.height / 2) * 2);
+        s.height = h; s.auto = false; bus.emit("settings");
+      }, min: 64, max: 8192, step: 2, editLabel: "Resolution" }),
+      el("label.rrow", {}, el("input", { type: "checkbox", checked: !!s.lockAspect, onchange: (e) => M.edit("Lock aspect ratio", () => { s.lockAspect = e.target.checked; }) }),
+        el("span", {}, "Lock the aspect ratio (changing one side changes the other)")),
+      this.readout("Aspect", () => `${(s.width / s.height).toFixed(3)}:1`),
       el("div.field.wide", {}, el("label", {}, ""), res),
       this.numberField("Frame rate", { get: () => s.fps, set: (v) => { s.fps = v; s.auto = false; bus.emit("settings"); }, min: 1, max: 240, step: 0.001, editLabel: "Frame rate" }),
       el("div.field.wide", {}, el("label", {}, ""), fpsSel),

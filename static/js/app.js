@@ -751,7 +751,20 @@ async function main() {
   $("btnEnd").onclick = () => { app.playback.pause(); app.playback.seek(M.timelineEnd()); };
   $("btnPrevFrame").onclick = () => app.playback.step(-1);
   $("btnNextFrame").onclick = () => app.playback.step(1);
-  $("btnFullscreen").onclick = () => { const s = $("viewerStage"); document.fullscreenElement ? document.exitFullscreen() : s.requestFullscreen?.(); };
+  // full screen takes the whole viewer, transport included, so playback and leaving work without the keyboard
+  $("btnFullscreen").onclick = () => { const v = $("viewer"); document.fullscreenElement ? document.exitFullscreen() : v.requestFullscreen?.(); };
+  document.addEventListener("fullscreenchange", () => {
+    const on = !!document.fullscreenElement;
+    $("btnFullscreen").title = on ? "Leave full screen (Esc)" : "Full screen (Esc to leave)";
+    $("btnFullscreen").innerHTML = on ? '<svg viewBox="0 0 24 24"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>'
+                                      : '<svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>';
+    app.playback.layout();
+  });
+  // viewer size: fit, or a percentage of the project's resolution (remembered per browser)
+  try { state.viewerZoom = localStorage.getItem("ve_viewer_zoom") || "fit"; } catch (_) { state.viewerZoom = "fit"; }
+  $("viewerZoom").value = state.viewerZoom;
+  $("viewerZoom").onchange = (e) => { state.viewerZoom = e.target.value; try { localStorage.setItem("ve_viewer_zoom", state.viewerZoom); } catch (_) { /* ignore */ } app.playback.layout(); };
+  $("viewerStage").addEventListener("scroll", () => bus.emit("viewer-layout"));
   bus.on("playstate", (playing) => { $("playIcon").innerHTML = playing ? '<path d="M6 4h4v16H6zM14 4h4v16h-4z"/>' : '<path d="M7 4v16l13-8z"/>'; });
   bus.on("time", (t) => { $("tcCurrent").textContent = timecode(t, M.fps()); });
   for (const name of ["change", "selection", "range", "project"]) bus.on(name, updateInfo);

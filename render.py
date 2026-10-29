@@ -813,6 +813,9 @@ class ExportJob:
                 item = tl.media[clip["mediaId"]]
                 # Decode at the largest size the clip reaches (scale may be keyframed), resize per frame when needed.
                 scales = [float(clip.get("scale") if clip.get("scale") is not None else 1)] + [float(k["v"]) for k in T.keys_of(clip, "scale")]
+                stretch = [float(clip.get(n) if clip.get(n) is not None else 1) for n in ("scaleX", "scaleY")] + \
+                    [float(k["v"]) for n in ("scaleX", "scaleY") for k in T.keys_of(clip, n)]
+                scales = [v * max(1.0, max(stretch)) for v in scales]   # decode sharp enough for the widest stretch
                 decode_scale[clip["id"]] = min(8.0, max(0.05, max(scales)))
                 w, h = fit_size(item.get("width") or tl.width, item.get("height") or tl.height, tl.width, tl.height, decode_scale[clip["id"]])
                 if item["kind"] == "title":
@@ -885,11 +888,12 @@ class ExportJob:
                 a = out[3:4]
                 img = self._cat(torch.where(a > 0, out[:3] / a.clamp(min=1e-6), torch.zeros_like(out[:3])).clamp(0, 1), a)
             scale = max(0.0, T.prop(clip, "scale", kt, 1.0))
+            sx, sy = max(0.0, T.prop(clip, "scaleX", kt, 1.0)), max(0.0, T.prop(clip, "scaleY", kt, 1.0))
             base = decode_scale.get(clip["id"], 1.0)
-            if abs(scale - base) > 1e-4:
-                if scale <= 1e-4:
+            if abs(scale * sx - base) > 1e-4 or abs(scale * sy - base) > 1e-4:
+                if scale * sx <= 1e-4 or scale * sy <= 1e-4:
                     return None
-                img = comp.resize(img, img.shape[2] * scale / base, img.shape[1] * scale / base)
+                img = comp.resize(img, img.shape[2] * scale * sx / base, img.shape[1] * scale * sy / base)
             alpha = min(1.0, max(0.0, T.prop(clip, "opacity", kt, 1.0)))
             alpha *= T.fade_factor(clip, kt, duration)
             crop = tuple(T.prop(clip, name, kt, 0.0) for name in ("cropL", "cropR", "cropT", "cropB"))
@@ -913,7 +917,9 @@ class ExportJob:
             params = T.grade_params(grade)
             alpha = min(1.0, max(0.0, T.prop(x, "opacity", kt, 1.0))) * T.fade_factor(x, kt, duration)
             scale = max(0.0, T.prop(x, "scale", kt, 1.0))
-            move = (abs(scale - 1) > 1e-4 or any(abs(T.prop(x, n, kt, 0.0)) > 1e-6 for n in ("x", "y", "rotation", "cropL", "cropR", "cropT", "cropB")))
+            sx, sy = max(0.0, T.prop(x, "scaleX", kt, 1.0)), max(0.0, T.prop(x, "scaleY", kt, 1.0))
+            move = (abs(scale - 1) > 1e-4 or abs(sx - 1) > 1e-4 or abs(sy - 1) > 1e-4
+                    or any(abs(T.prop(x, n, kt, 0.0)) > 1e-6 for n in ("x", "y", "rotation", "cropL", "cropR", "cropT", "cropB")))
             has_lut = bool(grade.get("lut")) and grade.get("enabled") is not False
             if params is None and not has_lut and not FX.active(x) and alpha >= 1 and not move:
                 return layer
@@ -925,10 +931,10 @@ class ExportJob:
                 out = effects.apply(self._cat(rgb * a, a), x, kt, round(t * tl.fps))
                 oa = out[3:4]
                 img = self._cat(torch.where(oa > 0, out[:3] / oa.clamp(min=1e-6), torch.zeros_like(out[:3])).clamp(0, 1), oa)
-            if abs(scale - 1) > 1e-4:
-                if scale <= 1e-4:
+            if abs(scale * sx - 1) > 1e-4 or abs(scale * sy - 1) > 1e-4:
+                if scale * sx <= 1e-4 or scale * sy <= 1e-4:
                     return None
-                img = comp.resize(img, img.shape[2] * scale, img.shape[1] * scale)
+                img = comp.resize(img, img.shape[2] * scale * sx, img.shape[1] * scale * sy)
             crop = tuple(T.prop(x, name, kt, 0.0) for name in ("cropL", "cropR", "cropT", "cropB"))
             return comp.place(img, T.prop(x, "x", kt, 0.0) * tl.width / max(1, self._project_w(tl)),
                               T.prop(x, "y", kt, 0.0) * tl.height / max(1, self._project_h(tl)), alpha,

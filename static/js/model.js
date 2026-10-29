@@ -109,6 +109,8 @@ export const KEYABLE = {
   volume: { label: "Volume", fallback: 0, kind: "audio" },
   opacity: { label: "Opacity", fallback: 1, kind: "video" },
   scale: { label: "Scale", fallback: 1, kind: "video" },
+  scaleX: { label: "Scale X", fallback: 1, kind: "video" },
+  scaleY: { label: "Scale Y", fallback: 1, kind: "video" },
   x: { label: "Position X", fallback: 0, kind: "video" },
   y: { label: "Position Y", fallback: 0, kind: "video" },
   rotation: { label: "Rotation", fallback: 0, kind: "video" },
