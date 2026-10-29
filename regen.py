@@ -686,7 +686,14 @@ class RegenService:
                 message = "; ".join(str(getattr(e, "message", e)) for e in errors) or "WanGP produced no video"
                 self._update(job_id, status="error", error=message, message=message)
                 return
-            video = next((f for f in files if os.path.splitext(f)[1].lower() in (".mp4", ".mkv", ".mov", ".webm")), files[0])
+            videos = [f for f in files if os.path.splitext(f)[1].lower() in (".mp4", ".mkv", ".mov", ".webm")]
+            video = videos[0] if videos else files[0]
+            if len(videos) > 1 or (self.jobs.get(job_id) or {}).get("live"):
+                # a sliding-window run can report an interim file (the first window's, with the Sliding Window Clips
+                # plugin) besides the finished one: take the longest, the joined last window's file included
+                live = ((self.jobs.get(job_id) or {}).get("live") or {}).get("path")
+                candidates = videos + ([live] if live and os.path.isfile(live) else [])
+                video = max(candidates, key=lambda f: float(M.probe(f).get("duration") or 0))
             draft_audio = (plugin_data or {}).get("video_editor", {}).get("draft_audio")
             if draft_audio and os.path.isfile(draft_audio):
                 # a final render's own soundtrack is a placeholder (the refine only redraws the picture): give the file

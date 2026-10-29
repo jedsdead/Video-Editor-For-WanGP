@@ -679,8 +679,9 @@ def _window_join(pipeline, kwargs):
     if video is None or kwargs.get("input_masks") is None or kwargs.get("input_frames") is None:
         raise ValueError("not a masked run")
     A = R - WINDOW_HELD_FRAMES
-    if A < GRID or A % GRID or video.shape[1] < R:
-        raise ValueError(f"an overlap of {R} frames leaves no room for history and held frames")
+    # a prompt's own /overlap=18 leaves no history: then it is a plain masked hold of the 18 frames
+    if A < 0 or A % GRID or video.shape[1] < R:
+        raise ValueError(f"an overlap of {R} frames doesn't split into history and {WINDOW_HELD_FRAMES} held frames")
     kwargs["input_video"] = video[:, :A + 1]
     kwargs["prefix_frames_count"] = A + 1
     _count("window_join")
@@ -701,7 +702,7 @@ def _window_join(pipeline, kwargs):
             def add_audio_condition(latents, anchor, *rest, **kw):
                 if anchor == "history":
                     state["history"] = True
-                elif anchor == "first" and state["history"] and not state["done"]:
+                elif anchor == "first" and (state["history"] or A == 0) and not state["done"]:
                     state["done"] = True
                     latents = held.to(device=latents.device, dtype=latents.dtype)
                 return inner(latents, anchor, *rest, **kw)
@@ -713,7 +714,8 @@ def _window_join(pipeline, kwargs):
                     del pipeline._add_audio_condition
                 except AttributeError:
                     pass
-    _log(f"window joined as Motion + masked: {A} frames of history, {WINDOW_HELD_FRAMES} held")
+    _log(f"window joined as Motion + masked: {A} frames of history, {WINDOW_HELD_FRAMES} held" if A else
+         f"window joined as masked: {WINDOW_HELD_FRAMES} frames held (the overlap of {R} frames leaves none for history; 35 or more gives both)")
     return restore
 
 
