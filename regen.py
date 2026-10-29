@@ -700,6 +700,10 @@ class RegenService:
                 # the drafts' sound, keeping its picture and WanGP's settings untouched
                 self._swap_audio(video, draft_audio)
             item = self.registry.register(video)
+            ends = (self.jobs.get(job_id) or {}).get("windowEnds") or []
+            if len(ends) > 1:
+                # where WanGP's windows met, as it saved them: exact cut points for "one clip per window"
+                self._save_window_cuts(item, ends[:-1])
             self._update(job_id, status="done", progress=1.0, message="Done", media=self.registry.public(item))
         except Exception as error:
             self._update(job_id, status="error", error=str(error), message=str(error))
@@ -721,6 +725,7 @@ class RegenService:
         try:
             folder = os.path.join(self.root, job_id)
             live = job.get("live") or None
+            ends = list(job.get("windowEnds") or [])     # where each window ended, in seconds of the growing video
             for path in paths[int(job.get("partialCount") or 0):]:
                 duration = float(M.probe(path).get("duration") or 0)
                 if live and duration < float(live["duration"]) + 0.25:
@@ -736,10 +741,12 @@ class RegenService:
                         continue
                     path, duration = joined, float(M.probe(joined).get("duration") or 0)
                 live = {"path": path, "duration": duration}
+                ends.append(duration)
             if not live:
                 return
             item = self.registry.register(live["path"])
-            self._update(job_id, partialCount=len(paths), live=live, liveMedia=self.registry.public(item), liveWindows=len(paths))
+            self._update(job_id, partialCount=len(paths), live=live, liveMedia=self.registry.public(item), liveWindows=len(paths),
+                         windowEnds=ends)
         except Exception as error:
             print(f"[Video Editor] live windows: {error}")
 
@@ -958,6 +965,13 @@ class RegenService:
         step = max(1, window - overlap - discard)
         return {"count": 1 + math.ceil(max(0, total - (window - discard)) / step), "window": window}
 
+    def _save_window_cuts(self, item, seconds):
+        try:
+            with open(os.path.join(self.registry.item_dir(item["id"]), "windows.json"), "w", encoding="utf-8") as handle:
+                json.dump({"cuts": [round(float(t), 6) for t in seconds]}, handle)
+        except Exception as error:
+            print(f"[Video Editor] could not keep the window cuts: {error}")
+
     def window_cuts(self, media_id):
         """Where a generation's sliding windows meet, in seconds of its file: from the windows the add-on saved latents
         for (exact), else from the file's WanGP settings (window size, overlap and discarded frames)."""
@@ -966,6 +980,14 @@ class RegenService:
         file_frames = int(round(float(item.get("duration") or 0) * fps))
         cuts, source = [], None
         try:
+            with open(os.path.join(self.registry.item_dir(item["id"]), "windows.json"), encoding="utf-8") as handle:
+                saved = [float(t) for t in json.load(handle).get("cuts") or []]
+            if saved:
+                frames = sorted({int(round(t * fps)) for t in saved if 0 < t * fps < file_frames})
+                return {"cuts": [f / fps for f in frames], "frames": frames, "windows": len(frames) + 1, "source": "run"}
+        except (OSError, ValueError):
+            pass
+        try:
             manifest = self.latents.manifest(self._sha(item)) or {}
         except Exception:
             manifest = {}
@@ -973,7 +995,11 @@ class RegenService:
         if len(windows) > 1:
             cuts = [int(w["offset"]) + int(w["valid"]) for w in windows[:-1]]
             source = "latents"
-        else:
+            # a window whose match stops early (its overlap frames differ from the file) gives a cut that isn't one:
+            # windows are seconds long, so cuts closer than a second are not to be trusted
+            if any(b - a < fps for a, b in zip([0] + cuts, cuts + [file_frames])):
+                cuts, source = [], None
+        if not cuts:
             meta = self._meta(item) or {}
             window = int(meta.get("sliding_window_size") or 0)
             if window and file_frames > window:

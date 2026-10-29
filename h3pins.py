@@ -682,6 +682,26 @@ def _window_join(pipeline, kwargs):
     # a prompt's own /overlap=18 leaves no history: then it is a plain masked hold of the 18 frames
     if A < 0 or A % GRID or video.shape[1] < R:
         raise ValueError(f"an overlap of {R} frames doesn't split into history and {WINDOW_HELD_FRAMES} held frames")
+    # H3 takes each window's control video from the guide at the window's own position (WanGP doesn't put the
+    # previous window's frames in it), so put the held frames there and mark them held in the mask
+    frames, masks = kwargs["input_frames"], kwargs["input_masks"]
+    if frames.shape[1] < R or masks.shape[1] < R:
+        raise ValueError(f"the window's control video is {frames.shape[1]} frames, shorter than the overlap")
+    import torch
+    held = video[:, A:R].to(device=frames.device, dtype=torch.float32)
+    if tuple(held.shape[-2:]) != tuple(frames.shape[-2:]):
+        held = torch.nn.functional.interpolate(held.permute(1, 0, 2, 3), size=tuple(frames.shape[-2:]), mode="bilinear",
+                                               align_corners=False).permute(1, 0, 2, 3)
+    frames = frames.clone()
+    if frames.dtype == torch.uint8:
+        frames[:, A:R] = held.add(1.0).mul(127.5).round().clamp(0, 255).to(torch.uint8)
+    elif float(frames.max()) > 1.5:      # float guide in 0..255
+        frames[:, A:R] = held.add(1.0).mul(127.5).to(frames.dtype)
+    else:                                # float guide in -1..1
+        frames[:, A:R] = held.to(frames.dtype)
+    masks = masks.clone()
+    masks[:, A:R] = 0
+    kwargs["input_frames"], kwargs["input_masks"] = frames, masks
     kwargs["input_video"] = video[:, :A + 1]
     kwargs["prefix_frames_count"] = A + 1
     _count("window_join")
