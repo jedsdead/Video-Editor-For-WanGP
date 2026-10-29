@@ -2,7 +2,7 @@
 
 A multi-track video editor that runs as a plugin inside [WanGP](https://github.com/deepbeepmeep/Wan2GP), in its own tab. Cut your generations together, grade them, mix the audio and export, without leaving WanGP.
 
-**Version 1.0.2** · by jedsdeadbaby · MIT licence
+**Version 1.5** · by jedsdeadbaby · MIT licence
 
 ## Features
 
@@ -103,6 +103,12 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - **Live preview** of the generation in the Inspector while WanGP works.
 - **View → Snap cuts to H3's 17-frame grid** keeps splits and trims of WanGP clips on the grid.
 - Saved latents are kept up to 20 GB, oldest removed first. WanGP must be restarted once after installing or updating the editor so the add-on loads.
+
+**Final render (upscale)**
+- Edit with fast one-phase drafts, then **File → Render final…** (or right-click clips → **Render final**) refines each continuous stretch of the main track as one piece through WanGP's own phase 2: the drafts, latent-upscaled ×2, with the Turbo LoRA, noise level and steps of your clips' phase 2, and optionally the H3 VAE ×2 on decode. RefMods and references carry over; LoRAs are left out unless you keep them.
+- Each clip gets a **Final** take (its draft and its sound are kept); **View → Show final renders** switches between drafts and finals. A final goes out of date when its draft is trimmed.
+- Stretches longer than one window are refined in overlapping windows blended at every step. A clip rendered next to one that already has a final re-renders a little of that final and holds it, so the two flow into each other.
+- The project's **Generation** size (Inspector, with nothing selected) sets the draft size for editor generations; it defaults to the first clip's.
 
 **Inspector**
 - Click a section heading, or an effect's name, to fold it away. Alt+click folds or unfolds every section. Folded sections are remembered.
