@@ -180,6 +180,36 @@ export function addEffect(clipIds, type, params) {
   }
   return added;
 }
+// Audio effects (static/js/audiofx.js) on audio clips: clip.afx, applied in order before the clip's volume and fades.
+export function addAudioEffect(clipIds, type, params) {
+  const added = [];
+  for (const id of clipIds) {
+    const c = getClip(id);
+    if (!c || trackKind(c.trackId) !== "audio") continue;
+    c.afx = [...(c.afx || []), { id: uid("afx"), type, on: true, params: { ...params } }];
+    added.push(c);
+  }
+  return added;
+}
+export function updateAudioEffect(clipId, fxId, fn) {
+  const c = getClip(clipId);
+  const fx = c && (c.afx || []).find(f => f.id === fxId);
+  if (fx) fn(fx);
+}
+export function removeAudioEffect(clipId, fxId) {
+  const c = getClip(clipId);
+  if (c) c.afx = (c.afx || []).filter(f => f.id !== fxId);
+}
+export function moveAudioEffect(clipId, fxId, delta) {
+  const c = getClip(clipId);
+  if (!c) return;
+  const list = [...(c.afx || [])];
+  const i = list.findIndex(f => f.id === fxId), j = i + delta;
+  if (i < 0 || j < 0 || j >= list.length) return;
+  [list[i], list[j]] = [list[j], list[i]];
+  c.afx = list;
+}
+
 export function removeEffect(clipId, fxId) {
   const c = getClip(clipId);
   if (!c) return;

@@ -37,6 +37,10 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
   - In the Inspector, effects stack in order after the colour grade: switch each on or off, move it up or down, reset or remove it. Every slider keyframes with ◆.
   - Right-click a clip to copy, paste or remove its effects.
 
+**Audio effects**
+- **Reverb**, **Echo / delay**, **Pitch shift** (same speed), **EQ** (bass and treble shelves), **Low cut**, **High cut** and **Distortion** on audio clips. Drag one from the Effects panel onto an audio clip, click it to add it to the selected audio clips, or use **Add audio effect** in the Inspector, where they can be switched on and off, reordered, reset and removed.
+- They play in the viewer and render the same on export (the same impulse responses, filters and pitch shifter), before the clip's volume and fades.
+
 **Titles**
 - Drag the **Title** generator from the Effects panel (or press Shift+T). Set the text, font, size, bold and italic, colour, alignment, line height, outline, drop shadow and background box in the Inspector, and animate it with the transform keyframes.
 

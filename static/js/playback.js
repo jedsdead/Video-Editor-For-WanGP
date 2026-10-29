@@ -14,6 +14,7 @@ import { drawGenerator, effectPasses, EFFECTS } from "./effects.js";
 const EFFECTS_KNOWN = new Set(Object.keys(EFFECTS));
 import { ensureLut } from "./lut.js";
 import { dbToGain, clamp } from "./util.js";
+import { buildChain, PITCH_WORKLET } from "./audiofx.js";
 
 const LOOKAHEAD = 2.5;
 
@@ -256,6 +257,29 @@ export class Playback {
       entry.gain.gain.value = 0;
       entry.node.connect(entry.gain);
     } catch (e) { console.warn("audio node", e); }
+  }
+
+  // The clip's audio effects between its source and its gain; rebuilt when they change.
+  ensureAudioFx(entry, clip) {
+    if (!this.ctx || !entry.node || !entry.gain) return;
+    const list = (clip.afx || []).filter(f => f.on !== false);
+    if (list.some(f => f.type === "pitch") && !this.pitchState) {
+      this.pitchState = "loading";
+      const url = URL.createObjectURL(new Blob([PITCH_WORKLET], { type: "application/javascript" }));
+      this.ctx.audioWorklet.addModule(url).then(() => { this.pitchState = "ready"; for (const e of this.pool.values()) e.fxSig = null; })
+        .catch((e) => { console.warn("pitch worklet", e); this.pitchState = "failed"; });
+    }
+    const sig = JSON.stringify(list) + (this.pitchState === "ready" ? "|p" : "");
+    if (entry.fxSig === sig) return;
+    entry.fxSig = sig;
+    try { entry.node.disconnect(); } catch (_) { /* not connected */ }
+    if (entry.chain) { try { entry.chain.output.disconnect(); } catch (_) { /* ignore */ } entry.chain = null; }
+    if (!list.length) { entry.node.connect(entry.gain); return; }
+    try {
+      entry.chain = buildChain(this.ctx, list, { pitchReady: this.pitchState === "ready" });
+      entry.node.connect(entry.chain.input);
+      entry.chain.output.connect(entry.gain);
+    } catch (e) { console.warn("audio effects", e); entry.node.connect(entry.gain); }
   }
 
   routeAudio(entry, trackId) {
@@ -576,7 +600,7 @@ export class Playback {
         needed.add(clip.id);
         const entry = this.entryFor(clip, "audio");
         if (!entry) continue;
-        if (this.ctx) this.routeAudio(entry, track.id);
+        if (this.ctx) { this.routeAudio(entry, track.id); this.ensureAudioFx(entry, clip); }
         if (!active) { this.preload(entry, clip); continue; }
         if (!this.scrubbing) this.syncElement(entry, clip, t, true);
         if (entry.gain && !this.scrubbing) {
@@ -604,6 +628,7 @@ export class Playback {
         const entry = this.entryFor(clip, "audio");
         if (!entry || !entry.gain) continue;
         this.routeAudio(entry, track.id);
+        this.ensureAudioFx(entry, clip);
         const el = entry.el;
         const target = clamp(this.elementTime(entry, clip, t - clip.start), 0, Math.max(0, (item.duration || 0) - 0.1));
         if (Math.abs(el.currentTime - target) > 0.02) el.currentTime = target;

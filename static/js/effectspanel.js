@@ -4,6 +4,40 @@ import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { el, toast } from "./util.js";
 import { EFFECTS, EFFECT_ORDER, GENERATORS, defaultEffectParams } from "./effects.js";
+import { AUDIO_EFFECTS, AUDIO_EFFECT_ORDER, defaultAudioParams } from "./audiofx.js";
+
+// A small picture for an audio effect: a waveform, shaped by what the effect does.
+function paintAudioEffect(canvas, type) {
+  const ctx = canvas.getContext("2d");
+  const { width: w, height: h } = canvas;
+  ctx.fillStyle = "#1d2a26"; ctx.fillRect(0, 0, w, h);
+  const wave = (amp, freq, color, x0 = 0, x1 = w, decay = 0) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+    for (let x = x0; x <= x1; x++) {
+      const e = decay ? Math.exp(-decay * (x - x0) / w) : 1;
+      const y = h / 2 + Math.sin(x / w * freq * Math.PI * 2) * amp * e;
+      x === x0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  };
+  if (type === "reverb") { wave(16, 3, "#7fd6a8", 0, w * 0.35); wave(14, 9, "rgba(127,214,168,.6)", w * 0.3, w, 2.5); }
+  else if (type === "echo") { for (let k = 0; k < 4; k++) wave(16 * Math.pow(0.6, k), 3, `rgba(127,214,168,${1 - k * 0.22})`, k * w / 4, k * w / 4 + w / 5); }
+  else if (type === "pitch") { wave(14, 2, "rgba(127,214,168,.45)"); wave(14, 5, "#7fd6a8"); }
+  else if (type === "eq" || type === "lowcut" || type === "highcut") {
+    ctx.strokeStyle = "#7fd6a8"; ctx.lineWidth = 2; ctx.beginPath();
+    for (let x = 0; x <= w; x++) {
+      const u = x / w;
+      const g = type === "lowcut" ? 1 / (1 + Math.pow(0.25 / Math.max(u, 0.01), 4)) : type === "highcut" ? 1 / (1 + Math.pow(u / 0.7, 6)) : 0.5 + 0.3 * Math.cos(u * Math.PI * 2);
+      const y = h - 8 - g * (h - 16);
+      x ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+  } else if (type === "distortion") {
+    ctx.strokeStyle = "#7fd6a8"; ctx.lineWidth = 1.5; ctx.beginPath();
+    for (let x = 0; x <= w; x++) { const y = h / 2 + Math.tanh(Math.sin(x / w * 6 * Math.PI) * 4) * 16; x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.stroke();
+  }
+}
 
 const BLURB = {
   blur: "Gaussian blur", sharpen: "Crisper detail", vignette: "Darken the edges", grain: "Animated film grain",
@@ -113,11 +147,13 @@ export class EffectsPanel {
     this.grid.innerHTML = "";
     const gens = GENERATORS.filter(g => this.match(g.label, g.id));
     const fx = EFFECT_ORDER.filter(id => this.match(EFFECTS[id].label, id));
+    const afx = AUDIO_EFFECT_ORDER.filter(id => !this.filter || AUDIO_EFFECTS[id].label.toLowerCase().includes(this.filter) || AUDIO_EFFECTS[id].blurb.toLowerCase().includes(this.filter));
     if (gens.length) this.grid.append(el("div.tsection", {}, "Generators"), el("div.tgrid", {}, gens.map(g => this.generatorTile(g))));
     if (fx.length) this.grid.append(el("div.tsection", {}, "Video effects"), el("div.tgrid", {}, fx.map(id => this.effectTile(id))));
-    if (!gens.length && !fx.length) this.grid.append(el("div.empty-note", {}, "Nothing matches."));
+    if (afx.length) this.grid.append(el("div.tsection", {}, "Audio effects"), el("div.tgrid", {}, afx.map(id => this.audioTile(id))));
+    if (!gens.length && !fx.length && !afx.length) this.grid.append(el("div.empty-note", {}, "Nothing matches."));
     this.grid.append(el("div.dim", { style: { fontSize: "11px", marginTop: "8px", lineHeight: "1.45" } },
-      "Generators: drag onto a video track, or double-click to add at the playhead on the top track. Effects: drag onto a clip, or click to add to the selected clips. Edit, reorder and keyframe effects in the Inspector."));
+      "Generators: drag onto a video track, or double-click to add at the playhead on the top track. Effects: drag onto a clip, or click to add to the selected clips (audio effects go on audio clips). Edit, reorder and keyframe effects in the Inspector."));
   }
 
   generatorTile(g) {
@@ -139,6 +175,22 @@ export class EffectsPanel {
       ondragstart: (e) => { e.dataTransfer.setData("text/x-ve-effect", id); e.dataTransfer.effectAllowed = "copy"; },
       onclick: () => this.applyToSelection(id),
     }, canvas, el("span", {}, EFFECTS[id].label));
+  }
+
+  audioTile(id) {
+    const canvas = el("canvas", { width: 96, height: 54 });
+    paintAudioEffect(canvas, id);
+    return el("div.ttile.fxtile", {
+      draggable: true, title: `${AUDIO_EFFECTS[id].label}: ${AUDIO_EFFECTS[id].blurb}. Drag onto an audio clip, or click to add it to the selected audio clips.`,
+      ondragstart: (e) => { e.dataTransfer.setData("text/x-ve-effect", `audio:${id}`); e.dataTransfer.effectAllowed = "copy"; },
+      onclick: () => this.applyAudio(id, M.selectedClips().filter(c => M.trackKind(c.trackId) === "audio").map(c => c.id)),
+    }, canvas, el("span", {}, AUDIO_EFFECTS[id].label));
+  }
+
+  applyAudio(type, ids) {
+    if (!ids.length) { toast("Select an audio clip first, or drag the effect onto one", "warn"); return; }
+    const added = M.edit(`Add ${AUDIO_EFFECTS[type].label}`, () => M.addAudioEffect(ids, type, defaultAudioParams(type)));
+    if (added && added.length) { this.app.docks.show("inspector"); toast(`${AUDIO_EFFECTS[type].label} added to ${added.length} audio clip${added.length > 1 ? "s" : ""}`); }
   }
 
   // Generators go on the top video track at the playhead (the title also has Shift+T). If something is already there,
@@ -173,6 +225,14 @@ export class EffectsPanel {
   }
 
   dropOnClip(type, hit) {
+    if (type.startsWith("audio:")) {
+      const kind = type.slice(6);
+      if (!hit || !hit.clip || hit.row?.kind !== "audio") { toast("Drop an audio effect onto a clip on an audio track", "warn"); return; }
+      const ids = state.selection.has(hit.clip.id) ? M.selectedClips().filter(c => M.trackKind(c.trackId) === "audio").map(c => c.id) : [hit.clip.id];
+      if (!state.selection.has(hit.clip.id)) M.select([hit.clip.id]);
+      this.applyAudio(kind, ids);
+      return;
+    }
     if (!hit || !hit.clip || hit.row?.kind !== "video") { toast("Drop the effect onto a clip on a video track", "warn"); return; }
     if (!state.selection.has(hit.clip.id)) M.select([hit.clip.id]);
     // onto a closed compound clip: the compound's own effects (on top of its clips')

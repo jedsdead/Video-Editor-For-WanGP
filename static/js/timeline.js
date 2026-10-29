@@ -400,11 +400,27 @@ export class Timeline {
       ctx.strokeStyle = selected ? COLORS.sel : "#9a7fd6";
       ctx.lineWidth = selected ? 2 : 1;
       ctx.strokeRect(x0 + (selected ? 1 : .5), top + (selected ? 1 : .5), w - (selected ? 2 : 1), h - (selected ? 2 : 1));
-      // its own keyframe line (opacity by default; right-click the line to choose another property)
-      if (row.kind === "video" && (selected || M.keysOf(cp, this.lane(cp, row)).length)) {
-        ctx.save(); ctx.beginPath(); ctx.rect(x0, top, w, h); ctx.clip();
-        this.paintKeys(ctx, cp, row, x0, x1, top, h, headH, selected);
-        ctx.restore();
+      // its own fades and keyframe line (opacity on the picture, volume on the sound; right-click the line for another)
+      const audio = row.kind === "audio";
+      const fi = (audio ? cp.aFadeIn : cp.fadeIn) || 0, fo = (audio ? cp.aFadeOut : cp.fadeOut) || 0;
+      ctx.save(); ctx.beginPath(); ctx.rect(x0, top, w, h); ctx.clip();
+      ctx.strokeStyle = "rgba(255,255,255,.75)"; ctx.fillStyle = "rgba(0,0,0,.35)"; ctx.lineWidth = 1;
+      const fadeShape = (xEdge, len, name, dir) => {
+        const pts = [];
+        for (let i = 0; i <= 16; i++) { const u = i / 16; pts.push([xEdge + dir * u * len * this.pps, top + h - (h - headH) * curve(name, u)]); }
+        ctx.beginPath(); ctx.moveTo(xEdge, top + headH); pts.forEach(([px, py]) => ctx.lineTo(px, py)); ctx.closePath(); ctx.fill();
+        ctx.beginPath(); pts.forEach(([px, py], i) => i ? ctx.lineTo(px, py) : ctx.moveTo(px, py)); ctx.stroke();
+      };
+      if (fi > 0) fadeShape(x0, fi, (audio ? cp.aFadeInCurve : cp.fadeInCurve) || "linear", 1);
+      if (fo > 0) fadeShape(x1, fo, (audio ? cp.aFadeOutCurve : cp.fadeOutCurve) || "linear", -1);
+      if (selected || M.keysOf(cp, this.lane(cp, row)).length) this.paintKeys(ctx, cp, row, x0, x1, top, h, headH, selected);
+      ctx.restore();
+      const hovered = this.hover && this.hover.clip && (this.hover.clip.id === cp.id || this.hover.clip.compound === cp.id);
+      if ((hovered || selected) && w > 24) {
+        ctx.fillStyle = "#fff";
+        const hx0 = x0 + fi * this.pps, hx1 = x1 - fo * this.pps;
+        ctx.fillRect(hx0 - 3 + (fi ? 0 : 3), top + 1, 6, 6);
+        ctx.fillRect(hx1 - 3 - (fo ? 0 : 3), top + 1, 6, 6);
       }
       return;
     }
@@ -490,7 +506,7 @@ export class Timeline {
     if (row.kind === "video" && clip.grade && !isNeutral(clip.grade)) badges.push("CC");
     if (clip.parentId) badges.push("⤓");
     if (clip.reverse) badges.push("◀◀");
-    if ((clip.effects || []).some(f => f.on !== false)) badges.push("fx");
+    if ((clip.effects || []).some(f => f.on !== false) || (clip.afx || []).some(f => f.on !== false)) badges.push("fx");
     if (clip.takes?.length > 1) badges.push(`T${(clip.takeIndex || 0) + 1}/${clip.takes.length}`);
     const fi = (clip.takes || []).findIndex(t => t.final);
     if (fi >= 0) badges.push((clip.takeIndex || 0) === fi ? "FINAL" : "F");
@@ -703,12 +719,25 @@ export class Timeline {
         }
       }
       const closed = M.closedCompoundOf(clip);
-      if (closed && row.kind === "video" && M.selectedCompound()?.id === closed.id && !row.track.locked && state.tool === "select") {
-        // a selected compound clip's own keyframe line, across the whole compound
+      if (closed && !row.track.locked && state.tool === "select") {
+        // the compound clip's own fade handles at its corners (the picture's on a video row, the sound's on an audio row)
+        const span = M.compoundMembers(closed.id).filter(m => m.trackId === clip.trackId);
+        const cs = Math.min(...span.map(m => m.start)), ce = Math.max(...span.map(m => M.clipEnd(m)));
+        const audio = row.kind === "audio";
+        const fi = (audio ? closed.aFadeIn : closed.fadeIn) || 0, fo = (audio ? closed.aFadeOut : closed.fadeOut) || 0;
+        const cx0 = this.x(cs), cx1 = this.x(ce);
+        if (y < ry + 10 && cx1 - cx0 > 24) {
+          if (Math.abs(x - (cx0 + fi * this.pps)) < 6 && x >= cx0 - 1) return { area: "clip", row, t, clip: closed, zone: "fadeIn", keyIndex: -1, compoundAudio: audio };
+          if (Math.abs(x - (cx1 - fo * this.pps)) < 6 && x <= cx1 + 1) return { area: "clip", row, t, clip: closed, zone: "fadeOut", keyIndex: -1, compoundAudio: audio };
+        }
+      }
+      if (closed && M.selectedCompound()?.id === closed.id && !row.track.locked && state.tool === "select") {
+        // a selected compound clip's own keyframe line, across the whole compound (its volume on an audio row)
         const lane = this.lane(closed, row), geo = this.laneGeo(row, ry);
         if (y >= geo.top - 5 && y <= geo.bottom + 5) {
           const ki = M.keysOf(closed, lane).findIndex(k => Math.abs(this.x(closed.start + k.t) - x) <= 5 && Math.abs(this.laneY(lane, k.v, geo) - y) <= 5);
           if (ki >= 0) return { area: "clip", row, t, clip: closed, zone: "key", keyIndex: ki, lane };
+          if (lane === "volume" && M.keysOf(closed, lane).length === 0 && Math.abs(this.laneY(lane, M.prop(closed, lane, 0), geo) - y) <= 4) return { area: "clip", row, t, clip: closed, zone: "line", keyIndex: -1, lane };
           const ly = this.laneY(lane, M.prop(closed, lane, clamp(t - closed.start, 0, M.clipDur(closed))), geo);
           if (Math.abs(ly - y) <= 4) return { area: "clip", row, t, clip: closed, zone: "line", keyIndex: -1, lane };
         }
@@ -808,7 +837,7 @@ export class Timeline {
       const clip = h.clip;
       if (h.row.track.locked) return;
       if (h.zone === "fadeIn" || h.zone === "fadeOut") {
-        this.drag = { ...base, mode: "fade", clipId: clip.id, which: h.zone, snapData: M.snapshot() };
+        this.drag = { ...base, mode: "fade", clipId: clip.id, which: h.zone, audio: !!h.compoundAudio, snapData: M.snapshot() };
         return;
       }
       if (h.zone === "line" && base.ctrl) {
@@ -967,12 +996,13 @@ export class Timeline {
       const clip = M.getClip(d.clipId);
       if (clip) {
         const dur = M.clipDur(clip);
-        if (d.which === "fadeIn") clip.fadeIn = M.snapFrame(clamp(this.t(x) - clip.start, 0, dur - (clip.fadeOut || 0)));
-        else clip.fadeOut = M.snapFrame(clamp(M.clipEnd(clip) - this.t(x), 0, dur - (clip.fadeIn || 0)));
+        const fi = d.audio ? "aFadeIn" : "fadeIn", fo = d.audio ? "aFadeOut" : "fadeOut";   // a compound clip's sound has its own
+        if (d.which === "fadeIn") clip[fi] = M.snapFrame(clamp(this.t(x) - clip.start, 0, dur - (clip[fo] || 0)));
+        else clip[fo] = M.snapFrame(clamp(M.clipEnd(clip) - this.t(x), 0, dur - (clip[fi] || 0)));
       }
     } else if (d.mode === "key" || d.mode === "line") {
       const clip = M.getClip(d.clipId);
-      const row = this.rows().find(r => r.track.id === (clip && clip.trackId));
+      const row = d.row || this.rows().find(r => r.track.id === (clip && clip.trackId));
       if (clip && row) {
         const geo = this.laneGeo(row, this.rowY(row));
         const value = this.laneValue(d.lane, y, geo);

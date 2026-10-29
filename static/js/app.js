@@ -482,9 +482,11 @@ function contextMenu(x, y, hit) {
     return;
   }
   if (hit.area === "clip" && (hit.zone === "fadeIn" || hit.zone === "fadeOut")) {
-    const clip = hit.clip, which = hit.zone, field = which === "fadeIn" ? "fadeInCurve" : "fadeOutCurve";
+    const clip = hit.clip, a = hit.compoundAudio ? "a" : "";   // a compound clip's sound has fades of its own
+    const which = a ? (hit.zone === "fadeIn" ? "aFadeIn" : "aFadeOut") : hit.zone;
+    const field = a ? (hit.zone === "fadeIn" ? "aFadeInCurve" : "aFadeOutCurve") : hit.zone === "fadeIn" ? "fadeInCurve" : "fadeOutCurve";
     showMenu(x, y, [
-      { head: which === "fadeIn" ? "Fade in shape" : "Fade out shape" },
+      { head: hit.zone === "fadeIn" ? "Fade in shape" : "Fade out shape" },
       ...FADE_CURVES.map(([id, label]) => ({ label, check: (clip[field] || "linear") === id, action: () => M.edit("Fade shape", () => {
         for (const c of [M.getClip(clip.id), ...(state.linked ? M.partners(clip) : [])]) if (c) c[field] = id;
       }) })),

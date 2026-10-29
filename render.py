@@ -16,6 +16,7 @@ from . import media as M
 from . import timeline_math as T
 from . import titles as TT
 from . import fx as FX
+from . import afx as AFX
 
 CODECS = {
     "h264": {"label": "H.264 (MP4)", "ext": ".mp4", "video": ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"], "crf": True, "audio": ["-c:a", "aac", "-b:a", "192k"]},
@@ -1181,6 +1182,7 @@ class ExportJob:
                     pos = (src_times - src_a) * SAMPLE_RATE
                     idx = np.arange(raw.shape[1])
                     seg = np.stack([np.interp(pos, idx, raw[ch], left=0.0, right=0.0) for ch in range(2)]).astype(np.float32) if raw.shape[1] else np.zeros((2, count), np.float32)
+                seg = AFX.apply(seg, clip, SAMPLE_RATE)   # the clip's audio effects, before its volume and fades (as the viewer)
                 inside = np.clip(taus, 0, duration)
                 gain = T.db_to_gain(np.asarray(T.prop(clip, "volume", inside, 0.0), dtype=np.float64)) * T.fade_factor(clip, inside, duration)
                 if keyed_speed:

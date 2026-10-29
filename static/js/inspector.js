@@ -3,6 +3,7 @@ import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { api, el, toast, timecode, shortTime, clamp } from "./util.js";
 import { CURVES, FADE_CURVES } from "./keys.js";
+import { AUDIO_EFFECTS, AUDIO_EFFECT_ORDER, defaultAudioParams } from "./audiofx.js";
 import { FONT_FALLBACK } from "./titles.js";
 import { EFFECTS, EFFECT_ORDER, defaultEffectParams } from "./effects.js";
 import { openRegenDialog, canRegenerate } from "./regen.js";
@@ -35,7 +36,7 @@ export class Inspector {
   signature() {
     if (!P()) return "";
     const cpSig = M.selectedCompound()?.id || "";
-    const clips = M.selectedClips().map(c => `${c.id}:${c.trackId}:${(c.effects || []).map(f => f.id).join(".")}:${c.takeIndex || 0}/${c.takes?.length || 0}:${c.seam?.at || 0}:${c.level ? `${c.level.on !== false}${c.level.mediaId}${!!c.level.open}${!!c.level.close}` : ""}`).join(",");
+    const clips = M.selectedClips().map(c => `${c.id}:${c.trackId}:${(c.effects || []).map(f => f.id).join(".")}:${(c.afx || []).map(f => f.id).join(".")}:${c.takeIndex || 0}/${c.takes?.length || 0}:${c.seam?.at || 0}:${c.level ? `${c.level.on !== false}${c.level.mediaId}${!!c.level.open}${!!c.level.close}` : ""}`).join(",");
     return `${cpSig}:${(M.selectedCompound()?.effects || []).map(f => f.id).join(".")}|${clips}|${state.selTransition}|${state.selectedMedia}|${P().tracks.length}`;
   }
 
@@ -199,6 +200,7 @@ export class Inspector {
         this.curveSelect("Fade out shape ", audio, "fadeOutCurve"),
         el("div.dim", { style: { fontSize: "11px" } }, "Volume is in dB. Track level and pan are in the Mixer."),
         video.length ? null : this.keyHelp());
+      if (!compound) this.renderAudioEffects(audio);
     }
 
     if (!compound && (clips.length === 1 || new Set(clips.map(c => c.mediaId)).size === 1)) {
@@ -348,6 +350,51 @@ export class Inspector {
   }
 
   // ---------------------------------------------------------------- effects
+  // Audio effects: reverb, echo, pitch, EQ, low and high cut, distortion (static/js/audiofx.js), in chain order.
+  renderAudioEffects(list) {
+    const holder = this.section("Audio effects");
+    const add = el("select", { onchange: (e) => {
+      const type = e.target.value;
+      e.target.value = "";
+      if (!type) return;
+      M.edit(`Add ${AUDIO_EFFECTS[type].label}`, () => M.addAudioEffect(list.map(c => c.id), type, defaultAudioParams(type)));
+      this.render();
+    } }, el("option", { value: "" }, "Add audio effect…"), AUDIO_EFFECT_ORDER.map(id => el("option", { value: id }, AUDIO_EFFECTS[id].label)));
+    holder.append(el("div.field.wide", {}, el("label", {}, ""), add));
+    if (list.length > 1) {
+      const count = list.reduce((n, c) => n + (c.afx || []).length, 0);
+      holder.append(el("div.dim", { style: { fontSize: "11px" } }, `${count} audio effect${count === 1 ? "" : "s"} across ${list.length} clips. Select one audio clip to edit them; Add adds to every selected audio clip.`));
+      return;
+    }
+    const clip = list[0];
+    const live = () => M.getClip(clip.id) || clip;
+    const effects = live().afx || [];
+    if (!effects.length) holder.append(el("div.dim", { style: { fontSize: "11px" } }, "No audio effects. Pick one above, or click one in the Effects panel."));
+    effects.forEach((fx, index) => {
+      const def = AUDIO_EFFECTS[fx.type];
+      if (!def) return;
+      const fxLive = () => (live().afx || []).find(f => f.id === fx.id) || fx;
+      const change = (label, fn, key = null) => M.edit(label, () => M.updateAudioEffect(clip.id, fx.id, fn), { coalesceKey: key });
+      const on = el("input", { type: "checkbox", checked: fx.on !== false, onchange: (e) => change(`${def.label} on/off`, f => { f.on = e.target.checked; }) });
+      this.refreshers.push(() => { on.checked = fxLive().on !== false; });
+      const head = el("div.fxhead", {}, on, el("span.fxname", {}, def.label), el("div.spacer"),
+        el("button.small.kbtn", { title: "Move up (earlier in the chain)", disabled: index === 0, onclick: () => { M.edit("Reorder audio effects", () => M.moveAudioEffect(clip.id, fx.id, -1)); this.render(); } }, "▲"),
+        el("button.small.kbtn", { title: "Move down (later in the chain)", disabled: index === effects.length - 1, onclick: () => { M.edit("Reorder audio effects", () => M.moveAudioEffect(clip.id, fx.id, 1)); this.render(); } }, "▼"),
+        el("button.small.kbtn", { title: "Reset to defaults", onclick: () => { change(`Reset ${def.label}`, f => { f.params = defaultAudioParams(fx.type); }); this.render(); } }, "↺"),
+        el("button.small.kbtn", { title: "Remove the effect", onclick: () => { M.edit(`Remove ${def.label}`, () => M.removeAudioEffect(clip.id, fx.id)); this.render(); } }, "✕"));
+      const rows = def.params.map(p => {
+        const label = `${p.label} (${p.unit})` + "\u200b".repeat(index + 1);
+        this.defaults = { ...(this.defaults || {}), [label]: p.def };
+        return this.slider(label, { get: () => fxLive().params?.[p.key] ?? p.def,
+          set: (v) => M.updateAudioEffect(clip.id, fx.id, f => { f.params = { ...(f.params || {}), [p.key]: v }; }),
+          min: p.min, max: p.max, step: p.step, format: (v) => (+v).toFixed(p.step < 1 ? 1 : 0), editLabel: `${def.label} ${p.label}` });
+      });
+      const card = el(`div.fxcard${fx.on === false ? ".off" : ""}`, { "data-collapse-key": `afx:${fx.id}` }, head, ...rows);
+      this.refreshers.push(() => card.classList.toggle("off", fxLive().on === false));
+      holder.append(card);
+    });
+  }
+
   renderEffects(list) {
     const holder = this.section("Effects");
     const add = el("select", { onchange: (e) => {
