@@ -221,11 +221,19 @@ export class Timeline {
     for (const row of rows) {
       const y = this.rowY(row);
       if (y > this.height || y + row.h < RULER_H) continue;
+      const spans = new Map();
       for (const clip of M.clipsOn(row.track.id)) {
+        const x = M.compoundOf(clip);
+        if (x) {
+          const sp = spans.get(x.id) || { x, start: Infinity, end: -Infinity, members: [] };
+          sp.start = Math.min(sp.start, clip.start); sp.end = Math.max(sp.end, M.clipEnd(clip)); sp.members.push(clip);
+          spans.set(x.id, sp);
+        }
         const end = M.clipEnd(clip);
         if (end < t0 || clip.start > t1) continue;
-        this.paintClip(ctx, clip, row, y);
+        this.paintClip(ctx, clip, row, y, { member: !!(x && !x.open) });
       }
+      for (const sp of spans.values()) if (sp.end >= t0 && sp.start <= t1) this.paintCompound(ctx, sp, row, y);
       for (const tr of p.transitions.filter(tr => tr.trackId === row.track.id)) this.paintTransition(ctx, tr, row, y);
       if (row.kind === "audio" && row.track.showAuto) this.paintAutomation(ctx, row, y);
     }
@@ -371,7 +379,43 @@ export class Timeline {
     return `${mm}:${ss}`;
   }
 
-  paintClip(ctx, clip, row, y) {
+  // A compound clip's frame over its clips: closed, one header and outline (its clips' own are hidden); open, a dashed
+  // outline and a tag, with the clips editable one by one.
+  paintCompound(ctx, sp, row, y) {
+    const { x: cp } = sp;
+    const x0 = this.x(sp.start), x1 = this.x(sp.end), w = Math.max(1, x1 - x0);
+    const top = y + 2, h = row.h - 5, headH = 15;
+    const selected = sp.members.every(m => state.selection.has(m.id));
+    ctx.save();
+    if (!cp.open) {
+      ctx.beginPath(); ctx.rect(x0, top, w, h); ctx.clip();
+      ctx.fillStyle = "#5b3f8f";
+      ctx.fillRect(x0, top, w, headH);
+      const badges = ["▣"];
+      if (row.kind === "video" && cp.grade && !isNeutral(cp.grade)) badges.push("CC");
+      if ((cp.effects || []).some(f => f.on !== false)) badges.push("fx");
+      ctx.fillStyle = "#f1ecff";
+      ctx.fillText(`${badges.join(" ")}  ${cp.name || "Compound clip"}  (${sp.members.length} clip${sp.members.length > 1 ? "s" : ""})`, Math.max(x0, 0) + 4, top + 2);
+      ctx.restore();
+      ctx.strokeStyle = selected ? COLORS.sel : "#9a7fd6";
+      ctx.lineWidth = selected ? 2 : 1;
+      ctx.strokeRect(x0 + (selected ? 1 : .5), top + (selected ? 1 : .5), w - (selected ? 2 : 1), h - (selected ? 2 : 1));
+      return;
+    }
+    ctx.strokeStyle = "#9a7fd6"; ctx.setLineDash([5, 3]); ctx.lineWidth = 1;
+    ctx.strokeRect(x0 - 1.5, top - 1.5, w + 3, h + 3);
+    ctx.setLineDash([]);
+    const tag = `▣ ${cp.name || "Compound clip"} · open`;
+    const tw = ctx.measureText(tag).width + 8;
+    ctx.fillStyle = "#5b3f8f";
+    ctx.fillRect(Math.max(x0, 0) + w - Math.min(w, tw) - 1, top + h - 14, Math.min(w, tw), 13);
+    ctx.fillStyle = "#f1ecff";
+    ctx.beginPath(); ctx.rect(x0, top, w, h); ctx.clip();
+    ctx.fillText(tag, Math.max(x0, 0) + w - Math.min(w, tw) + 3, top + h - 13);
+    ctx.restore();
+  }
+
+  paintClip(ctx, clip, row, y, { member = false } = {}) {
     const item = M.mediaOf(clip) || {};
     const x0 = this.x(clip.start), x1 = this.x(M.clipEnd(clip));
     const w = Math.max(1, x1 - x0);
@@ -449,7 +493,7 @@ export class Timeline {
     if (clip.gen) badges.push({ new: "✦", extend: "⇢", prepend: "⇠", bridge: "⇄", fill: "⇄", loop: "↻", replace: "⟲" }[clip.gen.mode] || "◆");
     ctx.fillStyle = "#e9ecf2";
     const label = `${badges.join(" ")}${badges.length ? "  " : ""}${clip.name || item.name || "clip"}`;
-    ctx.fillText(label, Math.max(x0, 0) + 4, top + 2);
+    if (!member) ctx.fillText(label, Math.max(x0, 0) + 4, top + 2);
     // fades
     const d = M.clipDur(clip);
     ctx.strokeStyle = "rgba(255,255,255,.75)"; ctx.fillStyle = "rgba(0,0,0,.35)"; ctx.lineWidth = 1;
@@ -461,11 +505,11 @@ export class Timeline {
     };
     if (clip.fadeIn > 0) fadeShape(x0, clip.fadeIn, clip.fadeInCurve || "linear", 1);
     if (clip.fadeOut > 0) fadeShape(x1, clip.fadeOut, clip.fadeOutCurve || "linear", -1);
-    this.paintKeys(ctx, clip, row, x0, x1, top, h, headH, selected);
+    if (!member) this.paintKeys(ctx, clip, row, x0, x1, top, h, headH, selected);
     if (item.missing) { ctx.fillStyle = "rgba(200,40,40,.55)"; ctx.fillRect(x0, top, w, h); ctx.fillStyle = "#fff"; ctx.fillText("Media offline", x0 + 4, top + headH + 4); }
     // seam verdicts of generated joins: green seamless, yellow soft bump, red hard cut
     const seamColor = { seamless: "#36c46f", "soft bump": "#ffc83c", "hard cut": "#ff5a5a" };
-    for (const [side, xEdge] of [["left", x0], ["right", x1]]) {
+    for (const [side, xEdge] of member ? [] : [["left", x0], ["right", x1]]) {
       const v = clip.seam?.[side];
       if (!v || !seamColor[v.verdict]) continue;
       ctx.fillStyle = seamColor[v.verdict];
@@ -473,6 +517,7 @@ export class Timeline {
     }
     ctx.restore();
     // fade handles
+    if (member) return;   // a closed compound clip draws its own outline
     const hovered = this.hover && this.hover.clip && this.hover.clip.id === clip.id;
     if ((hovered || selected) && w > 24) {
       ctx.fillStyle = "#fff";
@@ -650,6 +695,14 @@ export class Timeline {
             if (Math.abs(ly - y) <= 4) zone = "line";
           }
         }
+      }
+      const closed = M.closedCompoundOf(clip);
+      if (closed) {
+        // one clip: only its outer edges trim, and no keyframe lines or fade handles of its clips
+        const members = M.compoundMembers(closed.id).filter(m => m.trackId === clip.trackId);
+        const sx0 = this.x(Math.min(...members.map(m => m.start))), sx1 = this.x(Math.max(...members.map(m => M.clipEnd(m))));
+        if ((zone === "trimL" && Math.abs(x0 - sx0) > 1) || (zone === "trimR" && Math.abs(x1 - sx1) > 1)
+            || zone === "fadeIn" || zone === "fadeOut" || zone === "key" || zone === "line") { zone = "body"; keyIndex = -1; }
       }
       const score = zone === "key" ? -1 : zone === "body" ? 1 : 0;
       if (!best || score < best.score) best = { clip, zone, score, keyIndex };
@@ -980,6 +1033,12 @@ export class Timeline {
     const [x, y] = this.local(e);
     const h = this.hit(x, y);
     if (h.area === "marker") { bus.emit("edit-marker", h.marker.id); return; }
+    if (h.area === "clip" && M.closedCompoundOf(h.clip)) {
+      const cid = h.clip.compound;
+      M.edit("Open compound clip", () => M.setCompoundOpen(cid, true));
+      M.select([h.clip.id]);
+      return;
+    }
     if (h.area === "clip") bus.emit("open-panel", h.row.kind === "video" ? "inspector" : "inspector");
     if (h.area === "transition") bus.emit("open-panel", "inspector");
   }

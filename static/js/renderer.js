@@ -29,6 +29,7 @@ uniform float uLutMix, uLutSize;
 uniform float uAlpha;
 uniform vec3 uLevel;
 uniform bool uPremul;
+uniform bool uUnpremul;
 uniform bool uGrade;
 uniform float uExposure, uContrast, uSat;
 uniform vec3 uWB, uLift, uGain, uGammaInv;
@@ -40,6 +41,7 @@ out vec4 o;
 void main() {
   vec4 t = texture(uTex, vUv);
   if (uPremul) { o = t * uAlpha; return; }   // an already premultiplied effect buffer
+  if (uUnpremul) t.rgb = t.a > 0.0 ? t.rgb / t.a : vec3(0.0);   // a premultiplied buffer to grade (a compound clip)
   vec3 c = clamp(t.rgb * uLevel, 0.0, 1.0);   // join match (1,1,1 when off)
   if (uGrade) {
     c = c * uExposure * uWB;
@@ -268,6 +270,7 @@ export class Renderer {
     gl.uniform4f(u.uUv, ...(item.uv || [0, 0, 1, 1]));
     gl.uniform2f(u.uCanvas, size ? size[0] : this.canvas.width, size ? size[1] : this.canvas.height);
     gl.uniform1i(u.uPremul, item.premul ? 1 : 0);
+    if (u.uUnpremul) gl.uniform1i(u.uUnpremul, item.unpremul ? 1 : 0);
     const lut = !item.premul && item.lut && this.luts.get(item.lut.name);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_3D, (lut || this.emptyLut).tex);
@@ -335,14 +338,17 @@ export class Renderer {
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    if (!this.drawLayer({ ...item, center: [w / 2, h / 2], size: [w, h], rotation: 0, uv: [0, 0, 1, 1], alpha: 1 }, [w, h])) return null;
+    if (!this.drawLayer({ ...item, center: [w / 2, h / 2], size: [w, h], rotation: 0, uv: item.srcUv || [0, 0, 1, 1], alpha: 1 }, [w, h])) return null;
     const out = this.runEffects(a, b, item.effects(w, h));
     const [l, t, r, bo] = item.uv || [0, 0, 1, 1];
     return { ...item, tex: out.tex, premul: true, uv: [l, 1 - t, r, 1 - bo] };
   }
 
-  // Draw a layer (with its effects, if any) into a target.
+  // Draw a layer (with its effects, if any) into a target. A layer in a compound clip with outer properties is drawn
+  // into a frame-sized buffer first, then that buffer is graded, run through the compound's effects and placed with
+  // its transform and opacity: the compound's grade stacks on the clip's own.
   drawInto(item, target) {
+    if (item.post) return this.drawCompound(item, target);
     const gl = this.gl;
     let layer = item;
     if (item.effects) {
@@ -352,6 +358,26 @@ export class Renderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.fb);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     return this.drawLayer(layer);
+  }
+
+  drawCompound(item, target) {
+    const gl = this.gl;
+    const w = this.canvas.width, h = this.canvas.height;
+    const buf = this.target("cmp", w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, buf.fb);
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    if (!this.drawInto({ ...item, post: null }, buf)) return false;
+    const post = item.post;
+    const [l, t, r, b] = post.uv || [0, 0, 1, 1];
+    const outer = { tex: buf.tex, unpremul: true, center: post.center, size: post.size, rotation: post.rotation, full: post.full,
+                    // a frame buffer is stored upside down; with effects, the effect pass turns it the right way up first
+                    uv: post.effects ? [l, t, r, b] : [l, 1 - t, r, 1 - b], srcUv: [0, 1, 1, 0], alpha: post.alpha, grade: post.grade, lut: post.lut,
+                    effects: post.effects, slot: "cp" };
+    // the buffer is reused by the next layer: draw the graded copy out of it before returning
+    return this.drawInto(outer, target);
   }
 
   // Adjustment layer: grade and run effects on everything composited so far, then mix it back by the layer's opacity.

@@ -104,7 +104,10 @@ export class RegenJobs {
     const outT = Math.max(inT + 1 / ff, onGrid(dur - (job.trimTail || 0)));
     const length = outT - inT;
     const left = job.left && M.getClip(job.left.clipId), right = job.right && M.getClip(job.right.clipId);
-    const lineage = { mode: job.mode, parent: job.left?.clipId || null, child: job.right?.clipId || null, jobId: job.id, seed: job.seed, pins: job.pins };
+    const joins = (job.left?.cut != null || job.right?.cut != null) ? {
+      left: job.left?.cut != null ? { clipId: job.left.clipId, cut: job.left.cut } : null,
+      right: job.right?.cut != null ? { clipId: job.right.clipId, cut: job.right.cut } : null } : null;
+    const lineage = { mode: job.mode, parent: job.left?.clipId || null, child: job.right?.clipId || null, jobId: job.id, seed: job.seed, pins: job.pins, joins };
     let target = null, placedNote = "";
     const targetId = job.request?.targetId;
     if ((job.left && !left) || (job.right && !right) || (job.mode === "replace" && !M.getClip(job.request?.replaceId)) || (targetId && !M.getClip(targetId))) {
@@ -117,14 +120,17 @@ export class RegenJobs {
         const takeLabel = (c) => `Take ${(c.takes?.length || 1) + 1}`;
         if (job.mode === "replace") {
           target = M.getClip(job.request.replaceId);
-          M.addTake(target.id, { mediaId: item.id, in: inT, length, label: takeLabel(target), seed: job.seed, audio: "new", jobId: job.id });
+          const take = M.addTake(target.id, { mediaId: item.id, in: inT, length, label: takeLabel(target), seed: job.seed, audio: "new", jobId: job.id });
+          if (take) take.joins = joins;
           target.gen = { ...lineage, mode: "replace" };
           return;
         }
         const existing = job.mode === "new" ? (targetId ? M.getClip(targetId) : null) : M.generatedIn(job.mode, lineage.parent, lineage.child);
         if (existing) {
           target = existing;
-          M.addTake(existing.id, { mediaId: item.id, in: inT, length, label: takeLabel(existing), seed: job.seed, audio: "new", jobId: job.id });
+          const take = M.addTake(existing.id, { mediaId: item.id, in: inT, length, label: takeLabel(existing), seed: job.seed, audio: "new", jobId: job.id });
+          if (take) take.joins = joins;
+          if (existing.gen) existing.gen.joins = joins;
           placedNote = " as a new take";
           return;
         }

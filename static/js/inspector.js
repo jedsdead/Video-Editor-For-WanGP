@@ -34,8 +34,9 @@ export class Inspector {
 
   signature() {
     if (!P()) return "";
+    const cpSig = M.selectedCompound()?.id || "";
     const clips = M.selectedClips().map(c => `${c.id}:${c.trackId}:${(c.effects || []).map(f => f.id).join(".")}:${c.takeIndex || 0}/${c.takes?.length || 0}:${c.seam?.at || 0}:${c.level ? `${c.level.on !== false}${c.level.mediaId}${!!c.level.open}${!!c.level.close}` : ""}`).join(",");
-    return `${clips}|${state.selTransition}|${state.selectedMedia}|${P().tracks.length}`;
+    return `${cpSig}:${(M.selectedCompound()?.effects || []).map(f => f.id).join(".")}|${clips}|${state.selTransition}|${state.selectedMedia}|${P().tracks.length}`;
   }
 
   render() {
@@ -47,6 +48,8 @@ export class Inspector {
     this.body.innerHTML = "";
     const clips = M.selectedClips();
     if (state.selTransition) { this.renderTransition(); return; }
+    const compound = M.selectedCompound();
+    if (compound) { this.renderCompound(compound); return; }
     if (clips.length) { this.renderClips(clips); return; }
     this.renderProject();
     if (state.selectedMedia && P().media[state.selectedMedia]) this.renderMedia(P().media[state.selectedMedia]);
@@ -90,7 +93,26 @@ export class Inspector {
   }
 
   // ---------------------------------------------------------------- clips
-  renderClips(clips) {
+  // A closed compound clip: its own name and outer properties (grade and effects come from the Colour and Effects
+  // panels), which stack on its clips' own.
+  renderCompound(cp) {
+    const fps = M.fps();
+    const live = () => M.getClip(cp.id) || cp;
+    const members = M.compoundMembers(cp.id);
+    const nameInput = el("input", { type: "text", value: cp.name || "", onchange: (e) => M.edit("Rename compound clip", () => { live().name = e.target.value; }) });
+    this.section("Compound clip",
+      el("div.field.wide", {}, el("label", {}, "Name"), nameInput),
+      this.readout("Start", () => timecode(live().start, fps)),
+      this.readout("Duration", () => `${timecode(M.clipDur(live()), fps)}  (${shortTime(M.clipDur(live()))})`),
+      this.readout("Contains", () => `${members.filter(c => M.trackKind(c.trackId) === "video").length} video, ${members.filter(c => M.trackKind(c.trackId) === "audio").length} audio clip(s)`),
+      el("div.dim", { style: { fontSize: "11px", margin: "4px 0" } }, "Opacity, transform, fades, grade and effects here apply on top of the clips inside. Open it (double-click) to edit, trim or regenerate the clips inside; nothing is re-encoded."),
+      el("div.btnrow", {},
+        el("button.small", { onclick: () => { M.edit("Open compound clip", () => M.setCompoundOpen(cp.id, true)); M.select([members[0].id]); } }, "Open"),
+        el("button.small", { onclick: () => { M.edit("Break apart compound clip", () => M.breakCompound(cp.id)); M.select(members.map(c => c.id)); } }, "Break apart")));
+    this.renderClips([live()], { compound: true });
+  }
+
+  renderClips(clips, { compound = false } = {}) {
     const first = clips[0];
     const videoAll = clips.filter(c => M.trackKind(c.trackId) === "video");
     const adjust = videoAll.filter(c => M.kindOf(c) === "adjust");
@@ -99,7 +121,8 @@ export class Inspector {
     const each = (list, fn) => () => list.forEach(c => { const live = M.getClip(c.id); if (live) fn(live); });
     const live = (c) => M.getClip(c.id) || c;
     const fps = M.fps();
-    if (clips.length === 1) {
+    if (compound) { /* the compound section above */ }
+    else if (clips.length === 1) {
       const nameInput = el("input", { type: "text", value: first.name || "", onchange: (e) => M.edit("Rename clip", () => { live(first).name = e.target.value; }) });
       this.section("Clip",
         el("div.field.wide", {}, el("label", {}, "Name"), nameInput),
@@ -115,7 +138,7 @@ export class Inspector {
     // a shot and its linked audio share the same shot details: show them once
     const shotClip = clips.find(c => c.shotInfo && M.trackKind(c.trackId) === "video") || clips.find(c => c.shotInfo);
     if (shotClip && clips.every(c => c.mediaId === shotClip.mediaId && c.shotInfo?.index === shotClip.shotInfo.index)) this.renderShot(shotClip);
-    const regenClip = clips.length === 1 || (clips.length === 2 && clips[0].linkId && clips[0].linkId === clips[1].linkId)
+    const regenClip = compound ? null : clips.length === 1 || (clips.length === 2 && clips[0].linkId && clips[0].linkId === clips[1].linkId)
       ? clips.find(c => M.trackKind(c.trackId) === "video" && !M.isStill(c)) : null;
     if (regenClip) this.renderRegen(regenClip);
 
@@ -152,7 +175,7 @@ export class Inspector {
     if (titles.length) this.renderTitle(titles);
     if (videoAll.length) this.renderEffects(videoAll);
 
-    const timed = clips.filter(c => !M.isStill(c));
+    const timed = compound ? [] : clips.filter(c => !M.isStill(c));
     if (timed.length) this.renderSpeed(timed);
 
     if (audio.length) {
@@ -167,7 +190,7 @@ export class Inspector {
         video.length ? null : this.keyHelp());
     }
 
-    if (clips.length === 1 || new Set(clips.map(c => c.mediaId)).size === 1) {
+    if (!compound && (clips.length === 1 || new Set(clips.map(c => c.mediaId)).size === 1)) {
       const item = M.mediaOf(first);
       if (item && item.has_metadata) this.renderGeneration(item);
     }

@@ -26,6 +26,7 @@ export class TransformOverlay {
   // geometry of the selected clip's layer in overlay (CSS pixel) coordinates
   target() {
     if (this.app.playback.playing) return null;
+    if (M.selectedCompound()) return null;   // a compound clip's transform is set in the inspector
     const layers = [];
     for (const e of this.app.playback.lastLayers || []) {
       if (e.type === "clip") layers.push(e);

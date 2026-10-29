@@ -88,7 +88,9 @@ export const kindOf = (clip) => (mediaOf(clip) || {}).kind;
 export const isStillKind = (kind) => kind === "image" || GENERATOR_KINDS.has(kind);
 export const isGenerator = (clip) => GENERATOR_KINDS.has(kindOf(clip));
 export const isStill = (clip) => isStillKind(kindOf(clip));
-export const getClip = (id) => P().clips.find(c => c.id === id);
+// A compound clip's own record answers to getClip too, so the colour, effects and inspector code that edits "a clip"
+// by id edits the compound's outer grade, effects and transform.
+export const getClip = (id) => P().clips.find(c => c.id === id) || (P().compounds || []).find(c => c.id === id);
 export const getTrack = (id) => P().tracks.find(t => t.id === id);
 export const videoTracks = () => P().tracks.filter(t => t.kind === "video");
 export const audioTracks = () => P().tracks.filter(t => t.kind === "audio");
@@ -344,6 +346,7 @@ export function edit(label, fn, { coalesceKey = null } = {}) {
 
 export function finalize() {
   repairTimes(P());
+  syncCompounds();
   validateTransitions();
   for (const id of [...state.selection]) if (!getClip(id)) state.selection.delete(id);
   if (state.selTransition && !P().transitions.find(t => t.id === state.selTransition)) state.selTransition = null;
@@ -386,7 +389,7 @@ export function withPartners(ids) {
 }
 
 export function select(ids, { additive = false, toggle = false } = {}) {
-  const set = withPartners(ids);
+  const set = withPartners(withCompounds(ids));
   if (!additive && !toggle) state.selection = set;
   else if (toggle && [...set].every(id => state.selection.has(id))) set.forEach(id => state.selection.delete(id));
   else set.forEach(id => state.selection.add(id));
@@ -1015,7 +1018,8 @@ export function addTake(clipId, take) {
   if (!clip) return null;
   if (!clip.takes || !clip.takes.length) {
     clip.takes = [{ id: uid("tk"), mediaId: clip.mediaId, in: clip.in, out: clip.out, label: "Original",
-                    partners: alignedPartners(clip).map(p => ({ id: p.id, mediaId: p.mediaId, in: p.in, out: p.out })) }];
+                    partners: alignedPartners(clip).map(p => ({ id: p.id, mediaId: p.mediaId, in: p.in, out: p.out })),
+                    joins: clip.gen?.joins || null }];
     clip.takeIndex = 0;
   }
   const t0 = take.in || 0;
@@ -1049,6 +1053,18 @@ export function setTake(clipId, index) {
     if (hasSpeedKeys(clip)) { p.keys = { ...(p.keys || {}), speed: JSON.parse(JSON.stringify(clip.keys.speed)) }; p.dur = clip.dur; }
   }
   afterLengthChange([{ clip, oldEnd }]);
+  restoreJoins(clip, take.joins);
+}
+
+// Where a generated take met its neighbours: {left: {clipId, cut}, right: {clipId, cut}} (source times in the
+// neighbours' files). Each take was made against cuts of its own (latent grade and handovers move them), so switching
+// takes puts the neighbours' cuts back where that take joins them.
+function restoreJoins(clip, joins) {
+  if (!joins) return;
+  const L = joins.left && getClip(joins.left.clipId), R = joins.right && getClip(joins.right.clipId);
+  if (L && L.trackId === clip.trackId && Math.abs(Math.max(L.in, L.out) - joins.left.cut) > 1e-4) setCutSource(L.id, "end", joins.left.cut);
+  if (R && R.trackId === clip.trackId && Math.abs(Math.min(R.in, R.out) - joins.right.cut) > 1e-4) setCutSource(R.id, "start", joins.right.cut);
+  if (clip.gen) clip.gen.joins = joins;
 }
 
 export function removeTake(clipId, index) {
@@ -1243,6 +1259,89 @@ export function transitionHandles(tr) {
   return { needed: Math.max(neededA, neededB), neededA, neededB, spareA, spareB };
 }
 
+// ------------------------------------------------------------------ compound clips
+// A compound clip groups clips (on one video track, with their linked audio) into one clip on the timeline. Nothing
+// is rendered to a new file: the clips stay as they are, with their own takes, grades and latents, and can be opened
+// to edit them. The compound's record (P().compounds) is shaped like a clip and holds its outer grade, effects,
+// opacity, transform and fades, which apply on top of the clips' own. Its start and length follow its clips.
+
+export const compoundOf = (clip) => clip && clip.compound ? (P().compounds || []).find(x => x.id === clip.compound) || null : null;
+export const compoundMembers = (cid) => P().clips.filter(c => c.compound === cid);
+export const isCompound = (c) => !!c && c.kind === "compound";
+// a closed compound's clips act as one; an open one's are edited one by one
+export const closedCompoundOf = (clip) => { const x = compoundOf(clip); return x && !x.open ? x : null; };
+
+function withCompounds(ids) {
+  const out = new Set(ids);
+  for (const id of ids) {
+    const c = P().clips.find(x => x.id === id);
+    const x = closedCompoundOf(c);
+    if (x) compoundMembers(x.id).forEach(m => out.add(m.id));
+  }
+  return out;
+}
+
+// The selection as one compound clip, when it is exactly a closed compound's clips (else null).
+export function selectedCompound() {
+  const clips = selectedClips();
+  if (!clips.length) return null;
+  const x = closedCompoundOf(clips[0]);
+  if (!x) return null;
+  const members = compoundMembers(x.id);
+  return members.length === clips.length && members.every(m => state.selection.has(m.id)) ? x : null;
+}
+// What the colour, effects and transform controls edit: a selected closed compound as one clip, else the clips.
+export const editTargets = () => { const x = selectedCompound(); return x ? [x] : selectedClips(); };
+
+// Why these clips can't become a compound clip (null when they can).
+export function compoundProblem(ids) {
+  const clips = [...withPartners(ids)].map(id => P().clips.find(c => c.id === id)).filter(Boolean);
+  const video = clips.filter(c => trackKind(c.trackId) === "video");
+  if (!video.length) return "select video clips";
+  if (new Set(video.map(c => c.trackId)).size > 1) return "the video clips must be on one track";
+  if (clips.some(c => c.compound)) return "a clip is already in a compound clip";
+  return null;
+}
+
+export function makeCompound(ids, name) {
+  if (compoundProblem(ids)) return null;
+  const clips = [...withPartners(ids)].map(id => P().clips.find(c => c.id === id)).filter(Boolean);
+  const video = clips.filter(c => trackKind(c.trackId) === "video").sort((a, b) => a.start - b.start);
+  const id = uid("cp");
+  const x = { id, kind: "compound", name: name || `Compound · ${video[0].name || "clip"}`, trackId: video[0].trackId, open: false,
+              start: 0, in: 0, out: 1, speed: 1, grade: null, effects: [], keys: {} };
+  (P().compounds ||= []).push(x);
+  for (const c of clips) c.compound = id;
+  syncCompounds();
+  return x;
+}
+
+export function breakCompound(cid) {
+  for (const c of compoundMembers(cid)) delete c.compound;
+  P().compounds = (P().compounds || []).filter(x => x.id !== cid);
+}
+
+export function setCompoundOpen(cid, open) {
+  const x = (P().compounds || []).find(y => y.id === cid);
+  if (x) x.open = !!open;
+}
+
+// Keep each compound's span on its clips (it moves and trims with them); drop compounds that lost all their clips.
+export function syncCompounds() {
+  const p = P();
+  if (!p || !p.compounds || !p.compounds.length) return;
+  p.compounds = p.compounds.filter(x => {
+    const video = p.clips.filter(c => c.compound === x.id && trackKind(c.trackId) === "video");
+    if (!video.length) { for (const c of p.clips) if (c.compound === x.id) delete c.compound; return false; }
+    const start = Math.min(...video.map(c => c.start)), end = Math.max(...video.map(c => clipEnd(c)));
+    const fps = p.settings.fps || 24;
+    x.kind = "compound";
+    x.trackId = video[0].trackId;
+    x.start = start; x.in = 0; x.out = Math.max(1 / fps, end - start); x.speed = 1;
+    return true;
+  });
+}
+
 // ------------------------------------------------------------------ clipboard
 
 export function copySelection() {
@@ -1250,12 +1349,14 @@ export function copySelection() {
   if (!clips.length) return 0;
   const minStart = Math.min(...clips.map(c => c.start));
   state.clipboard = clips.map(c => ({ ...cloneClip(c), rel: c.start - minStart }));
+  const cids = new Set(clips.map(c => c.compound).filter(Boolean));
+  state.clipboardCompounds = (P().compounds || []).filter(x => cids.has(x.id)).map(cloneClip);
   return clips.length;
 }
 
 export function paste(at) {
   if (!state.clipboard || !state.clipboard.length) return [];
-  const linkMap = {};
+  const linkMap = {}, compoundMap = {};
   const created = [];
   for (const src of state.clipboard) {
     if (!P().media[src.mediaId] || !getTrack(src.trackId)) continue;
@@ -1265,6 +1366,19 @@ export function paste(at) {
     c.start = snapFrame(at + src.rel);
     c.parentId = null;
     if (c.linkId) c.linkId = linkMap[c.linkId] ||= uid("l");
+    if (c.compound) {
+      // a pasted compound clip is a copy: a new compound with the same outer grade, effects and transform
+      const from = (state.clipboardCompounds || []).find(x => x.id === c.compound);
+      if (!from) delete c.compound;
+      else {
+        if (!compoundMap[from.id]) {
+          const copy = { ...cloneClip(from), id: uid("cp") };
+          (P().compounds ||= []).push(copy);
+          compoundMap[from.id] = copy.id;
+        }
+        c.compound = compoundMap[from.id];
+      }
+    }
     P().clips.push(c);
     created.push(c);
   }

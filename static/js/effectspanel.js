@@ -167,17 +167,16 @@ export class EffectsPanel {
   }
 
   applyToSelection(type) {
-    const ids = M.selectedClips().filter(c => M.trackKind(c.trackId) === "video").map(c => c.id);
+    const ids = M.editTargets().filter(c => M.trackKind(c.trackId) === "video").map(c => c.id);
     if (!ids.length) { toast("Select a video clip first, or drag the effect onto one", "warn"); return; }
     this.apply(type, ids);
   }
 
   dropOnClip(type, hit) {
     if (!hit || !hit.clip || hit.row?.kind !== "video") { toast("Drop the effect onto a clip on a video track", "warn"); return; }
-    const ids = state.selection.has(hit.clip.id)
-      ? M.selectedClips().filter(c => M.trackKind(c.trackId) === "video").map(c => c.id)
-      : [hit.clip.id];
     if (!state.selection.has(hit.clip.id)) M.select([hit.clip.id]);
+    // onto a closed compound clip: the compound's own effects (on top of its clips')
+    const ids = M.editTargets().filter(c => M.trackKind(c.trackId) === "video").map(c => c.id);
     this.apply(type, ids);
   }
 }

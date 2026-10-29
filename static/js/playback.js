@@ -6,7 +6,7 @@
 // render.py applies the same EQ/compressor (via ffmpeg) and the same fader, automation and pan maths on export.
 import { state, P, bus, levelAt, clipsOn, videoTracks, audioTracks, clipDur, srcTime, speedAt, fadeFactor, isRamped, transitionInfo,
          mediaOf, timelineEnd, getClip, audioTransitionGains, fps, clipWindow, prop, gradeAt, hasGradeKeys,
-         trackGainDb, effectParamsAt, GENERATOR_KINDS } from "./model.js";
+         trackGainDb, effectParamsAt, GENERATOR_KINDS, compoundOf } from "./model.js";
 import { gradeUniforms } from "./grade.js";
 import { isAudioTransition } from "./transitions.js";
 import { drawTitle } from "./titles.js";
@@ -478,7 +478,26 @@ export class Playback {
     const alpha = clamp(prop(clip, "opacity", kt), 0, 1) * fadeFactor(clip, kt, d);
     return { type: "clip", clip, source: entry.el, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, full: geo.full, alpha,
              level: levelAt(clip, t - clip.start),
-             ...this.gradeFor(clip, kt), effects: this.effectsFor(clip, kt, t) };
+             ...this.gradeFor(clip, kt), effects: this.effectsFor(clip, kt, t), post: this.compoundPost(clip, t) };
+  }
+
+  // A compound clip's own grade, effects, opacity, fades and transform, applied on top of its clip's (null when it
+  // has none of them).
+  compoundPost(clip, t) {
+    const x = compoundOf(clip);
+    if (!x) return null;
+    const d = clipDur(x);
+    const kt = clamp(t - x.start, 0, d);
+    const { grade, lut } = this.gradeFor(x, kt);
+    const effects = this.effectsFor(x, kt, t);
+    const alpha = clamp(prop(x, "opacity", kt), 0, 1) * fadeFactor(x, kt, d);
+    const p = P();
+    const geo = this.geometry(x, kt, p.settings.width, p.settings.height);
+    const k = geo.k;
+    const moved = Math.abs(geo.size[0] - p.settings.width * k) > 0.5 || Math.abs(geo.size[1] - p.settings.height * k) > 0.5 || Math.abs(geo.rotation) > 1e-6
+      || Math.abs(geo.center[0] - this.renderer.canvas.width / 2) > 0.5 || Math.abs(geo.center[1] - this.renderer.canvas.height / 2) > 0.5;
+    if (!grade && !lut && !effects && alpha >= 1 && !moved) return null;
+    return { grade, lut, effects, alpha, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, full: geo.full };
   }
 
   buildFrame(t) {

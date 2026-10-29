@@ -286,7 +286,7 @@ function regenItems(clip, row) {
 
 // Effects clipboard: the whole effect chain (with its keyframes) of one clip, pasted onto others (added after theirs).
 function copyEffects() {
-  const clip = M.selectedClips().find(c => M.trackKind(c.trackId) === "video" && (c.effects || []).length);
+  const clip = M.editTargets().find(c => M.trackKind(c.trackId) === "video" && (c.effects || []).length);
   if (!clip) { toast("Select a video clip with effects", "warn"); return; }
   const lanes = Object.fromEntries(Object.entries(clip.keys || {}).filter(([k]) => k.startsWith("fx:")));
   state.effectsClipboard = JSON.parse(JSON.stringify({ effects: clip.effects, lanes }));
@@ -294,7 +294,7 @@ function copyEffects() {
 }
 function pasteEffects() {
   const data = state.effectsClipboard;
-  const targets = M.selectedClips().filter(c => M.trackKind(c.trackId) === "video");
+  const targets = M.editTargets().filter(c => M.trackKind(c.trackId) === "video");
   if (!data || !targets.length) return;
   M.edit("Paste effects", () => {
     for (const t of targets) {
@@ -315,7 +315,7 @@ function pasteEffects() {
   toast(`Pasted effects onto ${targets.length} clip${targets.length > 1 ? "s" : ""}`);
 }
 function removeEffects() {
-  M.edit("Remove effects", () => { for (const c of M.selectedClips()) for (const f of [...(c.effects || [])]) M.removeEffect(c.id, f.id); });
+  M.edit("Remove effects", () => { for (const c of M.editTargets()) for (const f of [...(c.effects || [])]) M.removeEffect(c.id, f.id); });
 }
 
 function copyGrade() { app.colour.copy(); }
@@ -420,6 +420,22 @@ function laneItems(clip, row) {
   return [{ label: `Show keyframes for${label ? `: ${label}` : ""}`, submenu: items }];
 }
 
+// Compound clips: make one from the selection, open or close one, break one apart.
+function compoundItems(clip) {
+  const cp = M.compoundOf(clip);
+  if (cp) {
+    const members = M.compoundMembers(cp.id).map(c => c.id);
+    return ["-",
+      cp.open ? { label: "Close compound clip", action: () => { M.edit("Close compound clip", () => M.setCompoundOpen(cp.id, false)); M.select(members); } }
+              : { label: "Open compound clip", kbd: "Double-click", action: () => { M.edit("Open compound clip", () => M.setCompoundOpen(cp.id, true)); M.select([clip.id]); } },
+      { label: "Break apart compound clip", action: () => { M.edit("Break apart compound clip", () => M.breakCompound(cp.id)); M.select(members); } }];
+  }
+  const ids = [...state.selection];
+  const why = M.compoundProblem(ids);
+  return ["-", { label: ids.length > 1 ? "Make compound clip from selection" : "Make compound clip", disabled: !!why, title: why || "",
+    action: () => { const made = M.edit("Make compound clip", () => M.makeCompound(ids)); if (made) M.select(M.compoundMembers(made.id).map(c => c.id)); } }];
+}
+
 function contextMenu(x, y, hit) {
   if (hit.area === "marker") {
     const m = hit.marker;
@@ -505,6 +521,7 @@ function contextMenu(x, y, hit) {
       hit.row.kind === "video" ? { label: "Freeze frame at playhead", kbd: "Shift+F", disabled: M.isStill(clip), action: freezeFrame } : null,
       hit.row.kind === "video" ? { label: "Detect shots…", kbd: "Shift+D", disabled: M.isStill(clip), action: () => openShotDetect(app, clip.id) } : null,
       ...regenItems(clip, hit.row),
+      ...compoundItems(clip),
       hit.row.kind === "video" && hit.row.track.id === M.primaryId() ? { label: state.selection.size > 1 ? "Render final (selected clips)…" : "Render final (this clip)…",
         disabled: M.isStill(clip), action: () => openRenderDialog(app, { clipIds: new Set(state.selection) }) } : null,
       hit.row.kind === "video" ? { label: "Grade & effects", submenu: [

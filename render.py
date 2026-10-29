@@ -882,9 +882,46 @@ class ExportJob:
             alpha = min(1.0, max(0.0, T.prop(clip, "opacity", kt, 1.0)))
             alpha *= T.fade_factor(clip, kt, duration)
             crop = tuple(T.prop(clip, name, kt, 0.0) for name in ("cropL", "cropR", "cropT", "cropB"))
-            return comp.place(img, T.prop(clip, "x", kt, 0.0) * tl.width / max(1, self._project_w(tl)),
-                              T.prop(clip, "y", kt, 0.0) * tl.height / max(1, self._project_h(tl)), alpha,
-                              rotation=T.prop(clip, "rotation", kt, 0.0), crop=crop)
+            placed = comp.place(img, T.prop(clip, "x", kt, 0.0) * tl.width / max(1, self._project_w(tl)),
+                                T.prop(clip, "y", kt, 0.0) * tl.height / max(1, self._project_h(tl)), alpha,
+                                rotation=T.prop(clip, "rotation", kt, 0.0), crop=crop)
+            return compound_post(clip, placed, t)
+
+        compounds = {x["id"]: x for x in (self.project.get("compounds") or []) if x.get("id")}
+
+        def compound_post(clip, layer, t):
+            """A compound clip's own grade, effects, transform, opacity and fades on top of its clip's (as the viewer's
+            drawCompound): the placed layer is un-premultiplied, graded, run through the effects and placed again."""
+            x = compounds.get(clip.get("compound"))
+            if x is None or layer is None:
+                return layer
+            duration = max(1e-6, float(x.get("out") or 0) - float(x.get("in") or 0))
+            kt = min(max(t - float(x.get("start") or 0), 0.0), duration)
+            keyed = T.has_grade_keys(x)
+            grade = T.grade_at(x, kt) if keyed else (x.get("grade") or {})
+            params = T.grade_params(grade)
+            alpha = min(1.0, max(0.0, T.prop(x, "opacity", kt, 1.0))) * T.fade_factor(x, kt, duration)
+            scale = max(0.0, T.prop(x, "scale", kt, 1.0))
+            move = (abs(scale - 1) > 1e-4 or any(abs(T.prop(x, n, kt, 0.0)) > 1e-6 for n in ("x", "y", "rotation", "cropL", "cropR", "cropT", "cropB")))
+            has_lut = bool(grade.get("lut")) and grade.get("enabled") is not False
+            if params is None and not has_lut and not FX.active(x) and alpha >= 1 and not move:
+                return layer
+            a = layer[3:4]
+            rgb = torch.where(a > 0, layer[:3] / a.clamp(min=1e-6), torch.zeros_like(layer[:3]))
+            rgb = apply_lut(comp.grade(rgb.clamp(0, 1), params), grade)
+            img = self._cat(rgb, a)
+            if FX.active(x):
+                out = effects.apply(self._cat(rgb * a, a), x, kt, round(t * tl.fps))
+                oa = out[3:4]
+                img = self._cat(torch.where(oa > 0, out[:3] / oa.clamp(min=1e-6), torch.zeros_like(out[:3])).clamp(0, 1), oa)
+            if abs(scale - 1) > 1e-4:
+                if scale <= 1e-4:
+                    return None
+                img = comp.resize(img, img.shape[2] * scale, img.shape[1] * scale)
+            crop = tuple(T.prop(x, name, kt, 0.0) for name in ("cropL", "cropR", "cropT", "cropB"))
+            return comp.place(img, T.prop(x, "x", kt, 0.0) * tl.width / max(1, self._project_w(tl)),
+                              T.prop(x, "y", kt, 0.0) * tl.height / max(1, self._project_h(tl)), alpha,
+                              rotation=T.prop(x, "rotation", kt, 0.0), crop=crop)
 
         def adjust(clip, canvas, t):
             """Adjustment layer: grade and effects on everything composited so far, mixed back by its opacity."""

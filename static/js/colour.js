@@ -118,7 +118,7 @@ export class ColourPanel {
 
   targets() {
     if (!P()) return [];
-    return M.selectedClips().filter(c => M.trackKind(c.trackId) === "video");
+    return M.editTargets().filter(c => M.trackKind(c.trackId) === "video");
   }
   tauOf(c) { return state.playhead - c.start; }
   inside(c) { const t = this.tauOf(c); return t >= -1e-6 && t <= M.clipDur(c) + 1e-6; }
