@@ -998,22 +998,24 @@ class RegenService:
         prompt = str(req.get("prompt") or "").strip() or info["prompt"]
         task = build_task(settings, prompt=prompt, seed=seed, frames=lengths["total"], fps=info["fps"], model_def=model_def)
         apply_gen_size(task, req.get("gen"))
-        if info["pins"] and info.get("windows", 1) > 1:
+        # sliding windows: the length needs several, or you asked for them (a prompt's own [/duration=...] windows
+        # set the real length); never for a run that arrives on a clip, whose pins must be in its only window
+        sliding = (info.get("windows", 1) > 1 or bool(req.get("sliding"))) and not any(p["place"] == "after" for p in info["pins"])
+        if info["pins"] and sliding:
             task["sliding_window_size"] = info["windowFrames"]   # sliding windows: the pins are in window 1
         elif info["pins"]:
             task["sliding_window_size"] = max(int(task.get("sliding_window_size") or 0), lengths["total"])   # one window: pins only apply to window 1
             # and nothing discarded in a single window: Discard Last Frames would cut the end of the run, where an
             # arriving pin sits, and shift every trim after it (between sliding windows it is Latent Carry's business)
-            if info.get("windows", 1) <= 1:
-                task["sliding_window_discard_last_frames"] = 0
+            task["sliding_window_discard_last_frames"] = 0
         spec = {"pins": [{k: p[k] for k in ("place", "file", "fps", "frames", "start_frame", "sha", "audio", "kind")} for p in info["pins"]],
                 "mode": info["mode"]}
         # Between WanGP's own sliding windows: each window takes the previous one's tail as motion-context history
         # and holds its last frames inside the run with the denoise mask, so a window's seam falls inside one
         # rendering (as a Motion + masked join). Needs the run to be a masked edit throughout, an overlap with room
         # for both parts, and the windows' last frames (the VAE's edge) discarded.
-        window_join = info.get("windows", 1) > 1 and req.get("windowJoin", True) and not masked_unavailable(settings, model_def)
-        if info.get("windows", 1) > 1 and not int(task.get("sliding_window_size") or 0):
+        window_join = sliding and req.get("windowJoin", True) and not masked_unavailable(settings, model_def)
+        if sliding and not int(task.get("sliding_window_size") or 0):
             task["sliding_window_size"] = info["windowFrames"]      # the window size the plan assumed
         if window_join:
             spec["windowJoin"] = "motion_masked"

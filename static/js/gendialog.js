@@ -123,10 +123,22 @@ export async function openGenerate(app, mode, where) {
   const carryAudio = el("input", { type: "checkbox", checked: prefs.carryAudio !== false });
   const crossfade = el("input", { type: "checkbox", checked: prefs.crossfade !== false });
   const splitWindows = el("input", { type: "checkbox", checked: !!prefs.splitWindows });
-  const splitRow = el("label.rrow", { style: { display: "none" } }, splitWindows, el("span", {}, "One clip per sliding window (cut where the windows meet)"));
+  const splitRow = el("label.rrow", { style: { marginLeft: "22px" } }, splitWindows, el("span", {}, "One clip per sliding window (cut where the windows meet)"));
   const windowJoin = el("input", { type: "checkbox", checked: prefs.windowJoin !== false });
-  const joinRow = el("label.rrow", { style: { display: "none" }, title: "Each window takes the previous one's last frames as motion context and holds its final 18 frames (and their sound) inside the new window with the denoise mask, so the seam falls inside one rendering. Uses an overlap of at least 35 frames and discards each window's last 4." },
+  const joinRow = el("label.rrow", { style: { marginLeft: "22px" }, title: "Each window takes the previous one's last frames as motion context and holds its final 18 frames (and their sound) inside the new window with the denoise mask, so the seam falls inside one rendering. Uses an overlap of at least 35 frames and discards each window's last 4." },
     windowJoin, el("span", {}, "Join the windows as Motion + masked (seamless)"));
+  // Sliding windows: on when the length needs more than one window, and also when the prompt sets its own windows
+  // ([/duration=...] blocks override the length here), so tick it for those
+  const slidingAllowed = !s.right;   // a run arriving on a clip must fit one window
+  const sliding = el("input", { type: "checkbox", checked: !!prefs.sliding });
+  let slidingTouched = false;
+  const slidingOpts = el("div", {}, splitRow, joinRow);
+  const slidingRow = el("div", { style: { display: slidingAllowed ? "" : "none" } },
+    el("label.rrow", { title: "Run in WanGP's sliding windows. Needed when the prompt sets its own windows with [/duration=...]: the length here is then only a starting point." },
+      sliding, el("span", {}, "Sliding windows (several windows, or windows set in the prompt)")), slidingOpts);
+  const syncSliding = () => { slidingOpts.style.display = sliding.checked ? "" : "none"; };
+  sliding.addEventListener("change", () => { slidingTouched = true; syncSliding(); prepare(); });
+  syncSliding();
   const joinMatch = el("input", { type: "checkbox", checked: (prefs.joinMatch ?? prefs.levelLock) !== false });
   const srcClip = radio("g_src", "clip", fresh ? (settingsItem ? `The same settings as “${s.near.name}”` : "A neighbouring clip's settings (none here)") : settingsItem ? "The clip's settings" : "The clip's settings (not a WanGP clip)", !!settingsItem && !prefs.useCurrent, { disabled: !settingsItem });
   const srcCurrent = radio("g_src", "current", status.current ? `Current Media Generator settings (${status.current.name})` : "Current Media Generator settings (open the Video Generator tab first)",
@@ -163,7 +175,7 @@ export async function openGenerate(app, mode, where) {
       el("label.rrow", {}, carryAudio, el("span", {}, "Carry the pinned audio too")),
       el("label.rrow", {}, joinMatch, el("span", {}, "Join match: correct the new footage's exposure and colour where it meets the clip it joins, fading out over about half a second")),
       el("label.rrow", {}, crossfade, el("span", {}, "Blend the joins: crossfade across the frames both sides rendered (pinned frames inside the run only)"))),
-    field(fresh ? "Length" : "New footage", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seconds, el("span.dim", {}, "seconds")), lengthNote, splitRow, joinRow),
+    field(fresh ? "Length" : "New footage", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seconds, el("span.dim", {}, "seconds")), lengthNote, slidingRow),
     field("Settings", srcClip.row, srcCurrent.row, modelNote),
     field("Size", sizeSel, sizeNote),
     field("Seed", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seedSel, seedInput)),
@@ -174,7 +186,10 @@ export async function openGenerate(app, mode, where) {
   const go = m.box.querySelector("#btnGenGo");
 
   let info = null, promptEdited = false;
-  promptBox.addEventListener("input", () => { promptEdited = true; });
+  promptBox.addEventListener("input", () => {
+    promptEdited = true;
+    if (slidingAllowed && !slidingTouched && /\[\s*\/\s*duration/i.test(promptBox.value) && !sliding.checked) { sliding.checked = true; syncSliding(); }
+  });
 
   const request = () => ({
     project: P().name, mode, trackId: s.trackId, clipId: s.anchor?.id,
@@ -182,7 +197,8 @@ export async function openGenerate(app, mode, where) {
     right: s.right ? { clipId: s.right.id, mediaId: s.right.mediaId, cut: startSource(s.right), pixel: keepCut.checked, audio: carryAudio.checked } : null,
     replaceId: s.replace?.id || null,
     gap: s.gap ? { start: s.gap.start, end: Number.isFinite(s.gap.end) ? s.gap.end : null } : null,
-    window: parseInt(windowSel.value, 10), leaveMode: leaveSel.value, arriveMode: arriveSel.value, crossfade: crossfade.checked, joinMatch: joinMatch.checked, newSeconds: clamp(parseFloat(seconds.value) || 3, 0.2, 120), splitWindows: splitWindows.checked, windowJoin: windowJoin.checked,
+    window: parseInt(windowSel.value, 10), leaveMode: leaveSel.value, arriveMode: arriveSel.value, crossfade: crossfade.checked, joinMatch: joinMatch.checked, newSeconds: clamp(parseFloat(seconds.value) || 3, 0.2, 120), sliding: slidingAllowed && sliding.checked,
+    splitWindows: slidingAllowed && sliding.checked && splitWindows.checked, windowJoin: slidingAllowed && sliding.checked && windowJoin.checked,
     useCurrent: srcCurrent.input.checked, settingsFrom: settingsItem?.id || (s.left || s.right)?.mediaId || null, promptRange,
     at: s.at ?? null, targetId: s.target?.id || null,
     gen: sizeSel.value === "project" ? gen : null,
@@ -209,13 +225,14 @@ export async function openGenerate(app, mode, where) {
       if (fresh) lengthNote.textContent = `${L.totalSeconds.toFixed(2)}s (${L.total} frames)${(info.windows || 1) > 1 ? `, ${info.windows} sliding windows` : ""}. ${L.note}`;
       const motionPin = info.pins.some(p => p.kind === "motion");
       const windows = info.windows || 1;
-      splitRow.style.display = windows > 1 ? "" : "none";
-      joinRow.style.display = windows > 1 ? "" : "none";
+      // a length past one window turns sliding windows on (unless you've chosen yourself)
+      if (slidingAllowed && !slidingTouched && windows > 1 && !sliding.checked) { sliding.checked = true; syncSliding(); }
       if (!fresh) lengthNote.textContent = `${windows > 1 ? `${windows} sliding windows` : "One run"} of ${L.totalSeconds.toFixed(2)}s (${L.total} frames): ${motionPin ? "the join frame + " : L.before ? `${(L.before / info.fps).toFixed(2)}s pinned + ` : ""}${L.newSeconds.toFixed(2)}s new${L.after ? ` + ${(L.after / info.fps).toFixed(2)}s pinned` : ""}. ${L.note}`;
       modelNote.textContent = `Model: ${info.model.name}`;
       for (const r of info.refmods || []) modelNote.append(el(r.status === "relinked" ? "div" : "div.warn", {},
         r.status === "relinked" ? `RefMod '${r.mod}' has moved: using ${r.now}.` : `RefMod '${r.mod}' can't be found, so it will be skipped.`));
       if (!promptEdited) promptBox.value = info.prompt || "";
+      if (slidingAllowed && !slidingTouched && /\[\s*\/\s*duration/i.test(promptBox.value) && !sliding.checked) { sliding.checked = true; syncSliding(); }
       if (fresh) promptNote.textContent = settingsItem && !srcCurrent.input.checked ? `Started from ${s.near.name}'s prompt.` : "Started from the Media Generator's prompt.";
       else if (motionPin) promptNote.textContent = `Describe the run: it starts on the previous clip's last frame and carries on from its motion${L.after ? `; the last ${(L.after / info.fps).toFixed(2)}s are the next clip's first frames` : ""}. Started from ${promptClip?.name || "the clip"}'s prompt.`;
       else promptNote.textContent = `Describe the whole run, pinned frames included: ${L.before ? `the first ${(L.before / info.fps).toFixed(2)}s are the previous clip's last frames` : ""}${L.before && L.after ? " and " : ""}${L.after ? `the last ${(L.after / info.fps).toFixed(2)}s are the next clip's first frames` : ""}. Started from ${promptClip?.name || "the clip"}'s prompt.`;
@@ -242,7 +259,7 @@ export async function openGenerate(app, mode, where) {
       if (!Number.isFinite(seed) || seed < 0) { error.textContent = "Enter a seed of 0 or more"; return; }
     }
     const req = { ...request(), seed, prompt: promptBox.value };
-    savePrefs({ size: sizeSel.value, window: req.window, leaveMode: req.leaveMode, leaveModeV2: true, arriveMode: req.arriveMode, crossfade: req.crossfade, joinMatch: req.joinMatch, splitWindows: splitWindows.checked, windowJoin: windowJoin.checked, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
+    savePrefs({ size: sizeSel.value, window: req.window, leaveMode: req.leaveMode, leaveModeV2: true, arriveMode: req.arriveMode, crossfade: req.crossfade, joinMatch: req.joinMatch, splitWindows: splitWindows.checked, windowJoin: windowJoin.checked, sliding: sliding.checked, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
       freshSeconds: fresh && !s.target ? req.newSeconds : prefs.freshSeconds, keepCut: keepCut.checked, carryAudio: carryAudio.checked,
       useCurrent: req.useCurrent, seed: seedSel.value === "custom" ? "custom" : "new", customSeed: seedInput.value });
     go.disabled = true;
