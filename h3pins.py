@@ -896,6 +896,9 @@ def _render_audio(record, audio_x):
     """Phase 2 keeps phase 1's soundtrack as fixed context; in a final render phase 1 is skipped, so hand it the
     drafts' own sound instead (encoded once). Anything unexpected keeps WanGP's."""
     spec = record.get("render") or {}
+    if spec.get("refiner") == "regenerate":
+        # Open-H3 Regenerate is trained on silent phase-2 audio (WanGP supplies it); the drafts' sound is remuxed after
+        return audio_x
     if "render_audio" not in record:
         record["render_audio"] = None
         path = spec.get("draft_audio")

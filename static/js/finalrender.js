@@ -204,17 +204,25 @@ export async function openRenderDialog(app, opts = {}) {
   const steps = el("input", { type: "number", min: 1, max: 20, step: 1, value: prefs.steps ?? "", placeholder: "clip's", style: { width: "70px" } });
   const vae = el("input", { type: "checkbox", checked: prefs.vaeX2 !== false });
   const keepLoras = el("input", { type: "checkbox", checked: !!prefs.keepLoras });
+  // phase 2's refiner: WanGP's Turbo (H3 Original 2 Phases) or Open-H3 Regenerate 2K; "" follows the clips' settings
+  const refiner = el("select", {},
+    el("option", { value: "" }, "As the clips"),
+    el("option", { value: "turbo" }, "Turbo (H3 Original 2 Phases)"),
+    el("option", { value: "regenerate" }, "Open-H3 Regenerate 2K"));
+  refiner.value = prefs.refiner || "";
   const windowIn = el("input", { type: "number", min: 3, max: 20, step: 1, value: prefs.window || 10, style: { width: "60px" } });
   const prompt = el("textarea.rgprompt", { rows: 4, placeholder: "Leave empty to use the prompt of each stretch's first clip" });
   const note = el("div.dim.small");
   const error = el("div.warn");
   const field = (label, ...children) => el("div.rgfield", {}, el("label.rglabel", {}, label), el("div.rgctl", {}, ...children));
   const body = el("div.rgbody", {},
-    el("div", { style: { marginBottom: "8px" } }, "Refine each continuous stretch of the main track as one piece, at the final size, with the same Turbo LoRA, noise level and steps as your clips' phase 2. Each clip gets a Final take; its draft is kept. Next to a clip that already has a final, the render re-uses that final's frames at the join, so the two flow into each other."),
+    el("div", { style: { marginBottom: "8px" } }, "Refine each continuous stretch of the main track as one piece, at the final size, with the same phase 2 as your clips (Turbo or Open-H3 Regenerate 2K, noise level and steps). Each clip gets a Final take; its draft is kept. Next to a clip that already has a final, the render re-uses that final's frames at the join, so the two flow into each other."),
     field(opts.clipIds ? "Clips" : "Stretches", ...rows.map(r => r.row)),
     field("Refine at", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, wIn, el("span", {}, "×"), hIn),
       el("label.rrow", {}, vae, el("span", {}, "Decode with the H3 VAE ×2")), note),
-    field("Phase 2", el("div", { style: { display: "flex", gap: "10px", alignItems: "center" } },
+    field("Phase 2", el("div", { style: { display: "flex", gap: "10px", alignItems: "center", marginBottom: "6px" } },
+      el("span.dim", {}, "refiner"), refiner),
+      el("div", { style: { display: "flex", gap: "10px", alignItems: "center" } },
       el("span.dim", {}, "noise level start"), strength, el("span.dim", {}, "steps"), steps, el("span.dim", {}, "window (s)"), windowIn),
       el("label.rrow", {}, keepLoras, el("span", {}, "Keep the clips' LoRAs in the refine (otherwise only RefMods, references and the Turbo LoRA)"))),
     field("Prompt", prompt),
@@ -225,7 +233,7 @@ export async function openRenderDialog(app, opts = {}) {
   const request = (s) => ({
     project: P().name, size: [parseInt(wIn.value, 10), parseInt(hIn.value, 10)], vaeX2: vae.checked,
     strength: strength.value === "" ? null : parseFloat(strength.value), steps: steps.value === "" ? null : parseInt(steps.value, 10),
-    prompt: prompt.value.trim(), keepLoras: keepLoras.checked, clips: s.clips.map(c => ({ clipId: c.id, ...draftTake(c) })),
+    prompt: prompt.value.trim(), keepLoras: keepLoras.checked, refiner: refiner.value || null, clips: s.clips.map(c => ({ clipId: c.id, ...draftTake(c) })),
     contextBefore: s.contextBefore, contextAfter: s.contextAfter, window: parseFloat(windowIn.value) || 10,
     settingsFrom: (s.clips.find(c => M.mediaOf(c)?.has_metadata) || s.clips[0]).mediaId,
   });
@@ -237,18 +245,24 @@ export async function openRenderDialog(app, opts = {}) {
       const info = await api("api/render/prepare", { method: "POST", body: request(first.s) });
       const longest = rows.filter(r => r.box.checked).reduce((a, r) => Math.max(a, r.s.end - r.s.start), 0);
       note.textContent = `${longest > (parseFloat(windowIn.value) || 10) ? `Longer stretches are refined in overlapping ${windowIn.value}s windows, blended at every step. ` : ""}Phase 1 size ${info.phase1[0]} × ${info.phase1[1]} (the drafts are scaled to it), refined at ${info.size[0]} × ${info.size[1]}, output ${info.output[0]} × ${info.output[1]}. ${info.model}; noise ${info.strength}, ${info.steps} steps${info.loras.length ? `; the clips' LoRAs: ${info.loras.join(", ")}${keepLoras.checked ? " (kept)" : " (left out)"}` : ""}.`;
-      if (!strength.value) strength.placeholder = String(info.strength);
-      if (!steps.value) steps.placeholder = String(info.steps);
+      const regen = info.refiner === "regenerate";
+      strength.disabled = steps.disabled = regen;
+      strength.title = steps.title = regen ? "Open-H3 Regenerate uses its own fixed schedule (0.909, 3 steps)" : "";
+      if (!strength.value || regen) strength.placeholder = String(info.strength);
+      if (!steps.value || regen) steps.placeholder = String(info.steps);
+      refiner.options[2].disabled = !info.regenAvailable;
+      refiner.options[0].textContent = `As the clips (${regen ? "Regenerate 2K" : "Turbo"})`;
+      if (regen) note.textContent += " Phase 2 uses Open-H3 Regenerate 2K (its own schedule, silent audio conditioning); the drafts' soundtrack is kept.";
       go.disabled = !info.available || !info.h3?.installed;
       if (!info.available) error.textContent = info.reason;
       else if (!info.h3?.installed) error.textContent = "The editor's H3 add-on isn't active in WanGP (restart WanGP).";
     } catch (e) { error.textContent = e.message; go.disabled = true; }
   }, 250);
-  for (const c of [wIn, hIn, vae, keepLoras, strength, steps, windowIn, ...rows.map(r => r.box)]) c.addEventListener("change", refresh);
+  for (const c of [wIn, hIn, vae, keepLoras, refiner, strength, steps, windowIn, ...rows.map(r => r.box)]) c.addEventListener("change", refresh);
   async function submit() {
     const chosen = rows.filter(r => r.box.checked);
     if (!chosen.length) return;
-    try { localStorage.setItem("ve_render", JSON.stringify({ width: +wIn.value, height: +hIn.value, vaeX2: vae.checked, strength: strength.value === "" ? null : +strength.value, steps: steps.value === "" ? null : +steps.value, keepLoras: keepLoras.checked, window: parseFloat(windowIn.value) || 10 })); } catch (_) { /* ignore */ }
+    try { localStorage.setItem("ve_render", JSON.stringify({ width: +wIn.value, height: +hIn.value, vaeX2: vae.checked, strength: strength.value === "" ? null : +strength.value, steps: steps.value === "" ? null : +steps.value, keepLoras: keepLoras.checked, refiner: refiner.value, window: parseFloat(windowIn.value) || 10 })); } catch (_) { /* ignore */ }
     go.disabled = true;
     let queued = 0;
     for (const r of chosen) {

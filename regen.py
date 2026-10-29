@@ -292,7 +292,89 @@ def apply_gen_size(task, gen):
     task["resolution"] = f"{int(gen['width']) // 32 * 32}x{int(gen['height']) // 32 * 32}"
     task["guidance_phases"] = 2 if int(gen.get("phases") or 1) > 1 else 1
     task["spatial_upsampling"] = "h3_vae*2" if gen.get("vaeX2") else ""
+    return fit_phases(task)
+
+
+# Open-H3 Regenerate 2K (WanGP's "H3 Regenerate 2K 2 Phases" preset): a phase-2-only LoRA on a fixed sigma schedule
+REGEN_LORA = "open_h3_regenerate_2k_lora.safetensors"
+REGEN_LORA_URL = "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/main/loras/" + REGEN_LORA
+REGEN_SIGMAS = "; 0.909375, 0.8571428571428571, 0.6666666666666666"
+REGEN_START, REGEN_STEPS = 0.909375, 3
+
+
+def lora_name(lora):
+    return re.split(r"[\\/]", str(lora).split("|", 1)[0])[-1].lower()
+
+
+def split_loras(task):
+    """(accelerators, others): the LoRAs before and after the '|' of loras_multipliers, each as [(lora, multiplier)]."""
+    loras = list(task.get("activated_loras") or [])
+    text = "\n".join(line.split("#", 1)[0] for line in str(task.get("loras_multipliers") or "").splitlines())
+    if "|" in text:
+        before, after = text.split("|", 1)
+        before, after = before.split(), after.replace("|", " ").split()
+    else:
+        before, after = [], text.split()
+    n = min(len(before), len(loras))
+    acc = [(loras[i], before[i]) for i in range(n)]
+    others = [(lora, after[i] if i < len(after) else "1") for i, lora in enumerate(loras[n:])]
+    return acc, others
+
+
+def join_loras(task, acc, others):
+    task["activated_loras"] = [lora for lora, _ in acc + others]
+    rest = " ".join(m for _, m in others)
+    task["loras_multipliers"] = (" ".join(m for _, m in acc) + "|" + rest) if acc else rest
     return task
+
+
+def has_regen_lora(settings):
+    acc, others = split_loras(settings or {})
+    return any(lora_name(lora) == REGEN_LORA for lora, _ in acc + others)
+
+
+def fit_phases(task):
+    """Keep WanGP's phase-dependent settings valid when the editor changes guidance_phases: custom_sigmas needs exactly
+    one ';' slot per phase, and a LoRA multiplier can't name more phases than there are (the phase-2-only Regenerate
+    LoRA is dropped on one phase)."""
+    phases = max(1, int(task.get("guidance_phases") or 1))
+    sigmas = str(task.get("custom_sigmas") or "")
+    if sigmas.strip():
+        slots = (sigmas.split(";") + [""] * phases)[:phases]
+        task["custom_sigmas"] = ";".join(slots) if any(slot.strip() for slot in slots) else ""
+    if task.get("activated_loras"):
+        acc, others = split_loras(task)
+
+        def fit(items):
+            out = []
+            for lora, mult in items:
+                parts = mult.split(";")
+                if len(parts) > phases:
+                    if lora_name(lora) == REGEN_LORA:
+                        continue
+                    mult = ";".join(parts[:phases])
+                out.append((lora, mult))
+            return out
+
+        fitted = fit(acc), fit(others)
+        if fitted != (acc, others):
+            join_loras(task, *fitted)
+    return task
+
+
+def set_refiner(task, refiner, settings=None):
+    """A final render's phase 2: "regenerate" (Open-H3 Regenerate 2K, as WanGP's preset) or "turbo" (the automatic
+    Turbo LoRA at the render's noise level and steps). Accelerators before '|' are replaced, other LoRAs stay."""
+    acc, others = split_loras(task)
+    acc = [(lora, m) for lora, m in acc if lora_name(lora) != REGEN_LORA]
+    others = [(lora, m) for lora, m in others if lora_name(lora) != REGEN_LORA]
+    if refiner == "regenerate":
+        source = [lora for lora in (settings or {}).get("activated_loras") or [] if lora_name(lora) == REGEN_LORA]
+        acc = [(source[0] if source else REGEN_LORA_URL, "0;1")]
+        task.update(custom_sigmas=REGEN_SIGMAS, switch_threshold=REGEN_START, num_inference_steps2=REGEN_STEPS, sample_solver="euler")
+    else:
+        task["custom_sigmas"] = ""
+    return join_loras(task, acc, others)
 
 
 def write_draft_audio(path, parts, total, fps, sample_rate=48000):
@@ -672,6 +754,7 @@ class RegenService:
                 except Exception:
                     pass
 
+        fit_phases(task)
         try:
             handle = self.host.submit(task, Callbacks(), plugin_data) if plugin_data else self.host.submit(task, Callbacks())
             self.handles[job_id] = handle
@@ -1139,15 +1222,23 @@ class RegenService:
         if width < 64 or height < 64:
             raise ValueError("Choose the final size")
         width, height = width // 32 * 32, height // 32 * 32
+        regen_ok = model_def.get("custom_sigmas", True) is not False
+        refiner = req.get("refiner") or ("regenerate" if has_regen_lora(settings) else "turbo")
+        refiner = "regenerate" if refiner == "regenerate" and regen_ok else "turbo"
         strength = float(req.get("strength") if req.get("strength") is not None else (meta.get("switch_threshold") or 0.6))
         steps2 = int(req.get("steps") or meta.get("num_inference_steps2") or 3)
+        if has_regen_lora(settings) and refiner == "turbo" and req.get("strength") is None:
+            strength = 0.9035   # the clip's start belongs to the Regenerate schedule; WanGP's Original 2 Phases start
+        if refiner == "regenerate":
+            strength, steps2 = REGEN_START, REGEN_STEPS
         prompt = strip_window_commands(req.get("prompt")) or stretch_prompt(
             [(p["prompt"], p["start"], p["end"], p["offset"] / fps) for p in parts if p["clipId"] is not None], fps)
         window = max(3.0, float(req.get("window") or 10.0))
         return {"settings": settings, "model_def": model_def, "fps": fps, "parts": parts, "frames": frames, "total": total, "pins": pins,
                 "window": window, "overlap": max(1.0, min(window / 3, float(req.get("overlap") or 2.0))),
                 "width": width, "height": height, "strength": max(0.05, min(1.0, strength)), "steps": max(1, steps2),
-                "vae_x2": bool(req.get("vaeX2")), "prompt": prompt, "refmods": refmods, "meta": meta}
+                "vae_x2": bool(req.get("vaeX2")), "prompt": prompt, "refmods": refmods, "meta": meta,
+                "refiner": refiner, "regen_ok": regen_ok}
 
     def render_prepare(self, req):
         plan = self._render_plan(req)
@@ -1161,7 +1252,8 @@ class RegenService:
                 "output": [plan["width"] * (2 if plan["vae_x2"] else 1), plan["height"] * (2 if plan["vae_x2"] else 1)],
                 "strength": plan["strength"], "steps": plan["steps"], "prompt": plan["prompt"], "refmods": plan["refmods"],
                 "model": self.host.model_name(plan["settings"].get("model_type")),
-                "loras": meta.get("activated_loras") or [], "h3": self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}}
+                "refiner": plan["refiner"], "regenAvailable": plan["regen_ok"],
+                "loras": [l for l in meta.get("activated_loras") or [] if lora_name(l) != REGEN_LORA], "h3": self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}}
 
     def render_submit(self, req):
         plan = self._render_plan(req)
@@ -1197,13 +1289,16 @@ class RegenService:
             # and references stay; WanGP's phase-2 Turbo is automatic, and plugin settings such as its multiplier stay.
             task["activated_loras"] = []
             task["loras_multipliers"] = ""
+        set_refiner(task, plan["refiner"], plan["settings"])
+        fit_phases(task)
         draft_audio = os.path.join(folder, "draft.wav")
         try:
             write_draft_audio(draft_audio, plan["parts"], plan["total"], plan["fps"])
         except Exception:
             draft_audio = None
         spec = {"mode": "render", "draft": draft, "draft_audio": draft_audio, "frames": plan["frames"], "size": [plan["width"], plan["height"]],
-                "window_seconds": plan["window"], "overlap_seconds": plan["overlap"], "pins": [], "holds": plan["pins"]}
+                "window_seconds": plan["window"], "overlap_seconds": plan["overlap"], "pins": [], "holds": plan["pins"],
+                "refiner": plan["refiner"]}
         if plan["pins"]:
             # the same stretch at the refine size, for encoding the held frames at full detail
             spec["pinvideo"] = os.path.join(folder, "pins.mp4")
