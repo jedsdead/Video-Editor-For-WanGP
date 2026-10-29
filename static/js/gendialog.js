@@ -105,12 +105,12 @@ export async function openGenerate(app, mode, where) {
   windowSel.value = String(prefs.window || 22);
   const opt = (v, l) => el("option", { value: v }, l);
   const leaveSel = el("select", {}, opt("motion", "Motion context: H3's native continuation (recommended)"), opt("masked", "Masked: held exactly inside the run"),
-    opt("both", "Masked + keyframes"), opt("pinned", "Pinned keyframes (re-rendered, trimmed)"));
+    opt("both", "Masked + keyframes"), opt("motion_masked", "Motion + masked: motion context, then held by the mask (new)"), opt("pinned", "Pinned keyframes (re-rendered, trimmed)"));
   leaveSel.value = prefs.leaveMode || (prefs.pinMode === "pinned" ? "pinned" : "motion");
   const arriveSel = el("select", {}, opt("both", "Masked + keyframes: steer toward it, arrive exactly (recommended)"), opt("masked", "Masked: held exactly inside the run"),
     opt("pinned", "Pinned keyframes (re-rendered, trimmed)"));
   arriveSel.value = prefs.arriveMode || "both";
-  const modeNote = el("div.dim.small", {}, "Motion context hands H3 the frames before the cut as history, the way Wan2GP continues a sliding window. Masked holds the neighbour's frames inside the run with a denoise mask (WanGP's Denoise Control Video), so they are never re-drawn and the join has one rendering. Pinned keyframes are re-drawn by the model and trimmed off.");
+  const modeNote = el("div.dim.small", {}, "Motion context hands H3 the frames before the cut as history, the way Wan2GP continues a sliding window. Masked holds the neighbour's frames inside the run with a denoise mask (WanGP's Denoise Control Video), so they are never re-drawn and the join has one rendering. Motion + masked does both: the earlier frames go in as history, the last ones are held. Pinned keyframes are re-drawn by the model and trimmed off.");
   const modeRow = (label, sel) => el("div", { style: { display: "flex", gap: "8px", alignItems: "center", margin: "6px 0 2px" } }, el("span.dim.small", { style: { width: "92px" } }, label), sel);
   const seconds = el("input", { type: "number", min: 0.5, max: fresh ? 120 : 19, step: 0.1, value: (+defaultSeconds).toFixed(2), style: { width: "76px" } });
   const lengthNote = el("div.dim.small");
@@ -185,7 +185,7 @@ export async function openGenerate(app, mode, where) {
     const grade = p.grade === "latent" ? el("span.grade.latent", {}, "latent grade") : el("span.grade.pixel", {}, "pixel grade");
     const extra = (p.grade === "latent" && p.shift ? ` · the cut moves ${(p.shift / fps).toFixed(2)}s ${p.place === "before" ? "earlier" : "later"} onto H3's grid` : "")
       + (p.reason ? ` · ${p.reason}` : "");
-    const how = { motion: "as motion context", masked: "held by the mask", both: "held by the mask + keyframes", pinned: "pinned keyframes" }[p.kind] || "";
+    const how = { motion: "as motion context", history: "as motion context (H3 history, before the run)", masked: "held by the mask", both: "held by the mask + keyframes", pinned: "pinned keyframes" }[p.kind] || "";
     const hand = p.handover ? ` · handover ${p.handover} frames inside the window` : "";
     return el("div.gpin", {}, el("b", {}, `${who}: `), `${p.frames} frames ${how}, `, grade, extra, hand);
   };

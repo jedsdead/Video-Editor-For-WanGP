@@ -167,7 +167,7 @@ export class RegenJobs {
     if (!clip) return;
     const { prev, next } = M.touchingNeighbours(clip);
     const on = job.request?.crossfade !== false;
-    const pinOf = (place) => (job.pins || []).find(p => p.place === place);
+    const pinOf = (place) => (job.pins || []).find(p => p.place === place && p.kind !== "history");
     const audioOf = (c) => M.partners(c).find(x => M.trackKind(x.trackId) === "audio");
     const join = (a, b, seconds, align) => {
       const pairs = [[a, b, "dissolve"]];
@@ -205,7 +205,7 @@ export class RegenJobs {
         return await api("api/gen/joinmatch", { method: "POST", body: { a: { mediaId: a.mediaId, end: Math.max(a.in, a.out) }, b: { mediaId: b.mediaId, start: Math.min(b.in, b.out) }, correct } });
       } catch (_) { return null; }
     };
-    const exact = (place) => { const p = (g.pins || []).find(x => x.place === place); return p && isHeld(p) && p.grade === "latent"; };
+    const exact = (place) => { const p = (g.pins || []).find(x => x.place === place && x.kind !== "history"); return p && isHeld(p) && p.grade === "latent"; };
     const open = exact("before") ? null : await ask(prev, clip, "b"), close = exact("after") ? null : await ask(clip, next, "a");
     const live = M.getClip(clipId);
     if (!live || live.mediaId !== clip.mediaId) return;

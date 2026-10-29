@@ -678,7 +678,7 @@ class RegenService:
             self._sha_cache[key] = sha256_file(path)
         return self._sha_cache[key]
 
-    def _pin(self, side, place, window, gen_fps, kind="pinned"):
+    def _pin(self, side, place, window, gen_fps, kind="pinned", size=None):
         """Plan one pin from {mediaId, cut (seconds in its file)}: which frames, at what grade, and how far the cut moves."""
         item = self._item(side["mediaId"])
         src_fps = float(item.get("fps") or gen_fps)
@@ -698,7 +698,8 @@ class RegenService:
         motion = kind == "motion" and place == "before"
         kind = "pinned" if kind == "motion" and not motion else kind
         fit = C.motion_window if motion else C.fit_window
-        frames = fit(int(window), int(available * gen_fps / src_fps))
+        room = int(available * gen_fps / src_fps)
+        frames = int(size) if size and int(size) <= room else fit(int(window), room)
         if frames < 5:
             raise ValueError(f"the {'previous' if place == 'before' else 'next'} clip has too few frames {'before' if place == 'before' else 'after'} the cut to pin")
         manifest, sha = None, None
@@ -727,6 +728,34 @@ class RegenService:
                 # frames of this pin that are part of the generated run (and trimmed off it)
                 "inRun": 1 if motion else frames}
 
+    def _motion_masked_pins(self, side, window, gen_fps):
+        """Leaving a clip with motion context and a masked hold together: the neighbour's tail split in two, the
+        earlier 17k frames as H3 history (clean, before the run: the motion carries on) and the last 22 frames held
+        inside the run by the denoise mask (the cut falls inside one rendering: seamless). Planned as one block, so
+        latent grade lines both parts up on the saved grid. Falls back to a plain masked hold when the clip is short."""
+        k = max(1, (int(window) - 5) // C.GRID)
+        held_frames = C.PIN_WINDOWS[0]
+        block = None
+        while k >= 1:
+            try:
+                block = self._pin(side, "before", held_frames + k * C.GRID, gen_fps, kind="both", size=held_frames + k * C.GRID)
+            except ValueError:
+                block = None
+            if block and block["frames"] == held_frames + k * C.GRID:
+                break
+            k -= 1
+            block = None
+        if block is None:
+            held = self._pin(side, "before", window, gen_fps, kind="both")
+            held["reason"] = "too little of the clip before the cut for motion context too; masked only" + (f"; {held['reason']}" if held["reason"] else "")
+            return [held]
+        history_frames = k * C.GRID
+        history = {**block, "kind": "history", "frames": history_frames, "inRun": 0,
+                   "reason": f"{history_frames} frames of motion context before the held frames"}
+        held = {**block, "frames": block["frames"] - history_frames, "start_frame": block["start_frame"] + history_frames,
+                "inRun": block["frames"] - history_frames}
+        return [history, held]
+
     def _compose(self, req):
         ok, reason = self.host.available()
         mode = req.get("mode")
@@ -751,19 +780,22 @@ class RegenService:
         masked_problem = masked_unavailable(settings, model_def)
         leave_mode = req.get("leaveMode") or ("pinned" if req.get("pinMode") == "pinned" else "motion")
         arrive_mode = req.get("arriveMode") or "both"
-        if leave_mode not in ("motion", "masked", "both", "pinned"):
+        if leave_mode not in ("motion", "masked", "both", "pinned", "motion_masked"):
             leave_mode = "motion"
         if arrive_mode not in ("masked", "both", "pinned"):
             arrive_mode = "both"
         fallback = {}
         for name in ("leave_mode", "arrive_mode"):
-            if locals()[name] in ("masked", "both") and masked_problem:
+            if locals()[name] in ("masked", "both", "motion_masked") and masked_problem:
                 fallback[name] = masked_problem
-        leave_mode = "pinned" if "leave_mode" in fallback else leave_mode
+        leave_mode = ("motion" if leave_mode == "motion_masked" else "pinned") if "leave_mode" in fallback else leave_mode
         arrive_mode = "pinned" if "arrive_mode" in fallback else arrive_mode
         if not fresh:
             if req.get("left") and mode in ("extend", "bridge", "fill", "loop", "replace"):
-                pins.append(self._pin(req["left"], "before", window, gen_fps, kind=leave_mode))
+                if leave_mode == "motion_masked":
+                    pins.extend(self._motion_masked_pins(req["left"], window, gen_fps))
+                else:
+                    pins.append(self._pin(req["left"], "before", window, gen_fps, kind=leave_mode))
             if req.get("right") and mode in ("prepend", "bridge", "fill", "loop", "replace"):
                 pins.append(self._pin(req["right"], "after", window, gen_fps, kind=arrive_mode))
             if not pins:
@@ -771,7 +803,8 @@ class RegenService:
             for p in pins:
                 why = fallback.get("leave_mode" if p["place"] == "before" else "arrive_mode")
                 if why:
-                    p["reason"] = f"pinned inside the run: masked isn't available ({why})" + (f"; {p['reason']}" if p["reason"] else "")
+                    p["reason"] = (f"{'motion context only' if p['kind'] == 'motion' else 'pinned inside the run'}: masked isn't available ({why})"
+                                   + (f"; {p['reason']}" if p["reason"] else ""))
                 elif p["kind"] in ("masked", "both") and p["grade"] == "latent":
                     # hand over one latent step inside the held window, where both files decode the same latents
                     # mid-file (H3's VAE draws a file's first two and last step slightly differently)
@@ -851,7 +884,7 @@ class RegenService:
         job = {"id": job_id, "status": "queued", "progress": 0.0, "message": "Queued in WanGP…", "created": time.time(),
                "project": req.get("project"), "kind": "compose", "mode": info["mode"], "seed": seed,
                "clipId": req.get("clipId"), "trackId": req.get("trackId"), "place": req.get("place"),
-               "left": {**(req.get("left") or {}), "cut": next((p["cut"] for p in info["pins"] if p["place"] == "before"), None)} if req.get("left") else None,
+               "left": {**(req.get("left") or {}), "cut": next((p["cut"] for p in info["pins"] if p["place"] == "before" and p["kind"] != "history"), None)} if req.get("left") else None,
                "right": {**(req.get("right") or {}), "cut": next((p["cut"] for p in info["pins"] if p["place"] == "after"), None)} if req.get("right") else None,
                "pins": [{**{k: p[k] for k in ("place", "grade", "frames", "shift", "reason", "kind")}, "handover": p.get("handover", 0)} for p in info["pins"]],
                "trimHead": lengths["trimHead"], "trimTail": lengths["trimTail"], "newSeconds": lengths["newSeconds"],

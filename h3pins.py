@@ -494,6 +494,7 @@ def _plan_pins(pipeline, spec, kwargs):
         frames = int(pin["frames"])
         kind = pin.get("kind") or "pinned"
         motion = kind == "motion" and pin["place"] == "before"
+        history_only = kind == "history" and pin["place"] == "before"   # motion context ahead of a held window
         held = kind in ("masked", "both")      # WanGP's Denoise Control Video mask holds this window
         rows = kind != "masked"                # keyframe rows too (pinned, both, motion)
         if motion:
@@ -504,6 +505,10 @@ def _plan_pins(pipeline, spec, kwargs):
             history_latents = (frames - 1) // GRID * LATENTS_PER_CLIP
             n = history_latents + 1
             used += 1
+        elif history_only:
+            if frames < GRID or frames % GRID:
+                raise ValueError(f"motion context ahead of a held window must be 17k frames long (got {frames})")
+            n = frames // GRID * LATENTS_PER_CLIP     # before the run on H3's timeline: none of the run's latents
         else:
             if not legal_pin_frames(frames):
                 raise ValueError(f"a pin must be 5 + 17n frames long (got {frames})")
@@ -540,7 +545,7 @@ def _plan_pins(pipeline, spec, kwargs):
                 plan.notes.append(f"{pin['place']} pin: pixel grade (the saved window is shorter than the pin)")
             else:
                 latents = per_stage
-                plan.notes.append(f"{pin['place']} pin: latent grade ({frames} frames{' of motion context' if motion else ''}"
+                plan.notes.append(f"{pin['place']} pin: latent grade ({frames} frames{' of motion context' if motion or history_only else ''}"
                                   f"{', from Latent Carry' if window.get('source') == 'latent_carry' else ''})")
         pixels = None
         if held:
@@ -560,6 +565,8 @@ def _plan_pins(pipeline, spec, kwargs):
                 if motion:
                     lat = torch.cat([pipeline._encode_video(video[:, :frames - 1], keep_all_latents=True),
                                      pipeline._encode_video(video[:, frames - 1:])], dim=2)
+                elif history_only:
+                    lat = pipeline._encode_video(video, keep_all_latents=True)
                 else:
                     lat = pipeline._encode_video(video, keep_all_latents=True)
             if lat.shape[2] != n:
@@ -567,10 +574,12 @@ def _plan_pins(pipeline, spec, kwargs):
             if motion:
                 plan.video.setdefault(si, []).append(("history", lat[:, :, :n - 1]))
                 plan.video[si].append(("before", lat[:, :, n - 1:]))
+            elif history_only:
+                plan.video.setdefault(si, []).append(("history", lat))
             else:
                 plan.video.setdefault(si, []).append((pin["place"], lat))
         if latents is None and not any("pixel" in note for note in plan.notes if note.startswith(pin["place"])):
-            plan.notes.append(f"{pin['place']} pin: pixel grade ({frames} frames{' of motion context' if motion else ''})")
+            plan.notes.append(f"{pin['place']} pin: pixel grade ({frames} frames{' of motion context' if motion or history_only else ''})")
         if held:
             plan.notes.append(f"{pin['place']} pin: held by the mask ({kind})")
         # audio: the pinned seconds of the clip's soundtrack, held at the same place
@@ -591,6 +600,8 @@ def _plan_pins(pipeline, spec, kwargs):
                 if count > boundary:
                     plan.audio.append(({"anchor": "history", "latent_frame_count": count - boundary}, audio_latents[..., :count - boundary]))
                 plan.audio.append(({"anchor": "first", "latent_frame_count": boundary}, audio_latents[..., count - boundary:]))
+            elif history_only:
+                plan.audio.append(({"anchor": "history", "latent_frame_count": count}, audio_latents))
             elif pin["place"] == "before":
                 plan.audio.append(({"anchor": "first", "latent_frame_count": count}, audio_latents))
             else:
