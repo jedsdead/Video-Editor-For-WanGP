@@ -400,6 +400,12 @@ export class Timeline {
       ctx.strokeStyle = selected ? COLORS.sel : "#9a7fd6";
       ctx.lineWidth = selected ? 2 : 1;
       ctx.strokeRect(x0 + (selected ? 1 : .5), top + (selected ? 1 : .5), w - (selected ? 2 : 1), h - (selected ? 2 : 1));
+      // its own keyframe line (opacity by default; right-click the line to choose another property)
+      if (row.kind === "video" && (selected || M.keysOf(cp, this.lane(cp, row)).length)) {
+        ctx.save(); ctx.beginPath(); ctx.rect(x0, top, w, h); ctx.clip();
+        this.paintKeys(ctx, cp, row, x0, x1, top, h, headH, selected);
+        ctx.restore();
+      }
       return;
     }
     ctx.strokeStyle = "#9a7fd6"; ctx.setLineDash([5, 3]); ctx.lineWidth = 1;
@@ -697,6 +703,16 @@ export class Timeline {
         }
       }
       const closed = M.closedCompoundOf(clip);
+      if (closed && row.kind === "video" && M.selectedCompound()?.id === closed.id && !row.track.locked && state.tool === "select") {
+        // a selected compound clip's own keyframe line, across the whole compound
+        const lane = this.lane(closed, row), geo = this.laneGeo(row, ry);
+        if (y >= geo.top - 5 && y <= geo.bottom + 5) {
+          const ki = M.keysOf(closed, lane).findIndex(k => Math.abs(this.x(closed.start + k.t) - x) <= 5 && Math.abs(this.laneY(lane, k.v, geo) - y) <= 5);
+          if (ki >= 0) return { area: "clip", row, t, clip: closed, zone: "key", keyIndex: ki, lane };
+          const ly = this.laneY(lane, M.prop(closed, lane, clamp(t - closed.start, 0, M.clipDur(closed))), geo);
+          if (Math.abs(ly - y) <= 4) return { area: "clip", row, t, clip: closed, zone: "line", keyIndex: -1, lane };
+        }
+      }
       if (closed) {
         // one clip: only its outer edges trim, and no keyframe lines or fade handles of its clips
         const members = M.compoundMembers(closed.id).filter(m => m.trackId === clip.trackId);
@@ -1048,7 +1064,7 @@ export class Timeline {
     if (state.readOnly) return;
     const [x, y] = this.local(e);
     const h = this.hit(x, y);
-    if (h.area === "clip" && !state.selection.has(h.clip.id)) M.select([h.clip.id]);
+    if (h.area === "clip" && !M.isCompound(h.clip) && !state.selection.has(h.clip.id)) M.select([h.clip.id]);
     if (h.area === "transition") { state.selTransition = h.transition.id; state.selection.clear(); bus.emit("selection"); }
     this.onContextAction && this.onContextAction(e.clientX, e.clientY, h);
   }

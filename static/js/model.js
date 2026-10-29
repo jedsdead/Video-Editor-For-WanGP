@@ -1317,17 +1317,21 @@ function withCompounds(ids) {
 export function selectedCompound() {
   const clips = selectedClips();
   if (!clips.length) return null;
-  const x = closedCompoundOf(clips[0]);
+  const x = clips.map(closedCompoundOf).find(Boolean);
   if (!x) return null;
   const members = compoundMembers(x.id);
-  return members.length === clips.length && members.every(m => state.selection.has(m.id)) ? x : null;
+  // all of its clips, and nothing else but their linked partners (audio left outside it when it was made)
+  const linked = new Set(members.flatMap(m => partners(m).map(p => p.id)));
+  return members.every(m => state.selection.has(m.id)) && clips.every(c => c.compound === x.id || (!c.compound && linked.has(c.id))) ? x : null;
 }
 // What the colour, effects and transform controls edit: a selected closed compound as one clip, else the clips.
 export const editTargets = () => { const x = selectedCompound(); return x ? [x] : selectedClips(); };
 
 // Why these clips can't become a compound clip (null when they can).
+const withLinked = (ids) => { const out = new Set(ids); for (const id of ids) { const c = P().clips.find(x => x.id === id); if (c) partners(c).forEach(p => out.add(p.id)); } return out; };
+
 export function compoundProblem(ids) {
-  const clips = [...withPartners(ids)].map(id => P().clips.find(c => c.id === id)).filter(Boolean);
+  const clips = [...withLinked(ids)].map(id => P().clips.find(c => c.id === id)).filter(Boolean);
   const video = clips.filter(c => trackKind(c.trackId) === "video");
   if (!video.length) return "select video clips";
   if (new Set(video.map(c => c.trackId)).size > 1) return "the video clips must be on one track";
@@ -1337,7 +1341,7 @@ export function compoundProblem(ids) {
 
 export function makeCompound(ids, name) {
   if (compoundProblem(ids)) return null;
-  const clips = [...withPartners(ids)].map(id => P().clips.find(c => c.id === id)).filter(Boolean);
+  const clips = [...withLinked(ids)].map(id => P().clips.find(c => c.id === id)).filter(Boolean);
   const video = clips.filter(c => trackKind(c.trackId) === "video").sort((a, b) => a.start - b.start);
   const id = uid("cp");
   const x = { id, kind: "compound", name: name || `Compound · ${video[0].name || "clip"}`, trackId: video[0].trackId, open: false,
