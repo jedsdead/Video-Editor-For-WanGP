@@ -589,23 +589,11 @@ export class Playback {
     }, 90);
   }
 
-  // lead: seconds until the clip comes on. A paused video takes ~0.1 s to start playing, which shows as its first
-  // frame held at the cut; so just before the cut the element is already started, crawling at 1/16 speed from its
-  // in-point (well under a frame), and only needs its speed raised when it comes on.
-  preload(entry, clip, lead = Infinity) {
+  // (A warm start, crawling the next clip at 1/16 speed just before its cut, was tried and made joins jump in
+  // playback; the next clip waits paused on its in-point.)
+  preload(entry, clip) {
     const el = entry.el;
     const target = clamp(this.elementTime(entry, clip, 0), 0, Math.max(0, (mediaOf(clip).duration || 0) - 0.03));
-    const warm = entry.kind === "video" && this.playing && this.rate > 0 && lead < 0.5 && !clip.reverse;
-    if (warm) {
-      if (el.paused) {
-        if (!el.seeking && Math.abs(el.currentTime - target) > 0.02) el.currentTime = target;
-        el.playbackRate = 0.0625;
-        el.play().catch(() => {});
-      } else if (el.currentTime - target > 0.03) {
-        el.currentTime = target;   // crept more than a frame: back to the in-point
-      }
-      return;
-    }
     if (!el.paused) el.pause();
     if (!el.seeking && Math.abs(el.currentTime - target) > 0.05) el.currentTime = target;
   }
@@ -620,7 +608,7 @@ export class Playback {
           const item = mediaOf(clip);
           if (!item || item.kind === "audio" || GENERATOR_KINDS.has(item.kind)) continue;
           const entry = this.entryFor(clip, item.kind === "image" ? "image" : "video");
-          if (entry && item.kind !== "image") this.preload(entry, clip, w0 - t);
+          if (entry && item.kind !== "image") this.preload(entry, clip);
           needed.add(clip.id);
         }
       }

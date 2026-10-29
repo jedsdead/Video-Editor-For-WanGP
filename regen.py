@@ -997,7 +997,10 @@ class RegenService:
                      "switch_threshold": plan["strength"], "num_inference_steps2": plan["steps"],
                      "spatial_upsampling": "h3_vae*2" if plan["vae_x2"] else "",
                      "sliding_window_size": plan["total"], "sliding_window_discard_last_frames": 0,
-                     "image_prompt_type": ""})
+                     "image_prompt_type": "",
+                     # step skipping (Spectrum, first-block cache) expects every step to run the model in one piece; the
+                     # render skips phase 1's throwaway pass and runs phase 2 in windows, and phase 2 is only a few steps
+                     "skip_steps_cache_type": ""})
         vpt = str(task.get("video_prompt_type") or "")
         task["video_prompt_type"] = "".join(ch for ch in vpt if ch not in "VGUFAN+*-1~")
         if not req.get("keepLoras"):

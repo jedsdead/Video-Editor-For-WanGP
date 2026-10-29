@@ -754,6 +754,14 @@ def _impl_transformer_forward(self, inner, video_x, audio_x, sigma_video, sigma_
     if not spec or not isinstance(payload, dict) or video_x.dim() != 5 or payload.get("target_video_order") is not None:
         return inner(self, video_x, audio_x, sigma_video, sigma_audio, context, payload, *args, **kwargs)
     import torch
+    if any(v is not None for v in list(args) + list(kwargs.values())):
+        # a step-skipping cache is on (Spectrum or first-block): it needs every step's full pass, so no skipping and
+        # no windows here (the editor turns it off for final renders; this is a safety net)
+        if not record.get("render_cache_noted"):
+            record["render_cache_noted"] = True
+            _log("final render: step skipping is on, so the render runs in one piece without windows")
+        video_v, audio_v = inner(self, video_x, audio_x, sigma_video, sigma_audio, context, payload, *args, **kwargs)
+        return (_hold_pins(record, video_x, video_v, sigma_video) if record.get("render_phase2") else video_v), audio_v
     if not record.get("render_phase2"):
         # phase 1's result is replaced by the drafts before phase 2: don't spend a pass of the model on it
         _count("render_phase1_skipped")
