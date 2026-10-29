@@ -1121,9 +1121,11 @@ export function setTake(clipId, index) {
 // takes puts the neighbours' cuts back where that take joins them.
 function restoreJoins(clip, joins) {
   if (!joins) return;
+  // a cut is in its file's time: only put it back while the neighbour shows that file (not its final render, say)
+  const same = (c, j) => c && c.trackId === clip.trackId && (!j.mediaId || c.mediaId === j.mediaId);
   const L = joins.left && getClip(joins.left.clipId), R = joins.right && getClip(joins.right.clipId);
-  if (L && L.trackId === clip.trackId && Math.abs(Math.max(L.in, L.out) - joins.left.cut) > 1e-4) setCutSource(L.id, "end", joins.left.cut);
-  if (R && R.trackId === clip.trackId && Math.abs(Math.min(R.in, R.out) - joins.right.cut) > 1e-4) setCutSource(R.id, "start", joins.right.cut);
+  if (L && same(L, joins.left) && Math.abs(Math.max(L.in, L.out) - joins.left.cut) > 1e-4) setCutSource(L.id, "end", joins.left.cut);
+  if (R && same(R, joins.right) && Math.abs(Math.min(R.in, R.out) - joins.right.cut) > 1e-4) setCutSource(R.id, "start", joins.right.cut);
   if (clip.gen) clip.gen.joins = joins;
 }
 

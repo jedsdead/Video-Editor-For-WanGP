@@ -292,6 +292,27 @@ def apply_gen_size(task, gen):
     return task
 
 
+def write_draft_audio(path, parts, total, fps, sample_rate=48000):
+    """The stretch's sound as the drafts carry it (each part's own file audio for its range, silence where a file has
+    none), padded to `total` frames: a 16-bit stereo WAV. Phase 2 of a final render is conditioned on it, and it becomes
+    the rendered file's soundtrack."""
+    import wave
+    import numpy as np
+    from .h3pins import read_audio
+    chunks = [read_audio(p["path"], float(p["start"]), p["frames"] / fps, sample_rate) for p in parts]
+    audio = np.concatenate(chunks, 0) if chunks else np.zeros((0, 2), np.float32)
+    want = int(round(total / fps * sample_rate))
+    if len(audio) < want:
+        audio = np.concatenate([audio, np.zeros((want - len(audio), 2), np.float32)], 0)
+    pcm = (np.clip(audio[:want], -1, 1) * 32767).astype("<i2")
+    with wave.open(path, "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(pcm.tobytes())
+    return path
+
+
 def write_draft(path, parts, total, fps, width, height):
     """A stretch's drafts as the timeline plays them (each clip's source range, back to back), at width x height and
     fps, held on its last frame to `total` frames: the picture the final render refines."""
@@ -661,12 +682,28 @@ class RegenService:
                 self._update(job_id, status="error", error=message, message=message)
                 return
             video = next((f for f in files if os.path.splitext(f)[1].lower() in (".mp4", ".mkv", ".mov", ".webm")), files[0])
+            draft_audio = (plugin_data or {}).get("video_editor", {}).get("draft_audio")
+            if draft_audio and os.path.isfile(draft_audio):
+                # a final render's own soundtrack is a placeholder (the refine only redraws the picture): give the file
+                # the drafts' sound, keeping its picture and WanGP's settings untouched
+                self._swap_audio(video, draft_audio)
             item = self.registry.register(video)
             self._update(job_id, status="done", progress=1.0, message="Done", media=self.registry.public(item))
         except Exception as error:
             self._update(job_id, status="error", error=str(error), message=str(error))
         finally:
             self.handles.pop(job_id, None)
+
+    @staticmethod
+    def _swap_audio(video, audio):
+        tmp = video + ".sound" + os.path.splitext(video)[1]
+        run = subprocess.run([M.ffmpeg_path(), "-v", "error", "-y", "-i", video, "-i", audio, "-map", "0:v", "-map", "1:a",
+                              "-map_metadata", "0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", tmp],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, **M.popen_kwargs())
+        if run.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
+            os.replace(tmp, video)
+        elif os.path.isfile(tmp):
+            os.remove(tmp)
 
     # ---- timeline generations: extend / prepend / bridge / fill / loop
     def _sha(self, item):
@@ -1068,7 +1105,12 @@ class RegenService:
             # and references stay; WanGP's phase-2 Turbo is automatic, and plugin settings such as its multiplier stay.
             task["activated_loras"] = []
             task["loras_multipliers"] = ""
-        spec = {"mode": "render", "draft": draft, "frames": plan["frames"], "size": [plan["width"], plan["height"]],
+        draft_audio = os.path.join(folder, "draft.wav")
+        try:
+            write_draft_audio(draft_audio, plan["parts"], plan["total"], plan["fps"])
+        except Exception:
+            draft_audio = None
+        spec = {"mode": "render", "draft": draft, "draft_audio": draft_audio, "frames": plan["frames"], "size": [plan["width"], plan["height"]],
                 "window_seconds": plan["window"], "overlap_seconds": plan["overlap"], "pins": [], "holds": plan["pins"]}
         if plan["pins"]:
             # the same stretch at the refine size, for encoding the held frames at full detail

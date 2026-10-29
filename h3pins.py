@@ -760,12 +760,15 @@ def _impl_transformer_forward(self, inner, video_x, audio_x, sigma_video, sigma_
         if not record.get("render_cache_noted"):
             record["render_cache_noted"] = True
             _log("final render: step skipping is on, so the render runs in one piece without windows")
+        if record.get("render_phase2"):
+            audio_x = _render_audio(record, audio_x)
         video_v, audio_v = inner(self, video_x, audio_x, sigma_video, sigma_audio, context, payload, *args, **kwargs)
         return (_hold_pins(record, video_x, video_v, sigma_video) if record.get("render_phase2") else video_v), audio_v
     if not record.get("render_phase2"):
         # phase 1's result is replaced by the drafts before phase 2: don't spend a pass of the model on it
         _count("render_phase1_skipped")
         return torch.zeros_like(video_x), torch.zeros_like(audio_x)
+    audio_x = _render_audio(record, audio_x)
     fps = float(record.get("fps") or 24)
     latent_t = int(video_x.shape[2])
     window_frames = float(spec.get("window_seconds") or 10.0) * fps
@@ -805,6 +808,45 @@ def _impl_transformer_forward(self, inner, video_x, audio_x, sigma_video, sigma_
     out /= weight_sum.clamp(min=1e-6).view(1, 1, -1, 1, 1)
     # the soundtrack is frozen in phase 2 (and phase 1's is thrown away): no audio prediction is needed
     return _hold_pins(record, video_x, out.to(video_x.dtype), sigma_video), torch.zeros_like(audio_x)
+
+
+def _render_audio(record, audio_x):
+    """Phase 2 keeps phase 1's soundtrack as fixed context; in a final render phase 1 is skipped, so hand it the
+    drafts' own sound instead (encoded once). Anything unexpected keeps WanGP's."""
+    spec = record.get("render") or {}
+    if "render_audio" not in record:
+        record["render_audio"] = None
+        path = spec.get("draft_audio")
+        if path and os.path.isfile(path):
+            try:
+                pm = _pipeline_module()
+                pipeline = record["pipeline"]
+                sr = int(getattr(pm, "AUDIO_SAMPLE_RATE", 32000))
+                fps = float(record.get("fps") or 24)
+                seconds = int(audio_x.shape[-1]) / float(getattr(pm, "AUDIO_LATENT_FPS", AUDIO_LATENT_FPS)) + 1.0
+                wave = read_audio(path, 0.0, seconds, sr)
+                record["render_audio"] = pipeline._encode_audio(pipeline._waveform(wave, sr))
+                _log("final render: phase 2 hears the drafts' soundtrack")
+            except Exception as error:
+                _log(f"final render: couldn't use the drafts' soundtrack ({error!r}); keeping WanGP's")
+    audio = record.get("render_audio")
+    if audio is None:
+        return audio_x
+    try:
+        import torch
+        audio = audio.to(device=audio_x.device, dtype=audio_x.dtype)
+        while audio.dim() < audio_x.dim():
+            audio = audio.unsqueeze(0)
+        if tuple(audio.shape[:-1]) != tuple(audio_x.shape[:-1]):
+            raise ValueError(f"{tuple(audio.shape)} vs {tuple(audio_x.shape)}")
+        n = int(audio_x.shape[-1])
+        if audio.shape[-1] < n:
+            audio = torch.cat([audio, audio[..., -1:].expand(*audio.shape[:-1], n - audio.shape[-1])], -1)
+        return audio[..., :n].contiguous()
+    except Exception as error:
+        record["render_audio"] = None
+        _log(f"final render: the drafts' soundtrack doesn't fit ({error!r}); keeping WanGP's")
+        return audio_x
 
 
 def _hold_pins(record, video_x, video_v, sigma_video):

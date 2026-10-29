@@ -105,8 +105,8 @@ export class RegenJobs {
     const length = outT - inT;
     const left = job.left && M.getClip(job.left.clipId), right = job.right && M.getClip(job.right.clipId);
     const joins = (job.left?.cut != null || job.right?.cut != null) ? {
-      left: job.left?.cut != null ? { clipId: job.left.clipId, cut: job.left.cut } : null,
-      right: job.right?.cut != null ? { clipId: job.right.clipId, cut: job.right.cut } : null } : null;
+      left: job.left?.cut != null ? { clipId: job.left.clipId, mediaId: job.left.mediaId, cut: job.left.cut } : null,
+      right: job.right?.cut != null ? { clipId: job.right.clipId, mediaId: job.right.mediaId, cut: job.right.cut } : null } : null;
     const lineage = { mode: job.mode, parent: job.left?.clipId || null, child: job.right?.clipId || null, jobId: job.id, seed: job.seed, pins: job.pins, joins };
     let target = null, placedNote = "", placedNew = false;
     const targetId = job.request?.targetId;
