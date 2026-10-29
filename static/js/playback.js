@@ -6,7 +6,7 @@
 // render.py applies the same EQ/compressor (via ffmpeg) and the same fader, automation and pan maths on export.
 import { state, P, bus, levelAt, clipsOn, videoTracks, audioTracks, clipDur, srcTime, speedAt, fadeFactor, isRamped, transitionInfo,
          mediaOf, timelineEnd, getClip, audioTransitionGains, fps, clipWindow, prop, gradeAt, hasGradeKeys,
-         trackGainDb, effectParamsAt, GENERATOR_KINDS, compoundOf } from "./model.js";
+         trackGainDb, effectParamsAt, GENERATOR_KINDS, compoundOf, compoundAudioFades, trackKind } from "./model.js";
 import { gradeUniforms } from "./grade.js";
 import { isAudioTransition } from "./transitions.js";
 import { drawTitle } from "./titles.js";
@@ -483,6 +483,15 @@ export class Playback {
 
   // A compound clip's own grade, effects, opacity, fades and transform, applied on top of its clip's (null when it
   // has none of them).
+  // The compound's placement on the frame (for the viewer's handles).
+  compoundLayer(x, t) {
+    const p = P();
+    const kt = clamp(t - x.start, 0, clipDur(x));
+    const geo = this.geometry(x, kt, p.settings.width, p.settings.height);
+    return { type: "clip", clip: x, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, full: geo.full,
+             alpha: clamp(prop(x, "opacity", kt), 0, 1) };
+  }
+
   compoundPost(clip, t) {
     const x = compoundOf(clip);
     if (!x) return null;
@@ -546,6 +555,12 @@ export class Playback {
       g *= tr.a === clip.id ? ga : gb;
     }
     if (speedAt(clip, clamp(tau, 0, d)) < 0.1) g *= clamp(speedAt(clip, clamp(tau, 0, d)) / 0.1, 0, 1);
+    // a compound clip's own volume and audio fades, on top of the clip's
+    const x = compoundOf(clip);
+    if (x && trackKind(clip.trackId) === "audio") {
+      const dx = clipDur(x), kx = clamp(t - x.start, 0, dx);
+      g *= dbToGain(prop(x, "volume", kx)) * fadeFactor(compoundAudioFades(x), kx, dx);
+    }
     return g;
   }
 

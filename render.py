@@ -20,6 +20,8 @@ from . import fx as FX
 CODECS = {
     "h264": {"label": "H.264 (MP4)", "ext": ".mp4", "video": ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"], "crf": True, "audio": ["-c:a", "aac", "-b:a", "192k"]},
     "h265": {"label": "H.265 (MP4)", "ext": ".mp4", "video": ["-c:v", "libx265", "-preset", "medium", "-pix_fmt", "yuv420p", "-tag:v", "hvc1"], "crf": True, "audio": ["-c:a", "aac", "-b:a", "192k"]},
+    "av1": {"label": "AV1 (SVT-AV1, MP4, smallest)", "ext": ".mp4", "video": ["-c:v", "libsvtav1", "-preset", "8", "-pix_fmt", "yuv420p"],
+            "quality": lambda q: ["-crf", str(max(0, min(63, round(q * 1.5))))], "audio": ["-c:a", "aac", "-b:a", "192k"], "sw": "libsvtav1"},
     "prores": {"label": "ProRes 422 HQ (MOV)", "ext": ".mov", "video": ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"], "audio": ["-c:a", "pcm_s16le"]},
     "wav": {"label": "Audio only: WAV", "ext": ".wav", "kind": "audio", "audio": ["-c:a", "pcm_s16le"]},
     "mp3": {"label": "Audio only: MP3 320 kbps", "ext": ".mp3", "kind": "audio", "audio": ["-c:a", "libmp3lame", "-b:a", "320k"]},
@@ -38,6 +40,8 @@ HW_CODECS = {
     "h264_qsv": ("H.264 Quick Sync (Intel, fast)", "qsv"), "hevc_qsv": ("H.265 Quick Sync (Intel, fast)", "qsv"),
     "h264_vaapi": ("H.264 VAAPI (AMD / Intel, Linux, fast)", "vaapi"), "hevc_vaapi": ("H.265 VAAPI (AMD / Intel, Linux, fast)", "vaapi"),
     "h264_videotoolbox": ("H.264 VideoToolbox (Apple, fast)", "videotoolbox"), "hevc_videotoolbox": ("H.265 VideoToolbox (Apple, fast)", "videotoolbox"),
+    "av1_nvenc": ("AV1 NVENC (NVIDIA RTX 40/50, fast)", "nvenc"), "av1_amf": ("AV1 AMF (AMD RX 7000/9000, fast)", "amf"),
+    "av1_qsv": ("AV1 Quick Sync (Intel Arc / Core Ultra, fast)", "qsv"), "av1_vaapi": ("AV1 VAAPI (AMD / Intel, Linux, fast)", "vaapi"),
 }
 
 
@@ -58,7 +62,10 @@ def hw_codec(encoder, family):
         quality = lambda q: ["-rc", "vbr", "-cq", str(q), "-b:v", "0"]
     elif family == "amf":
         video += ["-quality", "quality", "-pix_fmt", "nv12"]
-        quality = lambda q: ["-rc", "cqp", "-qp_i", str(q), "-qp_p", str(q), *(["-qp_b", str(q)] if encoder.startswith("h264") else [])]
+        if encoder.startswith("av1"):
+            quality = lambda q: ["-rc", "cqp", "-qp_i", str(min(255, q * 5)), "-qp_p", str(min(255, q * 5))]   # AV1 AMF: 0-255
+        else:
+            quality = lambda q: ["-rc", "cqp", "-qp_i", str(q), "-qp_p", str(q), *(["-qp_b", str(q)] if encoder.startswith("h264") else [])]
     elif family == "qsv":
         video += ["-preset", "medium", "-pix_fmt", "nv12"]
         quality = lambda q: ["-global_quality", str(max(1, q))]
@@ -89,6 +96,8 @@ def detect_hw_codecs():
         except Exception:
             listing = ""
         found = {}
+        # SVT-AV1 is a software encoder, but not every ffmpeg build has it
+        sw_missing = [key for key, c in CODECS.items() if c.get("sw") and f" {c['sw']} " not in listing]
         for encoder, (_, family) in HW_CODECS.items():
             if f" {encoder} " not in listing or (family == "vaapi" and vaapi_device() is None):
                 continue
@@ -102,7 +111,8 @@ def detect_hw_codecs():
                 pass
         # keep the menu order: software first, then the working hardware encoders, then ProRes and the rest
         items = list(CODECS.items())
-        CODECS = dict(items[:2] + list(found.items()) + items[2:])
+        items = [kv for kv in items if kv[0] not in sw_missing]
+        CODECS = dict(items[:3] + list(found.items()) + items[3:])
         _HW_STATE["done"] = True
 
 
@@ -1133,6 +1143,7 @@ class ExportJob:
         soloed = any(t.get("solo") for t in tl.audio_tracks)
         audio_transitions = [tr for tr in tl.transitions if tr["type"] in T.AUDIO_TRANSITIONS]
         clips = [c for c in tl.clips.values() if tl.tracks.get(c["trackId"], {}).get("kind") == "audio"]
+        compounds_by_id = {x["id"]: x for x in (self.project.get("compounds") or []) if x.get("id")}
         for n, track in enumerate(tl.audio_tracks):
             self.check()
             if track.get("mute") or (soloed and not track.get("solo")):
@@ -1175,6 +1186,14 @@ class ExportJob:
                 if keyed_speed:
                     # Fade out as the clip approaches a freeze instead of leaving a held (DC) sample.
                     gain = gain * np.clip(np.asarray(T.speed_at(clip, inside)) / 0.1, 0, 1)
+                cx = compounds_by_id.get(clip.get("compound"))
+                if cx is not None:
+                    # a compound clip's own volume and audio fades, on top of the clip's
+                    dx = max(1e-6, float(cx.get("out") or 0) - float(cx.get("in") or 0))
+                    kx = np.clip(float(clip["start"]) + taus - float(cx.get("start") or 0), 0, dx)
+                    fades = {"fadeIn": cx.get("aFadeIn") or 0, "fadeOut": cx.get("aFadeOut") or 0,
+                             "fadeInCurve": cx.get("aFadeInCurve"), "fadeOutCurve": cx.get("aFadeOutCurve")}
+                    gain = gain * T.db_to_gain(np.asarray(T.prop(cx, "volume", kx, 0.0), dtype=np.float64)) * T.fade_factor(fades, kx, dx)
                 for tr in audio_transitions:
                     times = s + np.arange(count) / SAMPLE_RATE
                     lo, hi = tr["lo"], tr["hi"]

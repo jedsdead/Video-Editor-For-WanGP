@@ -104,9 +104,13 @@ export async function openGenerate(app, mode, where) {
   const windowSel = el("select", {}, [22, 39, 56].map(f => el("option", { value: f }, `${f} frames`)));
   windowSel.value = String(prefs.window || 22);
   const opt = (v, l) => el("option", { value: v }, l);
-  const leaveSel = el("select", {}, opt("motion", "Motion context: H3's native continuation (recommended)"), opt("masked", "Masked: held exactly inside the run"),
-    opt("both", "Masked + keyframes"), opt("motion_masked", "Motion + masked: motion context, then held by the mask (new)"), opt("pinned", "Pinned keyframes (re-rendered, trimmed)"));
-  leaveSel.value = prefs.leaveMode || (prefs.pinMode === "pinned" ? "pinned" : "motion");
+  const leaveSel = el("select", {}, opt("motion_masked", "Motion + masked: motion context, then held by the mask (recommended)"),
+    opt("both", "Masked + keyframes"), opt("masked", "Masked: held exactly inside the run"), opt("motion", "Motion context: H3's native continuation"),
+    opt("pinned", "Pinned keyframes (re-rendered, trimmed)"));
+  // Motion + masked became the recommended way to leave a clip: a choice saved while plain motion context was the
+  // default moves to it once (a deliberate choice made since is kept)
+  if (!prefs.leaveModeV2) { if (!prefs.leaveMode || prefs.leaveMode === "motion") prefs.leaveMode = "motion_masked"; }
+  leaveSel.value = prefs.leaveMode || (prefs.pinMode === "pinned" ? "pinned" : "motion_masked");
   const arriveSel = el("select", {}, opt("both", "Masked + keyframes: steer toward it, arrive exactly (recommended)"), opt("masked", "Masked: held exactly inside the run"),
     opt("pinned", "Pinned keyframes (re-rendered, trimmed)"));
   arriveSel.value = prefs.arriveMode || "both";
@@ -230,7 +234,7 @@ export async function openGenerate(app, mode, where) {
       if (!Number.isFinite(seed) || seed < 0) { error.textContent = "Enter a seed of 0 or more"; return; }
     }
     const req = { ...request(), seed, prompt: promptBox.value };
-    savePrefs({ size: sizeSel.value, window: req.window, leaveMode: req.leaveMode, arriveMode: req.arriveMode, crossfade: req.crossfade, joinMatch: req.joinMatch, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
+    savePrefs({ size: sizeSel.value, window: req.window, leaveMode: req.leaveMode, leaveModeV2: true, arriveMode: req.arriveMode, crossfade: req.crossfade, joinMatch: req.joinMatch, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
       freshSeconds: fresh && !s.target ? req.newSeconds : prefs.freshSeconds, keepCut: keepCut.checked, carryAudio: carryAudio.checked,
       useCurrent: req.useCurrent, seed: seedSel.value === "custom" ? "custom" : "new", customSeed: seedInput.value });
     go.disabled = true;

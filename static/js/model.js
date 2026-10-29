@@ -1265,6 +1265,8 @@ export function transitionHandles(tr) {
 // to edit them. The compound's record (P().compounds) is shaped like a clip and holds its outer grade, effects,
 // opacity, transform and fades, which apply on top of the clips' own. Its start and length follow its clips.
 
+// The fades a compound clip puts on its sound (its own fade fields are the picture's)
+export const compoundAudioFades = (x) => ({ fadeIn: x.aFadeIn || 0, fadeOut: x.aFadeOut || 0, fadeInCurve: x.aFadeInCurve, fadeOutCurve: x.aFadeOutCurve });
 export const compoundOf = (clip) => clip && clip.compound ? (P().compounds || []).find(x => x.id === clip.compound) || null : null;
 export const compoundMembers = (cid) => P().clips.filter(c => c.compound === cid);
 export const isCompound = (c) => !!c && c.kind === "compound";
@@ -1335,6 +1337,21 @@ export function syncCompounds() {
     if (!video.length) { for (const c of p.clips) if (c.compound === x.id) delete c.compound; return false; }
     const start = Math.min(...video.map(c => c.start)), end = Math.max(...video.map(c => clipEnd(c)));
     const fps = p.settings.fps || 24;
+    // keyframes follow the footage: trimming the compound's start (or a ripple that slides its footage) moves them
+    // with the picture, as on a clip, while moving the whole compound leaves them where they are in it
+    const first = video.reduce((a, c) => (c.start < a.start ? c : a), video[0]);
+    const plainRef = !first.reverse && !hasSpeedKeys(first);
+    const origin = plainRef ? first.start - first.in / (first.speed || 1) : null;   // where its source's zero sits
+    if (x.ref && x.ref.clipId === first.id && origin !== null && Number.isFinite(x.start) && x.keys) {
+      const shift = (x.start + (origin - x.ref.origin)) - start;
+      if (Math.abs(shift) > 1e-6) {
+        for (const name of Object.keys(x.keys)) {
+          const ks = x.keys[name];
+          if (Array.isArray(ks)) for (const k of ks) if (Number.isFinite(k.t)) k.t = Math.round((k.t + shift) * 1e6) / 1e6;
+        }
+      }
+    }
+    x.ref = origin !== null ? { clipId: first.id, origin } : null;
     x.kind = "compound";
     x.trackId = video[0].trackId;
     x.start = start; x.in = 0; x.out = Math.max(1 / fps, end - start); x.speed = 1;

@@ -778,10 +778,10 @@ class RegenService:
         # how each side joins: motion context (leaving only), masked (held inside the run by a denoise mask),
         # both (masked + keyframe rows) or pinned (keyframe rows only, re-rendered and trimmed)
         masked_problem = masked_unavailable(settings, model_def)
-        leave_mode = req.get("leaveMode") or ("pinned" if req.get("pinMode") == "pinned" else "motion")
+        leave_mode = req.get("leaveMode") or ("pinned" if req.get("pinMode") == "pinned" else "motion_masked")
         arrive_mode = req.get("arriveMode") or "both"
         if leave_mode not in ("motion", "masked", "both", "pinned", "motion_masked"):
-            leave_mode = "motion"
+            leave_mode = "motion_masked"
         if arrive_mode not in ("masked", "both", "pinned"):
             arrive_mode = "both"
         fallback = {}

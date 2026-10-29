@@ -110,6 +110,17 @@ export class Inspector {
         el("button.small", { onclick: () => { M.edit("Open compound clip", () => M.setCompoundOpen(cp.id, true)); M.select([members[0].id]); } }, "Open"),
         el("button.small", { onclick: () => { M.edit("Break apart compound clip", () => M.breakCompound(cp.id)); M.select(members.map(c => c.id)); } }, "Break apart")));
     this.renderClips([live()], { compound: true });
+    if (members.some(c => M.trackKind(c.trackId) === "audio")) {
+      const x = live();
+      this.defaults = { ...(this.defaults || {}), Volume: 0 };
+      const fade = (label, field, curveField) => [
+        this.slider(label, { get: () => live()[field] || 0, set: (v) => { const l = live(); l[field] = Math.min(v, M.clipDur(l)); }, min: 0, max: 10, step: 0.01, format: (v) => v.toFixed(2), editLabel: `Compound audio ${label.toLowerCase()}` }),
+        this.curveSelect(`${label} shape `, [x], curveField)];
+      this.section("Audio",
+        this.keySlider("Volume", [x], "volume", { toUi: (v) => Math.round(v * 10) / 10, fromUi: (v) => v, min: -60, max: 12, step: 0.1, format: (v) => v.toFixed(1) }),
+        ...fade("Fade in", "aFadeIn", "aFadeInCurve"), ...fade("Fade out", "aFadeOut", "aFadeOutCurve"),
+        el("div.dim", { style: { fontSize: "11px" } }, "Applies on top of the volume and fades of the audio clips inside."));
+    }
   }
 
   renderClips(clips, { compound = false } = {}) {

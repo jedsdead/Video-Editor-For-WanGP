@@ -26,8 +26,14 @@ export class TransformOverlay {
   // geometry of the selected clip's layer in overlay (CSS pixel) coordinates
   target() {
     if (this.app.playback.playing) return null;
-    if (M.selectedCompound()) return null;   // a compound clip's transform is set in the inspector
     const layers = [];
+    const cp = M.selectedCompound();
+    if (cp) {
+      // a closed compound clip: handles for its own transform, while one of its clips is on screen
+      const shown = (this.app.playback.lastLayers || []).some(e => (e.type === "clip" && e.clip.compound === cp.id)
+        || (e.type === "transition" && [e.a, e.b].some(l => l && l.clip.compound === cp.id)));
+      return shown ? this.toCss(this.app.playback.compoundLayer(cp, state.playhead)) : null;
+    }
     for (const e of this.app.playback.lastLayers || []) {
       if (e.type === "clip") layers.push(e);
       else if (e.type === "transition") { if (e.a) layers.push(e.a); if (e.b) layers.push(e.b); }
