@@ -692,7 +692,10 @@ export class Inspector {
     holder.append(el("h4", {}, "Generation"));
     const prompt = meta.prompt || meta.text_prompt || "";
     if (prompt) holder.append(el("div.prompt-box", {}, prompt));
-    const rows = [["Model", meta.model_type || meta.model_filename || meta.type], ["Seed", meta.seed], ["Resolution", meta.resolution], ["Frames", meta.video_length],
+    // WanGP's setting is the generation size; with the H3 VAE ×2 (or other upsampling) the file is bigger, as the gallery's "real" size
+    const real = item.width && item.height ? `${item.width}x${item.height}` : "";
+    const resolution = meta.resolution && real && String(meta.resolution).replace(/\s/g, "") !== real ? `${meta.resolution} (real: ${real})` : meta.resolution;
+    const rows = [["Model", meta.model_type || meta.model_filename || meta.type], ["Seed", meta.seed], ["Resolution", resolution], ["Frames", meta.video_length],
                   ["Steps", meta.num_inference_steps], ["Guidance", meta.guidance_scale], ["Negative", meta.negative_prompt]].filter(([, v]) => v !== undefined && v !== null && v !== "");
     if (rows.length) holder.append(el("div.kv", { style: { marginTop: "6px" } }, rows.flatMap(([k, v]) => [el("span", {}, k), el("span", {}, String(v))])));
     holder.append(el("div.btnrow", {}, prompt ? el("button.small", { onclick: () => navigator.clipboard?.writeText(prompt).then(() => toast("Prompt copied")) }, "Copy prompt") : null,
