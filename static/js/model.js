@@ -709,6 +709,17 @@ function afterLengthChange(changed) {
   }
 }
 
+// Point a clip (and its linked clips showing the same file from the same place) at another file and range: a live
+// generation's clip growing window by window, then becoming the finished file.
+export function replaceMedia(clipId, mediaId, inT, outT) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  const group = [clip, ...partners(clip).filter(p => p.mediaId === clip.mediaId && Math.abs(p.start - clip.start) < 1e-3)];
+  const oldEnd = clipEnd(clip);
+  for (const c of group) { c.mediaId = mediaId; c.in = inT; c.out = outT; }
+  afterLengthChange([{ clip, oldEnd }]);
+}
+
 // Constant speed (removes any speed keyframes).
 export function setSpeed(ids, speed) {
   const set = withPartners(ids);

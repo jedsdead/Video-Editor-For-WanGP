@@ -1129,6 +1129,33 @@ def _wrap_save_video(original):
     return save_video
 
 
+_PARTIALS = {}           # editor job id -> copies of the files WanGP saved after each sliding window, in order
+
+
+def _keep_partial(job, path):
+    """Copy a file WanGP has just saved (after a window) into the editor job's folder: the timeline shows the run as
+    it goes, and keeps the finished windows if it is stopped. WanGP may delete or overwrite its interim files."""
+    spec = job.get("spec") or {}
+    folder, job_id = spec.get("partialDir"), spec.get("jobId")
+    if not folder or not job_id or not os.path.isfile(path):
+        return
+    try:
+        import shutil
+        with _LOCK:
+            n = len(_PARTIALS.setdefault(job_id, [])) + 1
+        target = os.path.join(folder, f"window_{n:02d}{os.path.splitext(path)[1] or '.mp4'}")
+        shutil.copy2(path, target)
+        with _LOCK:
+            _PARTIALS[job_id].append(target)
+    except Exception as error:
+        _log(f"could not keep the window's file: {error!r}")
+
+
+def partials(job_id):
+    with _LOCK:
+        return list(_PARTIALS.get(job_id, []))
+
+
 def _wrap_record_file_metadata(original):
     @functools.wraps(original)
     def record_file_metadata(*args, **kwargs):
@@ -1143,6 +1170,7 @@ def _wrap_record_file_metadata(original):
                     if isinstance(path, str) and path:
                         job["saves"].append((os.path.abspath(path), job["final_fp"], values.get("configs") or {}))
                         _count("recorded")
+                        _keep_partial(job, path)
             except Exception as error:
                 _log(f"latents not saved: {error!r}")
         return result

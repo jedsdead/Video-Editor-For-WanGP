@@ -24,9 +24,16 @@ export class RegenJobs {
     this.app = app;
     this.jobs = [];
     this.applying = new Set();
+    this.liveSeen = new Map();
     this.timer = null;
     bus.on("project", () => this.poll());
     this.poll();
+  }
+
+  markLive(job) {
+    const m = P().media[job.liveMedia.id];
+    if (m) m.liveJob = job.id;
+    else job.liveMedia.liveJob = job.id;
   }
 
   forClip(clipId) { return this.jobs.filter(j => (j.clipId === clipId || (j.parts || []).some(p => p.clipId === clipId)) && ["queued", "running", "error"].includes(j.status)); }
@@ -41,7 +48,20 @@ export class RegenJobs {
     catch (_) { this.schedule(5000); return; }
     const before = JSON.stringify(this.jobs.map(j => [j.id, j.status, Math.round((j.progress || 0) * 100)]));
     this.jobs = data.jobs || [];
-    for (const job of this.jobs) if (job.status === "done" && job.media && !this.applying.has(job.id)) this.apply(job);
+    for (const job of this.jobs) {
+      if (job.status === "done" && job.media && !this.applying.has(job.id)) this.apply(job);
+      else if (job.kind === "compose" && job.liveMedia && !this.applying.has(job.id)) {
+        if (job.status === "running" && job.liveWindows > (this.liveSeen.get(job.id) || 0)) {
+          this.liveSeen.set(job.id, job.liveWindows);
+          this.markLive(job);
+          this.applyCompose(job, { live: true });
+        } else if (job.status === "cancelled" || job.status === "error") {
+          // stopped part-way: keep the windows it finished
+          this.markLive(job);
+          this.applyCompose({ ...job, media: job.liveMedia }).then(() => toast(`Stopped after ${job.liveWindows} window${job.liveWindows > 1 ? "s" : ""}: kept what was finished`, "warn"));
+        }
+      }
+    }
     if (JSON.stringify(this.jobs.map(j => [j.id, j.status, Math.round((j.progress || 0) * 100)])) !== before) bus.emit("regen-jobs");
     this.schedule(this.pending().length ? 1500 : 6000);
   }
@@ -92,11 +112,14 @@ export class RegenJobs {
 
   // Timeline generations: trim off the pinned frames, move the neighbours' cuts to where the take joins them, then
   // place the take (a new clip, or a new take on the clip already generated for that slot) and rate its joins.
-  async applyCompose(job) {
-    this.applying.add(job.id);
+  // live: the windows a sliding-window run has finished so far (job.liveMedia), shown as one growing clip. The
+  // finished file (or, if the run was stopped, the last windows it finished) then takes the clip over.
+  async applyCompose(job, { live = false } = {}) {
+    if (!live) this.applying.add(job.id);
     const app = this.app;
-    app.bin.register([job.media], null);
-    const item = P().media[job.media.id] || job.media;
+    const media = live ? job.liveMedia : job.media;
+    app.bin.register([media], null);
+    const item = P().media[media.id] || media;
     const dur = item.duration || 0;
     // on the file's own frame grid: a duration rounded to 0.1 ms would otherwise put every later cut a hair off it
     const ff = item.fps || M.fps(), onGrid = (x) => Math.round(x * ff) / ff;
@@ -110,7 +133,22 @@ export class RegenJobs {
     const lineage = { mode: job.mode, parent: job.left?.clipId || null, child: job.right?.clipId || null, jobId: job.id, seed: job.seed, pins: job.pins, joins };
     let target = null, placedNote = "", placedNew = false;
     const targetId = job.request?.targetId;
-    if ((job.left && !left) || (job.right && !right) || (job.mode === "replace" && !M.getClip(job.request?.replaceId)) || (targetId && !M.getClip(targetId))) {
+    const liveClip = P().clips.find(c => c.live === job.id && M.trackKind(c.trackId) === "video");
+    if (liveClip) {
+      M.edit(live ? "Live generation" : `Add ${job.mode}`, () => {
+        M.replaceMedia(liveClip.id, item.id, inT, outT);
+        if (!live) for (const c of P().clips) if (c.live === job.id) {
+          delete c.live;
+          if (job.mode === "new") c.name = job.status === "done" ? item.name : `New shot (${job.liveWindows} window${job.liveWindows > 1 ? "s" : ""}, stopped)`;
+        }
+      }, { coalesceKey: live ? `live-${job.id}` : null });
+      if (live) return;
+      target = M.getClip(liveClip.id);
+      placedNew = true;
+      this.dropLiveMedia(job.id, item.id);
+    } else if (live && (job.mode === "replace" || (job.mode === "new" ? !!targetId : !!M.generatedIn(job.mode, lineage.parent, lineage.child)))) {
+      return;   // a new take on an existing clip: shown when it's done
+    } else if ((job.left && !left) || (job.right && !right) || (job.mode === "replace" && !M.getClip(job.request?.replaceId)) || (targetId && !M.getClip(targetId))) {
       toast(`A ${job.mode} generation finished, but the clips it joins have changed; it was added to the Media panel`, "warn");
     } else {
       M.edit(`Add ${job.mode}`, () => {
@@ -148,9 +186,13 @@ export class RegenJobs {
         } else at = M.clipEnd(L);
         const clips = M.insertMedia(item, job.trackId, at, inT, outT, { room, close: job.mode === "fill" });
         placedNew = true;
-        for (const c of clips) { c.gen = lineage; c.name = job.mode === "new" ? item.name : `${(L || R)?.name?.split(" · ")[0] || item.name} · ${job.mode}`; }
+        for (const c of clips) {
+          c.gen = lineage; c.name = job.mode === "new" ? (live ? "New shot (generating…)" : item.name) : `${(L || R)?.name?.split(" · ")[0] || item.name} · ${job.mode}`;
+          if (live) c.live = job.id;
+        }
         target = clips[0];
       });
+      if (live) { toast(`${job.mode[0].toUpperCase() + job.mode.slice(1)}: window ${job.liveWindows} is on the timeline; the rest follow as WanGP finishes them`); return; }
       if (target && placedNew && job.request?.splitWindows) {
         // one clip per sliding window (the first keeps the joins and lineage)
         await this.splitWindows(target.id, { quiet: true });
@@ -169,6 +211,13 @@ export class RegenJobs {
     try { await api(`api/regen/jobs/${job.id}/dismiss`, { method: "POST" }); } catch (_) { /* kept for next time */ }
     this.jobs = this.jobs.filter(j => j.id !== job.id);
     bus.emit("regen-jobs");
+  }
+
+  // The interim files a live run showed, once nothing uses them any more.
+  dropLiveMedia(jobId, keepId) {
+    const used = new Set(P().clips.map(c => c.mediaId));
+    const stale = Object.values(P().media).filter(m => m.liveJob === jobId && m.id !== keepId && !used.has(m.id));
+    if (stale.length) { for (const m of stale) delete P().media[m.id]; bus.emit("media"); }
   }
 
   // Split a WanGP clip where its sliding windows meet (from the add-on's saved windows, else its settings).

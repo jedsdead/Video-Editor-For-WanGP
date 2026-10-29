@@ -642,6 +642,7 @@ class RegenService:
                     service._update(job_id, message=text)
 
             def on_progress(self, update):
+                service._collect_partials(job_id)
                 try:
                     p = float(getattr(update, "progress", 0) or 0) / 100.0
                 except (TypeError, ValueError):
@@ -672,6 +673,7 @@ class RegenService:
             handle = self.host.submit(task, Callbacks(), plugin_data) if plugin_data else self.host.submit(task, Callbacks())
             self.handles[job_id] = handle
             result = handle.result()
+            self._collect_partials(job_id)
             if getattr(result, "cancelled", False) or self.jobs.get(job_id, {}).get("status") == "cancelled":
                 self._update(job_id, status="cancelled", message="Cancelled")
                 return
@@ -693,6 +695,43 @@ class RegenService:
             self._update(job_id, status="error", error=str(error), message=str(error))
         finally:
             self.handles.pop(job_id, None)
+
+    def _collect_partials(self, job_id):
+        """The windows a sliding-window run has finished so far, as one file the timeline can show: WanGP saves the
+        whole video after each window (or, with the Sliding Window Clips plugin, each window on its own, which are
+        joined here without re-encoding)."""
+        try:
+            from .h3pins import partials
+            paths = partials(job_id)
+        except Exception:
+            return
+        job = self.jobs.get(job_id)
+        if job is None or len(paths) <= int(job.get("partialCount") or 0):
+            return
+        try:
+            folder = os.path.join(self.root, job_id)
+            live = job.get("live") or None
+            for path in paths[int(job.get("partialCount") or 0):]:
+                duration = float(M.probe(path).get("duration") or 0)
+                if live and duration < float(live["duration"]) + 0.25:
+                    # only the newest window: append it to what was shown
+                    joined = os.path.join(folder, f"live_{len(paths):02d}.mp4")
+                    listing = os.path.join(folder, "live.txt")
+                    with open(listing, "w", encoding="utf-8") as handle:
+                        for part in (live["path"], path):
+                            handle.write("file '" + part.replace("\\", "/").replace("'", "'\\''") + "'\n")
+                    run = subprocess.run([M.ffmpeg_path(), "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", listing, "-c", "copy", joined],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, **M.popen_kwargs())
+                    if run.returncode or not os.path.isfile(joined):
+                        continue
+                    path, duration = joined, float(M.probe(joined).get("duration") or 0)
+                live = {"path": path, "duration": duration}
+            if not live:
+                return
+            item = self.registry.register(live["path"])
+            self._update(job_id, partialCount=len(paths), live=live, liveMedia=self.registry.public(item), liveWindows=len(paths))
+        except Exception as error:
+            print(f"[Video Editor] live windows: {error}")
 
     @staticmethod
     def _swap_audio(video, audio):
@@ -969,6 +1008,8 @@ class RegenService:
         job_id = uuid.uuid4().hex[:12]
         folder = os.path.join(self.root, job_id)
         os.makedirs(folder, exist_ok=True)
+        # the add-on copies each window's interim file here, so the timeline can show the run as it goes
+        spec.update(jobId=job_id, partialDir=folder)
         if any(p["kind"] in ("masked", "both") for p in info["pins"]):
             try:
                 width, height = (int(v) for v in str(task.get("resolution") or "").lower().split("x"))
