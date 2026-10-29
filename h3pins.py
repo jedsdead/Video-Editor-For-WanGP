@@ -639,11 +639,19 @@ def _impl_generate(self, original, *args, **kwargs):
             _log("; ".join(record["plan"].notes))
         _STATE["pinned"] += 1
     _hook_upscaler(self)
+    restore = None
+    if spec and spec.get("windowJoin") == "motion_masked" and window_no is not None and int(window_no) > 1:
+        try:
+            restore = _window_join(self, kwargs)
+        except Exception as error:
+            _log(f"window {window_no}: left as WanGP joins it ({error!r})")
     token = _GEN.set(record)
     try:
         result = original(self, *args, **kwargs)
     finally:
         _GEN.reset(token)
+        if restore:
+            restore()
     if job is not None and record["video"] is not None:
         with _LOCK:
             size = sum(t.numel() * t.element_size() for t in (record["video"], record["audio"], record["p1"]) if t is not None)
@@ -655,6 +663,58 @@ def _impl_generate(self, original, *args, **kwargs):
                 _log("this generation is too long to keep all its latents; later windows are not saved")
     record["plan"] = None
     return result
+
+
+WINDOW_HELD_FRAMES = 18      # the previous window's last frames held inside the next one (the rest of the overlap is history)
+
+
+def _window_join(pipeline, kwargs):
+    """A sliding window joined to the one before it as a Motion + masked join. WanGP hands H3 the previous window's
+    last R frames: natively R-1 of them become history and only the last is pinned. Here the earlier R-18 become
+    history and the last 18 start the window, where WanGP's control video already has them, held by the mask; their
+    sound is held there too. WanGP still trims R frames off the window, so the seam lands after the held frames,
+    inside this window's single rendering. Returns a function that undoes the audio hook."""
+    video = kwargs.get("input_video")
+    R = int(kwargs.get("prefix_frames_count") or 0)
+    if video is None or kwargs.get("input_masks") is None or kwargs.get("input_frames") is None:
+        raise ValueError("not a masked run")
+    A = R - WINDOW_HELD_FRAMES
+    if A < GRID or A % GRID or video.shape[1] < R:
+        raise ValueError(f"an overlap of {R} frames leaves no room for history and held frames")
+    kwargs["input_video"] = video[:, :A + 1]
+    kwargs["prefix_frames_count"] = A + 1
+    _count("window_join")
+    restore = None
+    waveform, rate = kwargs.get("input_waveform"), kwargs.get("input_waveform_sample_rate")
+    if waveform is not None and rate:
+        # hold the held frames' sound: H3 pins only the first frame's share after the history, so swap in all 18
+        pm = _pipeline_module()
+        sr = int(getattr(pm, "AUDIO_SAMPLE_RATE", 32000))
+        fps = float(kwargs.get("fps") or 24)
+        wave = pipeline._waveform(waveform, rate)
+        a0, a1 = round(A / fps * sr), round(R / fps * sr)
+        held = pipeline._encode_audio(wave[0][..., a0:a1][None]) if wave[0].shape[-1] >= a1 else None
+        if held is not None:
+            inner = pipeline._add_audio_condition
+            state = {"history": False, "done": False}
+
+            def add_audio_condition(latents, anchor, *rest, **kw):
+                if anchor == "history":
+                    state["history"] = True
+                elif anchor == "first" and state["history"] and not state["done"]:
+                    state["done"] = True
+                    latents = held.to(device=latents.device, dtype=latents.dtype)
+                return inner(latents, anchor, *rest, **kw)
+
+            pipeline._add_audio_condition = add_audio_condition
+
+            def restore():
+                try:
+                    del pipeline._add_audio_condition
+                except AttributeError:
+                    pass
+    _log(f"window joined as Motion + masked: {A} frames of history, {WINDOW_HELD_FRAMES} held")
+    return restore
 
 
 def _impl_prepare_condition_rows(self, inner, visual_latents, audio_latents, generator, keyframes=(), *args, **kwargs):

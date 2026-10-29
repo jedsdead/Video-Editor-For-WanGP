@@ -242,6 +242,9 @@ def masked_task(settings, guide_path, mask_path):
     return settings
 
 
+WINDOW_JOIN_OVERLAP = 35     # frames: 17 of motion-context history + 18 held inside the next window
+
+
 def write_masked_guides(folder, pins, total, fps, width, height):
     """The control video (each masked pin's frames at its place in the run, grey elsewhere) and its mask (black
     where held, white where generated), both exactly `total` frames at the run's size and frame rate."""
@@ -1005,12 +1008,25 @@ class RegenService:
                 task["sliding_window_discard_last_frames"] = 0
         spec = {"pins": [{k: p[k] for k in ("place", "file", "fps", "frames", "start_frame", "sha", "audio", "kind")} for p in info["pins"]],
                 "mode": info["mode"]}
+        # Between WanGP's own sliding windows: each window takes the previous one's tail as motion-context history
+        # and holds its last frames inside the run with the denoise mask, so a window's seam falls inside one
+        # rendering (as a Motion + masked join). Needs the run to be a masked edit throughout, an overlap with room
+        # for both parts, and the windows' last frames (the VAE's edge) discarded.
+        window_join = info.get("windows", 1) > 1 and req.get("windowJoin", True) and not masked_unavailable(settings, model_def)
+        if info.get("windows", 1) > 1 and not int(task.get("sliding_window_size") or 0):
+            task["sliding_window_size"] = info["windowFrames"]      # the window size the plan assumed
+        if window_join:
+            spec["windowJoin"] = "motion_masked"
+            overlap = int(task.get("sliding_window_overlap") or 0)
+            task["sliding_window_overlap"] = max(WINDOW_JOIN_OVERLAP, 1 + max(0, overlap - 1) // C.GRID * C.GRID)
+            if int(task.get("sliding_window_discard_last_frames") or 0) < 4:
+                task["sliding_window_discard_last_frames"] = 4
         job_id = uuid.uuid4().hex[:12]
         folder = os.path.join(self.root, job_id)
         os.makedirs(folder, exist_ok=True)
         # the add-on copies each window's interim file here, so the timeline can show the run as it goes
         spec.update(jobId=job_id, partialDir=folder)
-        if any(p["kind"] in ("masked", "both") for p in info["pins"]):
+        if any(p["kind"] in ("masked", "both") for p in info["pins"]) or window_join:
             try:
                 width, height = (int(v) for v in str(task.get("resolution") or "").lower().split("x"))
             except ValueError:
