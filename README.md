@@ -24,7 +24,7 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - Fades have shapes too: right-click a fade handle, or use the Inspector.
 
 **Transform**
-- Position, scale, rotation and crop for every video clip, all keyframeable. **Scale X** and **Scale Y** stretch each axis on its own, with one-click **Fit**, **Fill**, **Stretch**, **Fill width**, **Fill height** and **Anamorphic** desqueeze (1.25× to 2×).
+- Position, scale, rotation and crop for every video clip, all keyframeable. **Scale X** and **Scale Y** stretch each axis on its own, with one-click **Fit**, **Fill**, **Stretch**, **Fill width**, **Fill height**, **Full size** (the clip's own pixels, one per project pixel) and **Anamorphic** desqueeze (1.25× to 2×).
 - The viewer shows the frame at **Fit** or at 25% to 400% of the project's resolution (scroll when it's bigger), from the menu under the frame. **Full screen** keeps the transport, so you can play and leave without the keyboard.
 - **Lock the aspect ratio** in the project settings to change width and height together.
 - Handles on the viewer: drag to move, corners to scale, the knob to rotate (Shift snaps to 15°), and crop mode (C) for edge handles. Clicking in the viewer selects the clip under the pointer.
@@ -189,7 +189,7 @@ Everything is stored in `<WanGP output folder>/video_editor/`:
 
 ## How it works
 
-The editor is a web page served by WanGP through the plugin web-app API and shown inside the tab. The viewer composites clips with WebGL from lightweight 540p proxies. Export re-renders every frame from the original files with PyTorch, on the GPU when available, using the same colour, transition and speed maths, so the export matches what you saw.
+The editor is a web page served by WanGP through the plugin web-app API and shown inside the tab. The viewer composites clips with WebGL from lightweight 540p proxies, or from the original files when the viewer's quality menu is set to **Full res**. Export re-renders every frame from the original files with PyTorch, on the GPU when available, using the same colour, transition and speed maths, so the export matches what you saw.
 
 ## Roadmap
 

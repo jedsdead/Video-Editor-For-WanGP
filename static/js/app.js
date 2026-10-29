@@ -763,6 +763,13 @@ async function main() {
   // viewer size: fit, or a percentage of the project's resolution (remembered per browser)
   try { state.viewerZoom = localStorage.getItem("ve_viewer_zoom") || "fit"; } catch (_) { state.viewerZoom = "fit"; }
   $("viewerZoom").value = state.viewerZoom;
+  try { state.viewerQuality = localStorage.getItem("ve_viewer_quality") || "proxy"; } catch (_) { state.viewerQuality = "proxy"; }
+  $("viewerQuality").value = state.viewerQuality;
+  $("viewerQuality").onchange = (e) => {
+    state.viewerQuality = e.target.value;
+    try { localStorage.setItem("ve_viewer_quality", state.viewerQuality); } catch (_) { /* ignore */ }
+    app.playback.dirty = true;   // the pool swaps each video's source as it's next drawn
+  };
   $("viewerZoom").onchange = (e) => { state.viewerZoom = e.target.value; try { localStorage.setItem("ve_viewer_zoom", state.viewerZoom); } catch (_) { /* ignore */ } app.playback.layout(); };
   $("viewerStage").addEventListener("scroll", () => bus.emit("viewer-layout"));
   bus.on("playstate", (playing) => { $("playIcon").innerHTML = playing ? '<path d="M6 4h4v16H6zM14 4h4v16h-4z"/>' : '<path d="M7 4v16l13-8z"/>'; });

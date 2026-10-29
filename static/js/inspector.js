@@ -229,7 +229,7 @@ export class Inspector {
         const tau = clamp(state.playhead - c.start, 0, M.clipDur(c));
         const v = (n) => M.prop(c, n, tau);
         const set = (n, value) => M.setPropAt(c.id, n, tau, Math.round(value * 10000) / 10000);
-        fn({ w0, h0, pw, ph, v, set });
+        fn({ w0, h0, sw, sh, pw, ph, v, set });
       }
     });
     const btn = (label, title, fn) => el("button.small", { title, onclick: () => apply(label, fn) }, label);
@@ -246,6 +246,8 @@ export class Inspector {
       btn("Stretch", "Stretch each axis to the frame exactly", ({ w0, h0, pw, ph, v, set }) => { set("scaleX", pw / (w0 * v("scale"))); set("scaleY", ph / (h0 * v("scale"))); centre(set); }),
       btn("Fill width", "Stretch the width only, to the frame's width", ({ w0, pw, v, set }) => { set("scaleX", pw / (w0 * v("scale"))); set("x", 0); }),
       btn("Fill height", "Stretch the height only, to the frame's height", ({ h0, ph, v, set }) => { set("scaleY", ph / (h0 * v("scale"))); set("y", 0); }),
+      btn("Full size", "The clip at its own pixel size: one source pixel per project pixel, centred (e.g. 2048 × 2048 shown at 2048 × 2048 in a 1920 × 800 frame)",
+        ({ w0, sw, set }) => { set("scale", sw / Math.max(1e-6, w0)); set("scaleX", 1); set("scaleY", 1); centre(set); }),
       btn("1:1", "Reset Scale X and Y to 100% (keeps Scale)", ({ set }) => { set("scaleX", 1); set("scaleY", 1); }),
       anamorphic));
   }

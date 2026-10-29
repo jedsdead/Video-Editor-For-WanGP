@@ -334,10 +334,14 @@ export class Playback {
   }
 
   // ---------------------------------------------------------------- element pool
-  url(item, reversed) {
+  url(item, reversed, kind) {
     if (item.kind === "image") return `api/media/${item.id}/original`;
+    // the viewer's Full res: the original file's picture (sound stays on the light proxy); reversed clips keep their proxy
+    if (kind === "video" && !reversed && this.fullRes()) return `api/media/${item.id}/original`;
     return reversed ? `api/media/${item.id}/proxy_rev` : `api/media/${item.id}/proxy`;
   }
+
+  fullRes() { return state.viewerQuality === "full"; }
 
   // Reversed clips play from a reversed proxy when it exists (smooth); until then the forward proxy is stepped.
   reversedReady(clip) {
@@ -353,7 +357,8 @@ export class Playback {
     const item = mediaOf(clip);
     if (!item) return null;
     const rev = kind === "video" && this.reversedReady(clip);
-    if (entry && (entry.mediaId !== clip.mediaId || entry.kind !== kind || entry.rev !== rev)) { this.dispose(clip.id); entry = null; }
+    const full = kind === "video" && !rev && this.fullRes();
+    if (entry && (entry.mediaId !== clip.mediaId || entry.kind !== kind || entry.rev !== rev || !!entry.full !== full)) { this.dispose(clip.id); entry = null; }
     // a media element whose decoder failed (it happens after a GPU reset) never recovers by itself: rebuild it,
     // at most every 2 s so a file that really is broken doesn't thrash
     if (entry && entry.el.error && performance.now() - (entry.created || 0) > 2000) { this.dispose(clip.id); entry = null; }
@@ -370,8 +375,8 @@ export class Playback {
         el.addEventListener("loadeddata", () => { this.dirty = true; });
         el.addEventListener("error", () => { this.dirty = true; });
       }
-      if (el.tagName !== "CANVAS") el.src = this.url(item, rev);
-      entry = { el, kind, rev, mediaId: clip.mediaId, used: performance.now(), created: performance.now(), trackId: null };
+      if (el.tagName !== "CANVAS") el.src = this.url(item, rev, kind);
+      entry = { el, kind, rev, full, mediaId: clip.mediaId, used: performance.now(), created: performance.now(), trackId: null };
       this.pool.set(clip.id, entry);
       if (kind === "audio") this.connectAudio(entry);
     }
