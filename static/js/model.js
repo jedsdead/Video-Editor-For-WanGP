@@ -1002,6 +1002,36 @@ export function splitIntoShots(clipId, cuts, shots = []) {
   return videoPieces;
 }
 
+// Split a clip (and its linked audio) where its sliding windows meet: srcTimes are seconds in its file. The first
+// piece keeps the generation's lineage; each piece is named for its window.
+export function splitAtWindows(clipId, srcTimes) {
+  const clip = getClip(clipId);
+  if (!clip) return [];
+  const base = (clip.name || (mediaOf(clip) || {}).name || "Clip").replace(/ · Window \d+$/, "");
+  const mediaId = clip.mediaId;
+  const start = clip.start, end = clipEnd(clip);
+  const tracks = new Set([clip.trackId, ...partners(clip).filter(p => Math.abs(p.start - start) < 1e-3).map(p => p.trackId)]);
+  const lo = Math.min(clip.in, clip.out), hi = Math.max(clip.in, clip.out);
+  const firstWindow = 1 + srcTimes.filter(src => src <= lo + frameDur() / 2).length;
+  const times = srcTimes.map(src => start + clipTimeForSource(clip, src))
+    .filter(t => Number.isFinite(t) && t > start + frameDur() / 2 && t < end - frameDur() / 2).sort((a, b) => a - b);
+  for (const t of times) {
+    const ids = new Set(P().clips.filter(c => c.mediaId === mediaId && tracks.has(c.trackId) && c.start < t - EPS && clipEnd(c) > t + EPS).map(c => c.id));
+    splitAt(snapFrame(t), { ids });
+  }
+  const pieces = P().clips.filter(c => c.mediaId === mediaId && tracks.has(c.trackId) && c.start >= start - 1e-3 && clipEnd(c) <= end + 1e-3);
+  const videoPieces = pieces.filter(c => c.trackId === clip.trackId).sort((a, b) => a.start - b.start);
+  videoPieces.forEach((piece, i) => {
+    for (const c of pieces.filter(c => Math.abs(c.start - piece.start) < 1e-3)) {
+      c.name = `${base} · Window ${firstWindow + i}`;
+      c.windowInfo = { index: firstWindow + i, count: firstWindow + srcTimes.filter(src => src > lo && src < hi).length };
+      if (i > 0) { delete c.gen; delete c.seam; delete c.takes; delete c.takeIndex; delete c.level; }
+      else if (c.seam) delete c.seam.right;
+    }
+  });
+  return videoPieces;
+}
+
 // ------------------------------------------------------------------ takes (regenerated versions of a shot)
 
 // The original material of a clip: its first take when it has takes, else the clip itself.

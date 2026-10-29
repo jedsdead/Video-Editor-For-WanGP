@@ -309,6 +309,13 @@ def create_app(get_config, host=None):
         except (ValueError, KeyError) as error:
             raise HTTPException(400, str(error))
 
+    @app.post("/api/gen/windows")
+    def gen_windows(payload: dict = Body(...)):
+        try:
+            return service.regen.window_cuts(payload["mediaId"])
+        except (ValueError, KeyError) as error:
+            raise HTTPException(400, str(error))
+
     @app.post("/api/gen/seam")
     def gen_seam(payload: dict = Body(...)):
         try:

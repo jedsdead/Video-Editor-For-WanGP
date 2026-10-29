@@ -116,12 +116,14 @@ export async function openGenerate(app, mode, where) {
   arriveSel.value = prefs.arriveMode || "both";
   const modeNote = el("div.dim.small", {}, "Motion context hands H3 the frames before the cut as history, the way Wan2GP continues a sliding window. Masked holds the neighbour's frames inside the run with a denoise mask (WanGP's Denoise Control Video), so they are never re-drawn and the join has one rendering. Motion + masked does both: the earlier frames go in as history, the last ones are held. Pinned keyframes are re-drawn by the model and trimmed off.");
   const modeRow = (label, sel) => el("div", { style: { display: "flex", gap: "8px", alignItems: "center", margin: "6px 0 2px" } }, el("span.dim.small", { style: { width: "92px" } }, label), sel);
-  const seconds = el("input", { type: "number", min: 0.5, max: fresh ? 120 : 19, step: 0.1, value: (+defaultSeconds).toFixed(2), style: { width: "76px" } });
+  const seconds = el("input", { type: "number", min: 0.5, max: fresh || !s.right ? 120 : 19, step: 0.1, value: (+defaultSeconds).toFixed(2), style: { width: "76px" } });
   const lengthNote = el("div.dim.small");
   const pinsBox = el("div.gpins");
   const keepCut = el("input", { type: "checkbox", checked: !!prefs.keepCut });
   const carryAudio = el("input", { type: "checkbox", checked: prefs.carryAudio !== false });
   const crossfade = el("input", { type: "checkbox", checked: prefs.crossfade !== false });
+  const splitWindows = el("input", { type: "checkbox", checked: !!prefs.splitWindows });
+  const splitRow = el("label.rrow", { style: { display: "none" } }, splitWindows, el("span", {}, "One clip per sliding window (cut where the windows meet)"));
   const joinMatch = el("input", { type: "checkbox", checked: (prefs.joinMatch ?? prefs.levelLock) !== false });
   const srcClip = radio("g_src", "clip", fresh ? (settingsItem ? `The same settings as “${s.near.name}”` : "A neighbouring clip's settings (none here)") : settingsItem ? "The clip's settings" : "The clip's settings (not a WanGP clip)", !!settingsItem && !prefs.useCurrent, { disabled: !settingsItem });
   const srcCurrent = radio("g_src", "current", status.current ? `Current Media Generator settings (${status.current.name})` : "Current Media Generator settings (open the Video Generator tab first)",
@@ -158,7 +160,7 @@ export async function openGenerate(app, mode, where) {
       el("label.rrow", {}, carryAudio, el("span", {}, "Carry the pinned audio too")),
       el("label.rrow", {}, joinMatch, el("span", {}, "Join match: correct the new footage's exposure and colour where it meets the clip it joins, fading out over about half a second")),
       el("label.rrow", {}, crossfade, el("span", {}, "Blend the joins: crossfade across the frames both sides rendered (pinned frames inside the run only)"))),
-    field(fresh ? "Length" : "New footage", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seconds, el("span.dim", {}, "seconds")), lengthNote),
+    field(fresh ? "Length" : "New footage", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seconds, el("span.dim", {}, "seconds")), lengthNote, splitRow),
     field("Settings", srcClip.row, srcCurrent.row, modelNote),
     field("Size", sizeSel, sizeNote),
     field("Seed", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seedSel, seedInput)),
@@ -177,7 +179,7 @@ export async function openGenerate(app, mode, where) {
     right: s.right ? { clipId: s.right.id, mediaId: s.right.mediaId, cut: startSource(s.right), pixel: keepCut.checked, audio: carryAudio.checked } : null,
     replaceId: s.replace?.id || null,
     gap: s.gap ? { start: s.gap.start, end: Number.isFinite(s.gap.end) ? s.gap.end : null } : null,
-    window: parseInt(windowSel.value, 10), leaveMode: leaveSel.value, arriveMode: arriveSel.value, crossfade: crossfade.checked, joinMatch: joinMatch.checked, newSeconds: clamp(parseFloat(seconds.value) || 3, 0.2, 30),
+    window: parseInt(windowSel.value, 10), leaveMode: leaveSel.value, arriveMode: arriveSel.value, crossfade: crossfade.checked, joinMatch: joinMatch.checked, newSeconds: clamp(parseFloat(seconds.value) || 3, 0.2, 120), splitWindows: splitWindows.checked,
     useCurrent: srcCurrent.input.checked, settingsFrom: settingsItem?.id || (s.left || s.right)?.mediaId || null, promptRange,
     at: s.at ?? null, targetId: s.target?.id || null,
     gen: sizeSel.value === "project" ? gen : null,
@@ -201,9 +203,11 @@ export async function openGenerate(app, mode, where) {
       pinsBox.innerHTML = "";
       for (const p of info.pins) pinsBox.append(describePin(p));
       const L = info.lengths;
-      if (fresh) lengthNote.textContent = `${L.totalSeconds.toFixed(2)}s (${L.total} frames). ${L.note}`;
+      if (fresh) lengthNote.textContent = `${L.totalSeconds.toFixed(2)}s (${L.total} frames)${(info.windows || 1) > 1 ? `, ${info.windows} sliding windows` : ""}. ${L.note}`;
       const motionPin = info.pins.some(p => p.kind === "motion");
-      if (!fresh) lengthNote.textContent = `One run of ${L.totalSeconds.toFixed(2)}s (${L.total} frames): ${motionPin ? "the join frame + " : L.before ? `${(L.before / info.fps).toFixed(2)}s pinned + ` : ""}${L.newSeconds.toFixed(2)}s new${L.after ? ` + ${(L.after / info.fps).toFixed(2)}s pinned` : ""}. ${L.note}`;
+      const windows = info.windows || 1;
+      splitRow.style.display = windows > 1 ? "" : "none";
+      if (!fresh) lengthNote.textContent = `${windows > 1 ? `${windows} sliding windows` : "One run"} of ${L.totalSeconds.toFixed(2)}s (${L.total} frames): ${motionPin ? "the join frame + " : L.before ? `${(L.before / info.fps).toFixed(2)}s pinned + ` : ""}${L.newSeconds.toFixed(2)}s new${L.after ? ` + ${(L.after / info.fps).toFixed(2)}s pinned` : ""}. ${L.note}`;
       modelNote.textContent = `Model: ${info.model.name}`;
       for (const r of info.refmods || []) modelNote.append(el(r.status === "relinked" ? "div" : "div.warn", {},
         r.status === "relinked" ? `RefMod '${r.mod}' has moved: using ${r.now}.` : `RefMod '${r.mod}' can't be found, so it will be skipped.`));
@@ -234,7 +238,7 @@ export async function openGenerate(app, mode, where) {
       if (!Number.isFinite(seed) || seed < 0) { error.textContent = "Enter a seed of 0 or more"; return; }
     }
     const req = { ...request(), seed, prompt: promptBox.value };
-    savePrefs({ size: sizeSel.value, window: req.window, leaveMode: req.leaveMode, leaveModeV2: true, arriveMode: req.arriveMode, crossfade: req.crossfade, joinMatch: req.joinMatch, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
+    savePrefs({ size: sizeSel.value, window: req.window, leaveMode: req.leaveMode, leaveModeV2: true, arriveMode: req.arriveMode, crossfade: req.crossfade, joinMatch: req.joinMatch, splitWindows: splitWindows.checked, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
       freshSeconds: fresh && !s.target ? req.newSeconds : prefs.freshSeconds, keepCut: keepCut.checked, carryAudio: carryAudio.checked,
       useCurrent: req.useCurrent, seed: seedSel.value === "custom" ? "custom" : "new", customSeed: seedInput.value });
     go.disabled = true;

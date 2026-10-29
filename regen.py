@@ -826,9 +826,17 @@ class RegenService:
             step_note = f"{model_def.get('name') or 'This model'} runs in steps of {step} frames, so this is the nearest legal length."
         else:
             lengths = C.plan_lengths(float(req.get("newSeconds") or 3.0), gen_fps, before, after, caps["framesMinimum"], nearest=True)
-            if window_max and lengths["total"] > window_max:
-                raise ValueError(f"that's {lengths['total']} frames in one run; this model allows {window_max} ({window_max / gen_fps:.1f}s) including the pins")
             step_note = "H3 runs in steps of 17 frames, so the new part is the nearest legal length."
+            window = self._window_frames(settings, model_def)
+            if window and lengths["total"] > window:
+                # longer than one window: WanGP's sliding windows run it, with the join in the first window. Arriving
+                # on a clip would need the pins in the last window, so that stays within one.
+                if after:
+                    raise ValueError(f"that's {lengths['total']} frames in one run; arriving on a clip has to fit one window ({window} frames, {window / gen_fps:.1f}s) including the pins")
+                if before + C.GRID > window:
+                    raise ValueError(f"the window ({window} frames) is too short for the pinned frames")
+                step_note += f" Longer than one {window / gen_fps:.1f}s window, so WanGP runs it in sliding windows; the join is in the first."
+        sliding = self._window_plan(settings, model_def, lengths["total"])
         if fresh:
             prompt, shots = str(settings.get("prompt") or meta.get("prompt") or ""), []
         else:
@@ -840,9 +848,58 @@ class RegenService:
                                                           "trimHead": sum(p.get("trim", p["inRun"]) for p in pins if p["place"] == "before") / gen_fps,
                                                           "trimTail": sum(p.get("trim", p["inRun"]) for p in pins if p["place"] == "after") / gen_fps,
                                                           "note": step_note},
+                "windows": sliding["count"], "windowFrames": sliding["window"],
                 "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "refmods": refmods,
                 "available": ok, "reason": reason, "h3": self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}}
         return info, settings, model_def
+
+    def _window_frames(self, settings, model_def):
+        """The sliding-window size a run uses: as build_task does, a run that fits the model's longest window runs in one,
+        and a longer one runs in windows of that size (floored to H3's frame grid, as WanGP does)."""
+        window_max = int(((model_def or {}).get("sliding_window_defaults") or {}).get("window_max") or 0)
+        size = window_max or int(settings.get("sliding_window_size") or 0)
+        if size >= 5:
+            size = 5 + (size - 5) // C.GRID * C.GRID
+        return size
+
+    def _window_plan(self, settings, model_def, total):
+        """How many sliding windows WanGP will run for `total` frames."""
+        window = self._window_frames(settings, model_def)
+        if not window or total <= window:
+            return {"count": 1, "window": window or total}
+        overlap = int(settings.get("sliding_window_overlap") or 1)
+        discard = int(settings.get("sliding_window_discard_last_frames") or 0)
+        step = max(1, window - overlap - discard)
+        return {"count": 1 + math.ceil(max(0, total - (window - discard)) / step), "window": window}
+
+    def window_cuts(self, media_id):
+        """Where a generation's sliding windows meet, in seconds of its file: from the windows the add-on saved latents
+        for (exact), else from the file's WanGP settings (window size, overlap and discarded frames)."""
+        item = self._item(media_id)
+        fps = float(item.get("fps") or 24)
+        file_frames = int(round(float(item.get("duration") or 0) * fps))
+        cuts, source = [], None
+        try:
+            manifest = self.latents.manifest(self._sha(item)) or {}
+        except Exception:
+            manifest = {}
+        windows = sorted((w for w in manifest.get("windows") or [] if w.get("source") != "latent_carry"), key=lambda w: int(w["offset"]))
+        if len(windows) > 1:
+            cuts = [int(w["offset"]) + int(w["valid"]) for w in windows[:-1]]
+            source = "latents"
+        else:
+            meta = self._meta(item) or {}
+            window = int(meta.get("sliding_window_size") or 0)
+            if window and file_frames > window:
+                overlap = int(meta.get("sliding_window_overlap") or 1)
+                discard = int(meta.get("sliding_window_discard_last_frames") or 0)
+                at, step = window - discard, max(1, window - overlap - discard)
+                while at < file_frames - 2:
+                    cuts.append(at)
+                    at += step
+                source = "settings"
+        cuts = sorted({c for c in cuts if 2 <= c <= file_frames - 2})
+        return {"cuts": [c / fps for c in cuts], "frames": cuts, "windows": len(cuts) + 1, "source": source}
 
     def compose_prepare(self, req):
         info, _, _ = self._compose(req)
@@ -862,11 +919,14 @@ class RegenService:
         prompt = str(req.get("prompt") or "").strip() or info["prompt"]
         task = build_task(settings, prompt=prompt, seed=seed, frames=lengths["total"], fps=info["fps"], model_def=model_def)
         apply_gen_size(task, req.get("gen"))
-        if info["pins"]:
+        if info["pins"] and info.get("windows", 1) > 1:
+            task["sliding_window_size"] = info["windowFrames"]   # sliding windows: the pins are in window 1
+        elif info["pins"]:
             task["sliding_window_size"] = max(int(task.get("sliding_window_size") or 0), lengths["total"])   # one window: pins only apply to window 1
-            # and nothing discarded: Discard Last Frames would cut the end of the run, where an arriving pin sits, and
-            # shift every trim after it
-            task["sliding_window_discard_last_frames"] = 0
+            # and nothing discarded in a single window: Discard Last Frames would cut the end of the run, where an
+            # arriving pin sits, and shift every trim after it (between sliding windows it is Latent Carry's business)
+            if info.get("windows", 1) <= 1:
+                task["sliding_window_discard_last_frames"] = 0
         spec = {"pins": [{k: p[k] for k in ("place", "file", "fps", "frames", "start_frame", "sha", "audio", "kind")} for p in info["pins"]],
                 "mode": info["mode"]}
         job_id = uuid.uuid4().hex[:12]

@@ -108,7 +108,7 @@ export class RegenJobs {
       left: job.left?.cut != null ? { clipId: job.left.clipId, cut: job.left.cut } : null,
       right: job.right?.cut != null ? { clipId: job.right.clipId, cut: job.right.cut } : null } : null;
     const lineage = { mode: job.mode, parent: job.left?.clipId || null, child: job.right?.clipId || null, jobId: job.id, seed: job.seed, pins: job.pins, joins };
-    let target = null, placedNote = "";
+    let target = null, placedNote = "", placedNew = false;
     const targetId = job.request?.targetId;
     if ((job.left && !left) || (job.right && !right) || (job.mode === "replace" && !M.getClip(job.request?.replaceId)) || (targetId && !M.getClip(targetId))) {
       toast(`A ${job.mode} generation finished, but the clips it joins have changed; it was added to the Media panel`, "warn");
@@ -147,9 +147,15 @@ export class RegenJobs {
           room = gap && Number.isFinite(gap.end) ? gap.end - gap.start : 0;
         } else at = M.clipEnd(L);
         const clips = M.insertMedia(item, job.trackId, at, inT, outT, { room, close: job.mode === "fill" });
+        placedNew = true;
         for (const c of clips) { c.gen = lineage; c.name = job.mode === "new" ? item.name : `${(L || R)?.name?.split(" · ")[0] || item.name} · ${job.mode}`; }
         target = clips[0];
       });
+      if (target && placedNew && job.request?.splitWindows) {
+        // one clip per sliding window (the first keeps the joins and lineage)
+        await this.splitWindows(target.id, { quiet: true });
+        target = M.getClip(target.id) || target;
+      }
       if (target) {
         const tid = target.id;
         M.edit("Blend the joins", () => this.crossfadeJoins(job, M.getClip(tid)), { coalesceKey: `xf-${job.id}` });
@@ -163,6 +169,21 @@ export class RegenJobs {
     try { await api(`api/regen/jobs/${job.id}/dismiss`, { method: "POST" }); } catch (_) { /* kept for next time */ }
     this.jobs = this.jobs.filter(j => j.id !== job.id);
     bus.emit("regen-jobs");
+  }
+
+  // Split a WanGP clip where its sliding windows meet (from the add-on's saved windows, else its settings).
+  async splitWindows(clipId, { quiet = false } = {}) {
+    const clip = M.getClip(clipId);
+    if (!clip) return 0;
+    let info;
+    try { info = await api("api/gen/windows", { method: "POST", body: { mediaId: clip.mediaId } }); }
+    catch (e) { if (!quiet) toast(e.message, "warn"); return 0; }
+    if (!info.cuts.length) { if (!quiet) toast("This clip was made in one window", "warn"); return 0; }
+    const live = M.getClip(clipId);
+    if (!live) return 0;
+    const pieces = M.edit("Split at sliding windows", () => M.splitAtWindows(clipId, info.cuts));
+    if (!quiet) toast(pieces.length > 1 ? `Split into ${pieces.length} windows${info.source === "settings" ? " (worked out from its WanGP settings)" : ""}` : "No window boundary falls inside the clip", pieces.length > 1 ? "info" : "warn");
+    return pieces.length;
   }
 
   // Crossfade a join across the frames both sides rendered: a pin inside the run is the new clip's own rendering of

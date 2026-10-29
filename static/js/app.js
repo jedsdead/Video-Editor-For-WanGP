@@ -521,6 +521,7 @@ function contextMenu(x, y, hit) {
       hit.row.kind === "video" ? { label: "Freeze frame at playhead", kbd: "Shift+F", disabled: M.isStill(clip), action: freezeFrame } : null,
       hit.row.kind === "video" ? { label: "Detect shots…", kbd: "Shift+D", disabled: M.isStill(clip), action: () => openShotDetect(app, clip.id) } : null,
       ...regenItems(clip, hit.row),
+      hit.row.kind === "video" && M.mediaOf(clip)?.has_metadata && !M.isStill(clip) ? { label: "Split at sliding windows", action: () => app.regen.splitWindows(clip.id) } : null,
       ...compoundItems(clip),
       hit.row.kind === "video" && hit.row.track.id === M.primaryId() ? { label: state.selection.size > 1 ? "Render final (selected clips)…" : "Render final (this clip)…",
         disabled: M.isStill(clip), action: () => openRenderDialog(app, { clipIds: new Set(state.selection) }) } : null,
