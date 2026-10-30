@@ -427,8 +427,16 @@ def capabilities(model_def):
             "framesMinimum": int(model_def.get("frames_minimum", 5) or 5), "framesSteps": int(model_def.get("frames_steps", 4) or 4)}
 
 
+GUIDE_LETTERS = "VGUFAN+*-1"   # video_prompt_type letters that need a control/reference video or a mask
+
+
 def base_settings(settings):
     out = {k: copy.deepcopy(v) for k, v in (settings or {}).items() if k not in META_ONLY and k not in MEDIA_KEYS}
+    # the original's control video and mask don't carry over (an editor join's guide.mp4 and mask.mp4, say), so neither
+    # do the letters that ask for them: WanGP would refuse the task ("You must provide a Control Video")
+    vpt = str(out.get("video_prompt_type") or "")
+    if any(ch in vpt for ch in GUIDE_LETTERS):
+        out["video_prompt_type"] = "".join(ch for ch in vpt if ch not in GUIDE_LETTERS)
     return out
 
 
@@ -943,7 +951,9 @@ class RegenService:
         if source is None and not fresh:
             raise ValueError("Nothing to pin: this needs a clip on the side it continues from")
         meta = (self._meta(source) if source else None) or {}
-        settings = self._settings_for(source, bool(req.get("useCurrent")) or source is None)
+        # base_settings: without the source's own control video, mask and their letters (a clip made by a masked join
+        # carries GVA, which would otherwise read as "uses a control video" and turn the next join's mask off)
+        settings = base_settings(self._settings_for(source, bool(req.get("useCurrent")) or source is None))
         settings, refmods = relink_refmods(settings)
         model_type = settings.get("model_type")
         model_def = self.host.model_def(model_type) or {}
