@@ -454,6 +454,7 @@ class PinPlan:
         self.masked = {}          # stage index -> [(place, latents)] held by WanGP's mask (latent grade only)
         self.calls = 0
         self.audio_rows = None    # id of the cond_audio_rows tensor that holds our audio pins
+        self.hold_audio = None    # (samples (S, 2), rate, seconds): the sound under the held frames at the run's start
         self.notes = []
 
 
@@ -604,6 +605,10 @@ def _plan_pins(pipeline, spec, kwargs):
                 plan.audio.append(({"anchor": "history", "latent_frame_count": count}, audio_latents))
             elif pin["place"] == "before":
                 plan.audio.append(({"anchor": "first", "latent_frame_count": count}, audio_latents))
+                if held:
+                    # the held frames' sound is held too, not just suggested: a little more of the source than the hold
+                    # (so its last latent isn't a file edge); WanGP keeps exactly the held seconds
+                    plan.hold_audio = (read_audio(path, start / src_fps, frames / fps + 0.5, sr), sr, frames / fps)
             else:
                 start_index = int(round((frame_num - frames) / fps * alf))
                 plan.audio.append(({"anchor": f"tail@{start_index}", "latent_frame_count": count}, audio_latents))
@@ -635,6 +640,7 @@ def _impl_generate(self, original, *args, **kwargs):
         except Exception as error:
             traceback.print_exc()
             raise RuntimeError(f"Video Editor pins could not be prepared: {error!r}")
+        _hold_target_audio(kwargs, record["plan"])
         if record["plan"].notes:
             _log("; ".join(record["plan"].notes))
         _STATE["pinned"] += 1
@@ -666,6 +672,32 @@ def _impl_generate(self, original, *args, **kwargs):
 
 
 WINDOW_HELD_FRAMES = 18      # the previous window's last frames held inside the next one (the rest of the overlap is history)
+
+
+def _hold_audio_flags(kwargs, end_seconds):
+    """WanGP's own soundtrack conditioning ("S" + "A"): the target's audio up to `end_seconds` is copied from
+    input_waveform and kept fixed while the rest is generated (as its sliding-window audio repair does). Audio pins
+    alone are condition rows the model can drift from: dialogue could start inside the held frames."""
+    apt = str(kwargs.get("audio_prompt_type") or "")
+    kwargs["audio_prompt_type"] = apt + ("S" if "S" not in apt else "") + ("A" if not any(f in apt for f in "AK") else "")
+    kwargs["audio_conditioning_end"] = float(end_seconds)
+
+
+def _hold_target_audio(kwargs, plan):
+    """A masked "before" pin: hold the held frames' sound at the run's start as firmly as the frames themselves."""
+    if plan is None or plan.hold_audio is None:
+        return
+    apt = str(kwargs.get("audio_prompt_type") or "")
+    if kwargs.get("input_waveform") is not None or kwargs.get("audio_conditioning_end") is not None or any(f in apt for f in "AKS2"):
+        plan.notes.append("held sound: left as a condition (this run already has a soundtrack)")
+        return
+    if kwargs.get("input_video") is not None and int(kwargs.get("prefix_frames_count") or 0) > 0:
+        return
+    wave, rate, seconds = plan.hold_audio
+    kwargs["input_waveform"], kwargs["input_waveform_sample_rate"] = wave, rate
+    _hold_audio_flags(kwargs, seconds)
+    _count("audio_held")
+    plan.notes.append(f"held sound: the first {seconds:.2f}s kept exactly")
 
 
 def _window_join(pipeline, kwargs):
@@ -728,6 +760,10 @@ def _window_join(pipeline, kwargs):
                 return inner(latents, anchor, *rest, **kw)
 
             pipeline._add_audio_condition = add_audio_condition
+            if not any(f in str(kwargs.get("audio_prompt_type") or "") for f in "SK2") and kwargs.get("audio_conditioning_end") is None:
+                # and keep the held frames' sound fixed in the window (WanGP copies it from the waveform after the history)
+                _hold_audio_flags(kwargs, R / fps)
+                _count("audio_held")
 
             def restore():
                 try:
