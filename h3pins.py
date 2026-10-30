@@ -46,7 +46,7 @@ import traceback
 
 import numpy as np
 
-VERSION = "1.7"
+VERSION = "1.7.1"
 PLUGIN_KEY = "video_editor"                 # plugin_data key the editor's tasks carry
 GRID = 17                                   # pixel frames per VAE clip
 LATENTS_PER_CLIP = 5
