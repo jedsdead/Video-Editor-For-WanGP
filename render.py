@@ -1188,7 +1188,7 @@ class ExportJob:
                     pos = (src_times - src_a) * SAMPLE_RATE
                     idx = np.arange(raw.shape[1])
                     seg = np.stack([np.interp(pos, idx, raw[ch], left=0.0, right=0.0) for ch in range(2)]).astype(np.float32) if raw.shape[1] else np.zeros((2, count), np.float32)
-                seg = AFX.apply(seg, clip, SAMPLE_RATE)   # the clip's audio effects, before its volume and fades (as the viewer)
+                seg = AFX.apply(seg, clip, SAMPLE_RATE, float(taus[0]) if len(taus) else 0.0)   # the clip's audio effects, before its volume and fades (as the viewer)
                 inside = np.clip(taus, 0, duration)
                 gain = T.db_to_gain(np.asarray(T.prop(clip, "volume", inside, 0.0), dtype=np.float64)) * T.fade_factor(clip, inside, duration)
                 if keyed_speed:

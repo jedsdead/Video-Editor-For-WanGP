@@ -4,7 +4,7 @@ import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { el, toast } from "./util.js";
 import { EFFECTS, EFFECT_ORDER, GENERATORS, defaultEffectParams } from "./effects.js";
-import { AUDIO_EFFECTS, AUDIO_EFFECT_ORDER, defaultAudioParams } from "./audiofx.js";
+import { AUDIO_EFFECTS, AUDIO_EFFECT_GROUPS, defaultAudioParams } from "./audiofx.js";
 
 // A small picture for an audio effect: a waveform, shaped by what the effect does.
 function paintAudioEffect(canvas, type) {
@@ -36,6 +36,61 @@ function paintAudioEffect(canvas, type) {
     ctx.strokeStyle = "#7fd6a8"; ctx.lineWidth = 1.5; ctx.beginPath();
     for (let x = 0; x <= w; x++) { const y = h / 2 + Math.tanh(Math.sin(x / w * 6 * Math.PI) * 4) * 16; x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
     ctx.stroke();
+  } else if (["bandpass", "notch", "peak", "autofilter"].includes(type)) {
+    // a frequency response (log axis, centre at the middle)
+    const curve = (u) => {
+      const d = (u - 0.5) * 6;
+      if (type === "bandpass") return 1 / (1 + d * d);
+      if (type === "notch") return 1 - 1 / (1 + 40 * d * d);
+      if (type === "peak") return 0.45 + 0.4 / (1 + d * d);
+      return 1 / (1 + Math.pow(Math.max(u, 0.01) / 0.55, 6)) * (1 + 0.6 * Math.exp(-Math.pow((u - 0.55) * 14, 2)));
+    };
+    ctx.strokeStyle = "#7fd6a8"; ctx.lineWidth = 2; ctx.beginPath();
+    for (let x = 0; x <= w; x++) { const y = h - 8 - Math.min(1.1, curve(x / w)) * (h - 18); x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.stroke();
+    if (type === "autofilter") { ctx.fillStyle = "#7fd6a8"; ctx.font = "14px sans-serif"; ctx.fillText("⇄", w * 0.47, 16); }
+  } else if (type === "geq") {
+    const gains = [0.5, 0.65, 0.75, 0.6, 0.45, 0.4, 0.55, 0.7, 0.6, 0.45];
+    gains.forEach((g, i) => {
+      const x = 6 + i * (w - 12) / 10;
+      ctx.fillStyle = "rgba(127,214,168,.25)"; ctx.fillRect(x, 6, 5, h - 12);
+      ctx.fillStyle = "#7fd6a8"; ctx.fillRect(x - 1, 6 + (1 - g) * (h - 16), 7, 4);
+    });
+  } else if (type === "compressor" || type === "limiter") {
+    // the gain curve: straight, then bending flat over the threshold
+    ctx.strokeStyle = "rgba(127,214,168,.35)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(8, h - 6); ctx.lineTo(w - 8, 6); ctx.stroke();
+    ctx.strokeStyle = "#7fd6a8"; ctx.lineWidth = 2; ctx.beginPath();
+    const knee = type === "limiter" ? 0.55 : 0.5, slope = type === "limiter" ? 0 : 0.3;
+    for (let x = 8; x <= w - 8; x++) {
+      const u = (x - 8) / (w - 16), v = u < knee ? u : knee + (u - knee) * slope;
+      const y = h - 6 - v * (h - 12);
+      x === 8 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  } else if (type === "tremolo") {
+    ctx.strokeStyle = "#7fd6a8"; ctx.lineWidth = 1.5; ctx.beginPath();
+    for (let x = 0; x <= w; x++) { const env = 0.55 + 0.45 * Math.sin(x / w * 4 * Math.PI); const y = h / 2 + Math.sin(x / w * 30 * Math.PI) * 18 * env; x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.stroke();
+  } else if (type === "autopan") {
+    ctx.strokeStyle = "#7fd6a8"; ctx.lineWidth = 2; ctx.beginPath();
+    for (let y = 4; y <= h - 4; y++) { const x = w / 2 + Math.sin((y - 4) / (h - 8) * 2 * Math.PI) * w * 0.35; y === 4 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
+    ctx.stroke();
+    ctx.fillStyle = "#7fd6a8"; ctx.font = "11px sans-serif"; ctx.fillText("L", 4, h / 2 + 4); ctx.fillText("R", w - 11, h / 2 + 4);
+  } else if (type === "ringmod") {
+    ctx.strokeStyle = "#7fd6a8"; ctx.lineWidth = 1.5; ctx.beginPath();
+    for (let x = 0; x <= w; x++) { const y = h / 2 + Math.sin(x / w * 4 * Math.PI) * Math.sin(x / w * 26 * Math.PI) * 18; x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.stroke();
+  } else if (["chorus", "flanger", "phaser", "vibrato"].includes(type)) {
+    const layers = type === "vibrato" ? 1 : 3;
+    for (let k = 0; k < layers; k++) {
+      ctx.strokeStyle = k ? `rgba(127,214,168,${0.55 - k * 0.15})` : "#7fd6a8"; ctx.lineWidth = 1.5; ctx.beginPath();
+      for (let x = 0; x <= w; x++) {
+        const wob = type === "vibrato" ? Math.sin(x / w * 2 * Math.PI) * 2.5 : k * 0.35 + (type === "flanger" ? x / w : 0) * k;
+        const y = h / 2 + Math.sin(x / w * 5 * Math.PI + wob) * 16;
+        x ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      ctx.stroke();
+    }
   }
 }
 
@@ -147,10 +202,12 @@ export class EffectsPanel {
     this.grid.innerHTML = "";
     const gens = GENERATORS.filter(g => this.match(g.label, g.id));
     const fx = EFFECT_ORDER.filter(id => this.match(EFFECTS[id].label, id));
-    const afx = AUDIO_EFFECT_ORDER.filter(id => !this.filter || AUDIO_EFFECTS[id].label.toLowerCase().includes(this.filter) || AUDIO_EFFECTS[id].blurb.toLowerCase().includes(this.filter));
+    const afxMatch = (id) => !this.filter || AUDIO_EFFECTS[id].label.toLowerCase().includes(this.filter) || AUDIO_EFFECTS[id].blurb.toLowerCase().includes(this.filter);
+    const afxGroups = AUDIO_EFFECT_GROUPS.map(([group, ids]) => [group, ids.filter(afxMatch)]).filter(([, ids]) => ids.length);
+    const afx = afxGroups.flatMap(([, ids]) => ids);
     if (gens.length) this.grid.append(el("div.tsection", {}, "Generators"), el("div.tgrid", {}, gens.map(g => this.generatorTile(g))));
     if (fx.length) this.grid.append(el("div.tsection", {}, "Video effects"), el("div.tgrid", {}, fx.map(id => this.effectTile(id))));
-    if (afx.length) this.grid.append(el("div.tsection", {}, "Audio effects"), el("div.tgrid", {}, afx.map(id => this.audioTile(id))));
+    for (const [group, ids] of afxGroups) this.grid.append(el("div.tsection", {}, `Audio · ${group}`), el("div.tgrid", {}, ids.map(id => this.audioTile(id))));
     if (!gens.length && !fx.length && !afx.length) this.grid.append(el("div.empty-note", {}, "Nothing matches."));
     this.grid.append(el("div.dim", { style: { fontSize: "11px", marginTop: "8px", lineHeight: "1.45" } },
       "Generators: drag onto a video track, or double-click to add at the playhead on the top track. Effects: drag onto a clip, or click to add to the selected clips (audio effects go on audio clips). Edit, reorder and keyframe effects in the Inspector."));

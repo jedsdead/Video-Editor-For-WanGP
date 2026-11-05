@@ -100,7 +100,11 @@ textarea { resize: vertical; width: 100%; user-select: text; }
 
 /* media bin */
 .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; }
-.media-item { background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; cursor: grab; position: relative; }
+.media-item { background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; cursor: grab; position: relative; user-select: none; -webkit-user-select: none; touch-action: none; }
+body.dragging-media, body.dragging-media * { cursor: grabbing !important; user-select: none !important; }
+.drag-label { position: fixed; z-index: 90; pointer-events: none; max-width: 260px; padding: 4px 9px; border-radius: 5px; font-size: 12px;
+  background: rgba(20,22,27,.92); border: 1px solid var(--border); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.drag-label.over { color: #fff; border-color: var(--sel); }
 .media-item.selected { border-color: var(--sel); }
 .media-item .thumb { height: 66px; background: #000 center / cover no-repeat; position: relative; }
 .media-item .thumb .kind { position: absolute; left: 4px; top: 4px; font-size: 10px; background: rgba(0,0,0,.7); padding: 1px 5px; border-radius: 3px; }

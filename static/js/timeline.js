@@ -41,7 +41,7 @@ export class Timeline {
     canvas.addEventListener("contextmenu", (e) => this.context(e));
     canvas.addEventListener("dblclick", (e) => this.dblclick(e));
     canvas.addEventListener("dragover", (e) => this.dragOver(e));
-    canvas.addEventListener("dragleave", () => { this.ghost = null; this.draw(); });
+    canvas.addEventListener("dragleave", () => { this.ghost = null; this.fileHint = false; this.draw(); });
     canvas.addEventListener("drop", (e) => this.drop(e));
     scrollbar.addEventListener("scroll", () => { if (Math.abs(scrollbar.scrollLeft - this.scrollX) > 0.5) { this.scrollX = scrollbar.scrollLeft; this.draw(); } });
     for (const name of ["change", "selection", "tracks", "project", "media-updated", "range"]) bus.on(name, () => { this.renderHeaders(); this.draw(); });
@@ -247,6 +247,12 @@ export class Timeline {
         ctx.fillRect(this.x(g.t), y + 3, g.dur * this.pps, part.row.h - 7);
         ctx.strokeRect(this.x(g.t) + .5, y + 3.5, g.dur * this.pps, part.row.h - 8);
       }
+    }
+    // files dragged in from the computer: they're uploaded first, so there's no outline yet, just where they'll go
+    if (this.fileHint) {
+      ctx.fillStyle = "rgba(79,140,255,.10)"; ctx.fillRect(0, 0, this.width, this.height);
+      ctx.fillStyle = "#cfe0ff"; ctx.font = "13px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("Drop to import and place on the timeline", this.width / 2, 22); ctx.textAlign = "left";
     }
     // marquee
     if (this.marquee) {
@@ -1109,9 +1115,14 @@ export class Timeline {
     e.dataTransfer.dropEffect = "copy";
     const id = window.__veDragMedia;
     const item = id && P().media[id];
+    if (!item) { this.ghost = null; this.fileHint = types.includes("Files"); this.draw(); return; }
+    this.mediaGhost(item, x, y);
+  }
+
+  // The outline of where a media item would land at canvas point (x, y), drawn as the ghost.
+  mediaGhost(item, x, y) {
     let t = Math.max(0, this.t(x));
     const row = this.rowAt(y) || this.nearestRow(y);
-    if (!item) { this.ghost = null; return; }
     const dur = M.isStillKind(item.kind) ? M.DEFAULT_STILL : item.duration || 1;
     const s = this.snap(t, this.snapPoints());
     t = s.snapped ? s.t : M.snapFrame(t);
@@ -1132,12 +1143,37 @@ export class Timeline {
     this.draw();
   }
 
+  // Pointer drags from the media bin (they don't depend on the browser's drag and drop): true while over the timeline.
+  overCanvas(clientX, clientY) {
+    const r = this.canvas.getBoundingClientRect();
+    return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom && r.width > 0;
+  }
+  previewMedia(item, clientX, clientY) {
+    if (!item || !P() || state.readOnly || !this.overCanvas(clientX, clientY)) { this.clearGhost(); return false; }
+    const r = this.canvas.getBoundingClientRect();
+    this.mediaGhost(item, clientX - r.left, clientY - r.top);
+    return true;
+  }
+  dropMedia(item, clientX, clientY) {
+    const ghost = this.previewMedia(item, clientX, clientY) ? this.ghost : null;
+    this.clearGhost();
+    if (!ghost) return null;
+    const clips = M.edit("Add clip", () => M.placeMedia(item, ghost.row.track.id, ghost.t));
+    if (clips) M.select(clips.map(c => c.id));
+    return clips;
+  }
+  clearGhost() {
+    if (!this.ghost && this.snapLine == null && !this.fileHint) return;
+    this.ghost = null; this.snapLine = null; this.fileHint = false; this.draw();
+  }
+
   drop(e) {
     e.preventDefault();
     const [x, y] = this.local(e);
     const ghost = this.ghost;
     this.ghost = null;
     this.snapLine = null;
+    this.fileHint = false;
     if (state.readOnly) return;
     const transitionId = e.dataTransfer.getData("text/x-ve-transition");
     if (transitionId) { bus.emit("drop-transition", { type: transitionId, hit: this.hit(x, y) }); return; }

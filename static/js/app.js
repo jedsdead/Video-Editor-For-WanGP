@@ -794,7 +794,12 @@ async function main() {
     }, true);
   } catch (_) { /* different origin: nothing to listen to */ }
   document.addEventListener("dragover", (e) => e.preventDefault());
-  document.addEventListener("drop", (e) => e.preventDefault());
+  // files dropped anywhere the bin and timeline don't handle still get imported (into the media bin)
+  document.addEventListener("drop", (e) => {
+    const handled = e.defaultPrevented;
+    e.preventDefault();
+    if (!handled && !state.readOnly && e.dataTransfer?.files?.length) app.bin.importFiles([...e.dataTransfer.files]);
+  });
   window.addEventListener("beforeunload", () => { if (P() && !state.readOnly) { try { navigator.sendBeacon && fetch(`api/projects/${encodeURIComponent(P().name)}`, { method: "PUT", body: JSON.stringify(P()), headers: { "Content-Type": "application/json" }, keepalive: true }); } catch (_) { /* ignore */ } } });
   window.addEventListener("pointerdown", (e) => { if (!e.target.closest(".menu") && !e.target.closest(".menu-btn")) closeMenu(); }, true);
 

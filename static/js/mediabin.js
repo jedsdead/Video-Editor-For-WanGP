@@ -50,14 +50,47 @@ export class MediaBin {
       thumb.style.backgroundPosition = "0 0";
     } else if (item.kind === "image") thumb.style.backgroundImage = `url(api/media/${item.id}/original)`;
     const node = el(`div.media-item.${item.kind}${state.selectedMedia === item.id ? ".selected" : ""}`, {
-      draggable: true, title: `${item.name}\n${item.width ? `${item.width}×${item.height}  ` : ""}${item.fps ? `${item.fps} fps  ` : ""}${item.path}`,
-      ondragstart: (e) => { e.dataTransfer.setData("text/x-ve-media", item.id); e.dataTransfer.effectAllowed = "copy"; window.__veDragMedia = item.id; },
-      ondragend: () => { window.__veDragMedia = null; },
-      onclick: () => { state.selectedMedia = item.id; M.clearSelection(); this.render(); bus.emit("media-selected", item.id); },
+      title: `${item.name}\n${item.width ? `${item.width}×${item.height}  ` : ""}${item.fps ? `${item.fps} fps  ` : ""}${item.path}\nDrag onto the timeline, or double-click to add at the end.`,
+      onpointerdown: (e) => this.pointerDrag(e, item),
+      onclick: (e) => { if (this.justDragged) { this.justDragged = false; return; } state.selectedMedia = item.id; M.clearSelection(); this.render(); bus.emit("media-selected", item.id); },
       ondblclick: () => this.addToTimeline(item),
       oncontextmenu: (e) => { e.preventDefault(); this.menu(e, item); },
     }, thumb, el("div.name", {}, item.name));
     return node;
+  }
+
+  // Dragging a tile onto the timeline, with pointer events (the browser's own drag and drop doesn't always reach the
+  // editor: inside WanGP's page, some browsers and setups never start it). A ghost shows where the clip will land.
+  pointerDrag(e, item) {
+    if (e.button !== 0 || state.readOnly) return;
+    const x0 = e.clientX, y0 = e.clientY, tl = this.app.timeline;
+    let label = null;
+    const move = (ev) => {
+      if (!label) {
+        if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < 6) return;
+        label = el("div.drag-label", {}, item.name);
+        document.body.append(label);
+        document.body.classList.add("dragging-media");
+      }
+      label.style.left = `${ev.clientX + 12}px`; label.style.top = `${ev.clientY + 10}px`;
+      const over = tl && tl.previewMedia(item, ev.clientX, ev.clientY);
+      label.classList.toggle("over", !!over);
+    };
+    const end = (ev) => {
+      window.removeEventListener("pointermove", move, true);
+      window.removeEventListener("pointerup", end, true);
+      window.removeEventListener("pointercancel", end, true);
+      if (!label) return;
+      label.remove();
+      document.body.classList.remove("dragging-media");
+      this.justDragged = true;
+      setTimeout(() => { this.justDragged = false; }, 0);
+      if (ev.type === "pointerup" && tl) tl.dropMedia(item, ev.clientX, ev.clientY);
+      else if (tl) tl.clearGhost();
+    };
+    window.addEventListener("pointermove", move, true);
+    window.addEventListener("pointerup", end, true);
+    window.addEventListener("pointercancel", end, true);
   }
 
   menu(e, item) {

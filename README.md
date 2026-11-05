@@ -2,7 +2,7 @@
 
 A multi-track video editor that runs as a plugin inside [WanGP](https://github.com/deepbeepmeep/Wan2GP), in its own tab. Cut your generations together, grade them, mix the audio and export, without leaving WanGP.
 
-**Version 1.7.2** · by jedsdeadbaby · MIT licence
+**Version 1.8** · by jedsdeadbaby · MIT licence
 
 ## Features
 
@@ -40,8 +40,12 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
   - Right-click a clip to copy, paste or remove its effects.
 
 **Audio effects**
-- **Reverb**, **Echo / delay**, **Pitch shift** (same speed), **EQ** (bass and treble shelves), **Low cut**, **High cut** and **Distortion** on audio clips. Drag one from the Effects panel onto an audio clip, click it to add it to the selected audio clips, or use **Add audio effect** in the Inspector, where they can be switched on and off, reordered, reset and removed.
-- They play in the viewer and render the same on export (the same impulse responses, filters and pitch shifter), before the clip's volume and fades.
+- **Sound:** reverb, echo / delay, pitch shift (same speed), distortion.
+- **EQ and filters:** bass / treble EQ, a ten-band **graphic EQ** (31 Hz to 16 kHz), **parametric EQ**, low cut, high cut, **band pass**, **notch** and an **auto filter** (a sweeping low-pass, auto-wah).
+- **Dynamics:** **compressor** (threshold, ratio, attack, release, knee, makeup) and **limiter** (input gain, ceiling, release).
+- **Modulation:** **chorus**, **flanger**, **phaser**, **tremolo**, **vibrato**, **auto pan** and **ring modulator**.
+- Drag one from the Effects panel onto an audio clip, click it to add it to the selected audio clips, or use **Add audio effect** in the Inspector, where they can be switched on and off, reordered, reset and removed. Whole tracks and the master bus also have an EQ and compressor under the mixer's **FX** buttons.
+- They play in the viewer and render the same on export (the same filters, impulse responses, pitch shifter and compressor), before the clip's volume and fades. Modulation effects start their sweep at the clip's start on export; in the viewer the sweep runs freely, so its position can differ.
 
 **Titles**
 - Drag the **Title** generator from the Effects panel (or press Shift+T). Set the text, font, size, bold and italic, colour, alignment, line height, outline, drop shadow and background box in the Inspector, and animate it with the transform keyframes.
@@ -149,7 +153,7 @@ There's nothing extra to install, because the plugin uses the FFmpeg, PyTorch an
 ## Using it
 
 1. Use **Import files** or **Browse outputs…** in the Media panel to bring in clips.
-2. Drag clips onto the timeline, or double-click one to add it to the end.
+2. Drag clips from the Media panel onto the timeline (or double-click one to add it to the end). Files dragged in from Explorer or Finder are uploaded and placed where you drop them on the timeline, or added to the Media panel when dropped anywhere else.
 3. Edit with the tools. Select a clip or transition to change it in the Inspector.
 4. Click **Export**.
 

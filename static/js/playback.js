@@ -14,7 +14,7 @@ import { drawGenerator, effectPasses, EFFECTS } from "./effects.js";
 const EFFECTS_KNOWN = new Set(Object.keys(EFFECTS));
 import { ensureLut } from "./lut.js";
 import { dbToGain, clamp } from "./util.js";
-import { buildChain, PITCH_WORKLET } from "./audiofx.js";
+import { buildChain, PITCH_WORKLET, WORKLET_EFFECTS } from "./audiofx.js";
 
 const LOOKAHEAD = 2.5;
 
@@ -270,7 +270,7 @@ export class Playback {
   ensureAudioFx(entry, clip) {
     if (!this.ctx || !entry.node || !entry.gain) return;
     const list = (clip.afx || []).filter(f => f.on !== false);
-    if (list.some(f => f.type === "pitch") && !this.pitchState) {
+    if (list.some(f => WORKLET_EFFECTS.includes(f.type)) && !this.pitchState) {
       this.pitchState = "loading";
       const url = URL.createObjectURL(new Blob([PITCH_WORKLET], { type: "application/javascript" }));
       this.ctx.audioWorklet.addModule(url).then(() => { this.pitchState = "ready"; for (const e of this.pool.values()) e.fxSig = null; })
@@ -280,7 +280,7 @@ export class Playback {
     if (entry.fxSig === sig) return;
     entry.fxSig = sig;
     try { entry.node.disconnect(); } catch (_) { /* not connected */ }
-    if (entry.chain) { try { entry.chain.output.disconnect(); } catch (_) { /* ignore */ } entry.chain = null; }
+    if (entry.chain) { try { entry.chain.output.disconnect(); entry.chain.stop?.(); } catch (_) { /* ignore */ } entry.chain = null; }
     if (!list.length) { entry.node.connect(entry.gain); return; }
     try {
       entry.chain = buildChain(this.ctx, list, { pitchReady: this.pitchState === "ready" });
@@ -389,6 +389,7 @@ export class Playback {
     if (!entry) return;
     try { entry.el.pause && entry.el.pause(); } catch (_) { /* ignore */ }
     try { entry.gain && entry.gain.disconnect(); entry.node && entry.node.disconnect(); } catch (_) { /* ignore */ }
+    try { entry.chain && entry.chain.stop?.(); } catch (_) { /* ignore */ }
     if (entry.el.tagName !== "CANVAS") {
       entry.el.removeAttribute("src");
       if (entry.el.load) try { entry.el.load(); } catch (_) { /* ignore */ }

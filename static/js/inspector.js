@@ -3,7 +3,7 @@ import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { api, el, toast, timecode, shortTime, clamp } from "./util.js";
 import { CURVES, FADE_CURVES } from "./keys.js";
-import { AUDIO_EFFECTS, AUDIO_EFFECT_ORDER, defaultAudioParams } from "./audiofx.js";
+import { AUDIO_EFFECTS, AUDIO_EFFECT_GROUPS, defaultAudioParams } from "./audiofx.js";
 import { FONT_FALLBACK } from "./titles.js";
 import { EFFECTS, EFFECT_ORDER, defaultEffectParams } from "./effects.js";
 import { openRegenDialog, canRegenerate } from "./regen.js";
@@ -402,7 +402,8 @@ export class Inspector {
       if (!type) return;
       M.edit(`Add ${AUDIO_EFFECTS[type].label}`, () => M.addAudioEffect(list.map(c => c.id), type, defaultAudioParams(type)));
       this.render();
-    } }, el("option", { value: "" }, "Add audio effect…"), AUDIO_EFFECT_ORDER.map(id => el("option", { value: id }, AUDIO_EFFECTS[id].label)));
+    } }, el("option", { value: "" }, "Add audio effect…"), AUDIO_EFFECT_GROUPS.map(([group, ids]) =>
+      el("optgroup", { label: group }, ids.map(id => el("option", { value: id }, AUDIO_EFFECTS[id].label)))));
     holder.append(el("div.field.wide", {}, el("label", {}, ""), add));
     if (list.length > 1) {
       const count = list.reduce((n, c) => n + (c.afx || []).length, 0);
@@ -426,7 +427,7 @@ export class Inspector {
         el("button.small.kbtn", { title: "Reset to defaults", onclick: () => { change(`Reset ${def.label}`, f => { f.params = defaultAudioParams(fx.type); }); this.render(); } }, "↺"),
         el("button.small.kbtn", { title: "Remove the effect", onclick: () => { M.edit(`Remove ${def.label}`, () => M.removeAudioEffect(clip.id, fx.id)); this.render(); } }, "✕"));
       const rows = def.params.map(p => {
-        const label = `${p.label} (${p.unit})` + "\u200b".repeat(index + 1);
+        const label = (p.unit ? `${p.label} (${p.unit})` : p.label) + "\u200b".repeat(index + 1);
         this.defaults = { ...(this.defaults || {}), [label]: p.def };
         return this.slider(label, { get: () => fxLive().params?.[p.key] ?? p.def,
           set: (v) => M.updateAudioEffect(clip.id, fx.id, f => { f.params = { ...(f.params || {}), [p.key]: v }; }),
