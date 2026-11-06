@@ -40,6 +40,8 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
   - Right-click a clip to copy, paste or remove its effects.
 
 **Pages**
+- **Full screen editor:** the button at the top right fills the screen with the editor (WanGP's own Full Screen, as Showrunner has; in a browser on its own, the browser's full screen). Click it again to go back.
+- A **scrub bar** under the viewer when the timeline isn't on screen: in the viewer's full screen and on the Colour page. It shows the shots, markers and in / out range; click or drag to move the playhead.
 - Three pages, as in Resolve: **Edit** (Shift+4), **Colour** (Shift+6) and **Audio** (Shift+7), switched with the buttons in the top bar. They share the project, viewer and playback; each page remembers its own panel layout.
 - **Colour page:** a **Shots** strip of every shot on the timeline in order. Click a shot to grade it (it shows in the viewer), Ctrl/Shift+click to pick several. The wheels, sliders, curves, shot match and LUT sit side by side under it, with the scopes beside the viewer. Right-click a shot to **match the selected shots' colour to it**, copy its grade to them, or reset a grade. The Colour panel still works on the Edit page.
 - **Audio page:** the timeline with a wide mixer beside it, the audio effects in the Effects panel, the Inspector for clip effects, and an **Analyser**: the master spectrum with peak hold, loudness over the last 30 seconds (momentary and short-term LUFS) and a stereo phase and balance meter.
@@ -80,6 +82,8 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
   Each clip keeps the values of both styles, and only the selected style is applied, so switching loses nothing.
 - Exposure, contrast, saturation, temperature and tint.
 - **Curves:** custom curves (master, red, green and blue) and **Hue vs Hue**, **Hue vs Sat**, **Hue vs Lum**, **Lum vs Sat** and **Sat vs Sat**. Click to add a point, drag it, double-click or right-click to remove it; the hue curves have quick R / Y / G / C / B / M points. Curves come after the wheels and sliders and before the LUT, and render the same on export.
+- **Colour picker (⌖):** pick a colour in the viewer. On the curves it adds a point at the picked colour (its hue, saturation, luminance or channel value, as the curves see it: after the wheels, before the curves) with a point either side, **Range** apart, so only that range moves. Every colour field (titles, solids, borders, dips) has one too.
+- **White balance:** **Auto** evens out the frame's average colour at the playhead (ignoring clipped and near-black pixels); **Pick neutral** makes something grey or white in the picture truly neutral. Per-channel gains before the rest of the grade, with On and Reset.
 - **Shot match:** from the Colour page, a per-channel correction that brings a shot's colour and contrast to another shot's (measured over three frames of each, as graded). It sits after the grade and LUT, and can be switched off or cleared in the Colour panel.
 - **LUTs:** import `.cube` 3D LUTs and apply one per clip with a mix amount.
 - **Grade keyframes:** ◆ in the Colour panel keys the whole grade at the playhead, with an ease to the next keyframe.

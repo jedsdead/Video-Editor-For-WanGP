@@ -704,6 +704,13 @@ export class Playback {
     }
   }
 
+  // Draw the current frame now (the colour picker reads it straight back).
+  renderNow() {
+    if (!P()) return false;
+    const { entries } = this.buildFrame(this.time);
+    return this.renderer.render(entries);
+  }
+
   tick(now) {
     requestAnimationFrame((t) => this.tick(t));
     if (!P()) return;

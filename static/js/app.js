@@ -21,6 +21,8 @@ import { TransformOverlay } from "./transform.js";
 import { MarkersPanel } from "./markers.js";
 import { ShotStrip } from "./shotstrip.js";
 import { SpectrumPanel } from "./spectrum.js";
+import { ColourPicker, eyedropper } from "./picker.js";
+import { ScrubBar } from "./scrubbar.js";
 import { openShotDetect } from "./shotdetect.js";
 import { RegenJobs, openRegenDialog, canRegenerate } from "./regen.js";
 import { openGenerate, sides, MODE_LABEL } from "./gendialog.js";
@@ -695,6 +697,13 @@ async function main() {
   bus.on("regen-jobs", () => app.timeline && app.timeline.draw());
   app.markers = new MarkersPanel(app);
   app.shots = new ShotStrip(app);
+  app.picker = new ColourPicker(app);
+  app.scrub = new ScrubBar(app);
+  // an eyedropper beside every colour field (titles, solids, borders, dips...): pick the colour from the viewer
+  const droppers = (root) => root?.querySelectorAll?.("input[type=color]:not([data-dropper])").forEach(inp => { inp.dataset.dropper = "1"; inp.after(eyedropper(app, inp)); });
+  new MutationObserver((muts) => { for (const m of muts) for (const n of m.addedNodes) if (n.nodeType === 1) { if (n.matches("input[type=color]")) droppers(n.parentElement); else droppers(n); } })
+    .observe(document.body, { childList: true, subtree: true });
+  droppers(document.body);
   app.spectrum = new SpectrumPanel(app);
   app.docks = new Docks([
     { id: "media", title: "Media", node: app.bin.node, dock: "left" },
@@ -777,9 +786,26 @@ async function main() {
   $("btnPrevFrame").onclick = () => app.playback.step(-1);
   $("btnNextFrame").onclick = () => app.playback.step(1);
   // full screen takes the whole viewer, transport included, so playback and leaving work without the keyboard
-  $("btnFullscreen").onclick = () => { const v = $("viewer"); document.fullscreenElement ? document.exitFullscreen() : v.requestFullscreen?.(); };
+  // the whole editor full screen: WanGP's own Full Screen / Back to WanGP button when WanGP offers one (as Showrunner
+  // has), otherwise the browser's full screen
+  {
+    const host = $("hostButtons");
+    try { window.parent !== window && window.frameElement && window.parent.WanGPAddonNavigation?.headerButton(window.frameElement, host, "icon host-btn"); } catch (_) { /* opened on its own */ }
+    if (!host.children.length) {
+      const icon = (on) => on ? '<svg viewBox="0 0 24 24"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>';
+      const btn = el("button.icon.host-btn", { title: "Full screen editor", onclick: () => {
+        if (document.fullscreenElement === document.documentElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.();
+      } });
+      btn.innerHTML = icon(false);
+      document.addEventListener("fullscreenchange", () => { const on = document.fullscreenElement === document.documentElement; btn.innerHTML = icon(on); btn.title = on ? "Leave full screen" : "Full screen editor"; });
+      host.append(btn);
+    }
+  }
+  $("btnFullscreen").onclick = () => { const v = $("viewer"); document.fullscreenElement === v ? document.exitFullscreen() : v.requestFullscreen?.(); };
   document.addEventListener("fullscreenchange", () => {
-    const on = !!document.fullscreenElement;
+    const on = document.fullscreenElement === $("viewer");   // (the whole editor full screen is the other button)
+    document.body.classList.toggle("viewer-fs", on);
+    requestAnimationFrame(() => app.scrub.draw());
     $("btnFullscreen").title = on ? "Leave full screen (Esc)" : "Full screen (Esc to leave)";
     $("btnFullscreen").innerHTML = on ? '<svg viewBox="0 0 24 24"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>'
                                       : '<svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>';

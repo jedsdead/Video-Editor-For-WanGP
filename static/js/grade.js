@@ -21,8 +21,10 @@ export function gradeUniforms(grade) {
   const gain = wheelVector(grade.gain, RANGES.gain).map(v => 1 + v + (grade.gain?.master || 0));
   const gamma = wheelVector(grade.gamma, RANGES.gamma).map(v => Math.max(0.05, 1 + v + (grade.gamma?.master || 0)));
   const t = grade.temperature || 0, tint = grade.tint || 0;
+  // white balance (Colour panel: Auto, or picked from something neutral): per-channel gains before everything else
+  const wbg = grade.wbOn !== false && Array.isArray(grade.wbGain) ? grade.wbGain.slice(0, 3).map(Number) : [1, 1, 1];
   const u = {
-    exposure: Math.pow(2, grade.exposure || 0), wb: [1 + 0.2 * t, 1 - 0.2 * tint, 1 - 0.2 * t],
+    exposure: Math.pow(2, grade.exposure || 0), wb: [(1 + 0.2 * t) * wbg[0], (1 - 0.2 * tint) * wbg[1], (1 - 0.2 * t) * wbg[2]],
     lift, gain, gammaInv: gamma.map(g => 1 / g), contrast: 1 + (grade.contrast || 0),
     saturation: grade.saturation ?? 1,
   };

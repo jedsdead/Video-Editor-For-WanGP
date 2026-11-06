@@ -103,7 +103,7 @@ export class ColourPanel {
       el("div.btnrow.gradekeys", { style: { marginBottom: "8px", alignItems: "center" } },
         el("span.dim", {}, "Keyframes"), el("span.kctl", {}, this.kPrev, this.kDiamond, this.kNext), this.kEase, this.kClear, this.keyNote),
       el("div.field.wide", { style: { marginBottom: "8px" } }, el("label", {}, "Wheels"), this.styleSelect)),
-      el("div.c-wheels", {}, this.lggBox, this.zonesBox), el("div.c-gap", { style: { height: "10px" } }), el("div.c-sliders", {}, sliderBox),
+      el("div.c-wheels", {}, this.lggBox, this.zonesBox), el("div.c-gap", { style: { height: "10px" } }), el("div.c-sliders", {}, sliderBox, this.wbSection()),
       el("div.c-curves", {}, this.curvesSection()),
       el("div.c-side", {}, this.matchSection(),
       el("div.insp-section", { style: { marginTop: "8px" } }, el("h4", {}, "LUT"),
@@ -124,8 +124,46 @@ export class ColourPanel {
     this.curves = new CurvesEditor({
       getGrade: () => { const c = this.targets()[0]; return c ? M.mergeGrade(this.gradeOf(c)) : null; },
       change: (label, fn) => this.apply(`curves-${label}`, (g) => { g.curves = JSON.parse(JSON.stringify(g.curves || {})); fn(g.curves, g); }),
+      pick: () => this.app.picker.pick({ stage: "precurves", label: "Pick the colour to change" }),
     });
     return el("div.insp-section.curves-section", { style: { marginTop: "8px" } }, el("h4", {}, "Curves"), this.curves.node);
+  }
+
+  // White balance: per-channel gains applied before the rest of the grade. Auto evens out the frame's average colour
+  // (grey world, ignoring clipped and near-black pixels); Pick neutral makes a picked grey or white truly neutral.
+  wbSection() {
+    this.wbOn = el("input", { type: "checkbox", onchange: () => this.apply("wb-on", (g) => { g.wbOn = this.wbOn.checked; }) });
+    this.wbInfo = el("span.dim", { style: { fontSize: "11px" } });
+    const set = (label, gains) => this.apply(`wb-${label}`, (g) => { g.wbGain = gains.map(v => +Math.max(0.4, Math.min(2.5, v)).toFixed(4)); g.wbOn = true; });
+    const auto = () => {
+      const px = this.app.picker.frame("source", 3);
+      const sum = [0, 0, 0];
+      let n = 0;
+      for (const p of px) {
+        const l = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+        if (l < 0.04 || Math.max(...p) > 0.98) continue;
+        sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2]; n++;
+      }
+      if (n < 50) { toast("Not enough usable picture for automatic white balance"); return; }
+      const m = sum.map(v => v / n), L = 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2];
+      set("auto", m.map(v => L / Math.max(1e-3, v)));
+      toast("White balance set from the frame");
+    };
+    const pick = async () => {
+      const res = await this.app.picker.pick({ stage: "source", label: "Pick something that should be grey or white" });
+      if (!res) return;
+      const L = res.luma;
+      if (L < 0.03) { toast("That's too dark to balance from; pick a brighter grey or white"); return; }
+      set("pick", res.rgb.map(v => L / Math.max(1e-3, v)));
+    };
+    return el("div.insp-section", { style: { marginTop: "8px" } }, el("h4", {}, "White balance"),
+      el("div.btnrow", { style: { alignItems: "center", flexWrap: "wrap", gap: "4px" } },
+        el("button.small", { title: "Automatic: even out the frame's average colour at the playhead", onclick: auto }, "Auto"),
+        el("button.small", { title: "Pick something in the viewer that should be grey or white", onclick: pick }, "⌖ Pick neutral"),
+        el("label", { style: { display: "flex", gap: "4px", alignItems: "center" } }, this.wbOn, "On"),
+        el("div.spacer"),
+        el("button.small", { title: "Remove the white balance", onclick: () => this.apply("wb-clear", (g) => { g.wbGain = null; }) }, "Reset")),
+      this.wbInfo);
   }
 
   // Shot match (set from the Colour page: right-click a shot > Match to this shot): a correction after the grade
@@ -243,6 +281,10 @@ export class ColourPanel {
     }
     this.bypass.checked = g.enabled === false;
     this.curves.sync();
+    const wb = Array.isArray(g.wbGain) ? g.wbGain : null;
+    this.wbOn.checked = !!wb && g.wbOn !== false;
+    this.wbOn.disabled = !wb;
+    this.wbInfo.textContent = wb ? `Gains R ${wb[0].toFixed(2)} · G ${wb[1].toFixed(2)} · B ${wb[2].toFixed(2)}` : "Not set";
     this.matchBox.hidden = !g.match;
     if (g.match) {
       this.matchOn.checked = g.match.on !== false;

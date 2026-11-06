@@ -414,3 +414,18 @@ body[data-page="colour"] .splitter[data-split="bottom"], body[data-page="colour"
 .spec-loud { display: block; width: 100%; height: 110px; border-radius: 4px; }
 .spec-phase { display: block; width: 100%; height: 42px; border-radius: 4px; }
 .spec-readout { font-size: 11px; color: var(--muted); margin-top: 4px; font-family: ui-monospace, monospace; }
+
+/* scrub bar under the viewer: in full screen and on the Colour page (where the timeline is away) */
+#scrubBar { display: none; position: relative; padding: 4px 10px 0; }
+#viewer:fullscreen #scrubBar, body[data-page="colour"] #scrubBar { display: block; }
+#viewer:fullscreen #scrubBar { background: rgba(20,21,25,.92); }
+canvas.scrubbar { display: block; width: 100%; height: 22px; cursor: pointer; }
+.scrub-tip { position: absolute; top: -18px; transform: translateX(-50%); font: 11px ui-monospace, monospace; background: rgba(0,0,0,.8); color: #fff; padding: 1px 5px; border-radius: 3px; pointer-events: none; }
+/* colour picker */
+body.picking #viewerStage, body.picking #previewCanvas { cursor: crosshair !important; }
+.pick-hint { position: absolute; z-index: 5; display: flex; gap: 6px; align-items: center; padding: 4px 8px; border-radius: 5px; font-size: 11px;
+  background: rgba(12,13,16,.9); border: 1px solid var(--border); color: #fff; pointer-events: none; white-space: nowrap; }
+.pick-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(255,255,255,.5); background: #000; }
+.pick-btn { min-width: 0; padding: 2px 6px; margin-left: 4px; }
+#hostButtons { display: inline-flex; margin-left: 6px; }
+#hostButtons button { color: var(--text); }

@@ -295,7 +295,7 @@ export class Renderer {
     gl.uniform2f(u.uCanvas, size ? size[0] : this.canvas.width, size ? size[1] : this.canvas.height);
     gl.uniform1i(u.uPremul, item.premul ? 1 : 0);
     if (u.uUnpremul) gl.uniform1i(u.uUnpremul, item.unpremul ? 1 : 0);
-    const lut = !item.premul && item.lut && this.luts.get(item.lut.name);
+    const lut = !item.premul && !this.pickStage && item.lut && this.luts.get(item.lut.name);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_3D, (lut || this.emptyLut).tex);
     gl.uniform1i(u.uLut, 1);
@@ -305,7 +305,10 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.uniform1f(u.uAlpha, item.alpha);
     gl.uniform3f(u.uLevel, ...(item.level || [1, 1, 1]));
-    const g = item.premul ? null : item.grade;
+    // the colour picker can ask for the picture before the grade ("source") or before the curves, LUT and shot match
+    let g = item.premul ? null : item.grade;
+    if (this.pickStage === "source") g = null;
+    else if (this.pickStage === "precurves" && g) g = { ...g, curves: null, match: null };
     gl.uniform1i(u.uGrade, g ? 1 : 0);
     gl.uniform1i(u.uMatchOn, 0);
     if (g) {

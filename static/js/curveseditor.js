@@ -28,9 +28,12 @@ function hueRgb(h) {
 
 export class CurvesEditor {
   // getGrade(): the grade shown; change(label, fn(curves, grade)): edit it (fn mutates a copy of grade.curves)
-  constructor({ getGrade, change }) {
+  // pick(): the colour picker (resolves {rgb, hsv, luma} picked from the viewer before the curves, or null)
+  constructor({ getGrade, change, pick }) {
     this.getGrade = getGrade;
     this.change = change;
+    this.pickFn = pick;
+    this.marker = null;
     this.mode = "rgb";
     this.channel = "master";
     this.drag = null;
@@ -39,12 +42,18 @@ export class CurvesEditor {
       CURVE_MODES.map(m => el("option", { value: m.id }, m.label)));
     this.onOff = el("input", { type: "checkbox", title: "Curves on or off (compare)", onchange: () => this.change("Curves on/off", (_, g) => { g.curvesOn = this.onOff.checked; }) });
     this.tools = el("div.btnrow.curve-tools");
+    // the picker adds a point at the picked colour, with a point either side (Range apart) so only that range moves
+    this.range = el("input", { type: "number", min: 0.01, max: 0.4, step: 0.01, value: 0.08, style: { width: "56px" },
+      title: "How far either side of a picked colour the curve stays put (0.01 narrow to 0.4 wide)" });
+    this.pickRow = el("div.btnrow.curve-tools", {},
+      el("button.small", { title: "Pick a colour from the viewer: adds a point at it on this curve, with a point either side so only that range changes", onclick: () => this.pick() }, "⌖ Pick"),
+      el("label.dim", { style: { fontSize: "11px", display: "flex", gap: "4px", alignItems: "center" } }, "Range", this.range));
     this.node = el("div.curves-editor", {},
       el("div.btnrow", { style: { alignItems: "center", marginBottom: "6px" } },
         el("label", { style: { display: "flex", gap: "4px", alignItems: "center" } }, this.onOff, "On"), this.modeSel, el("div.spacer"),
         el("button.small", { title: "Reset this curve", onclick: () => this.resetCurve() }, "Reset"),
         el("button.small", { title: "Reset every curve", onclick: () => this.change("Reset curves", (c) => { for (const k of Object.keys(c)) delete c[k]; }) }, "Reset all")),
-      this.tools, this.canvas);
+      this.tools, this.pickRow, this.canvas);
     this.canvas.addEventListener("pointerdown", (e) => this.down(e));
     this.canvas.addEventListener("pointermove", (e) => this.move(e));
     this.canvas.addEventListener("pointerup", () => { this.drag = null; });
@@ -56,6 +65,38 @@ export class CurvesEditor {
   }
 
   get name() { return this.mode === "rgb" ? this.channel : this.mode; }
+
+  // the curve's input for a picked colour: the channel value, luminance, hue or saturation
+  inputOf(res, name = this.name) {
+    const [r, g, b] = res.rgb;
+    if (name === "master") return res.luma;
+    if (name === "r") return r;
+    if (name === "g") return g;
+    if (name === "b") return b;
+    if (name === "lumSat") return res.luma;
+    if (name === "satSat") return res.hsv[1];
+    return res.hsv[0];
+  }
+  async pick() {
+    if (!this.pickFn) return;
+    const res = await this.pickFn();
+    if (!res) return;
+    const name = this.name, x = this.inputOf(res);
+    const width = clamp(parseFloat(this.range.value) || 0.08, 0.01, 0.4);
+    const periodic = PERIODIC.includes(name);
+    const pts = this.shownPoints();
+    const near = (px) => pts.some(([qx]) => Math.abs(qx - px) < 0.012 || (periodic && Math.abs(Math.abs(qx - px) - 1) < 0.012));
+    const add = (px) => {
+      let q = periodic ? ((px % 1) + 1) % 1 : px;
+      if (!periodic && (q <= 0 || q >= 1)) return;
+      if (!near(q)) pts.push([q, this.valueAt(q)]);
+    };
+    add(x - width); add(x); add(x + width);
+    pts.sort((a, b) => a[0] - b[0]);
+    this.setPoints("Pick a colour on the curve", pts);
+    this.marker = { name, x };
+    this.draw();
+  }
 
   renderTools() {
     this.tools.innerHTML = "";
@@ -206,6 +247,11 @@ export class CurvesEditor {
     g.lineWidth = 2; g.beginPath();
     for (let i = 0; i < CURVE_N; i++) { const x = i / (CURVE_N - 1) * w, y = (1 - shape[i]) * h; i ? g.lineTo(x, y) : g.moveTo(x, y); }
     g.stroke(); g.globalAlpha = 1;
+    // where the last picked colour sits on this curve
+    if (this.marker && this.marker.name === name) {
+      const mx = Math.round(this.marker.x * w) + .5;
+      g.strokeStyle = "rgba(255,255,255,.55)"; g.setLineDash([2, 3]); g.beginPath(); g.moveTo(mx, 0); g.lineTo(mx, h); g.stroke(); g.setLineDash([]);
+    }
     for (const [px, py] of this.shownPoints()) {
       g.fillStyle = "#fff"; g.strokeStyle = "#0c0d10"; g.lineWidth = 1.5;
       g.beginPath(); g.arc(px * w, (1 - py) * h, 4.5, 0, Math.PI * 2); g.fill(); g.stroke();

@@ -58,10 +58,11 @@ class VideoEditorPlugin(WAN2GPPlugin):
         return getattr(self, "server_config", None) or {}
 
     def create_ui(self):
+        # .wangp-addon-web-view: WanGP's own full screen (its button sits in the editor's top bar) sizes the frame
         gr.HTML(
-            f'<iframe src="{WEB_PATH}/" title="Video Editor" '
+            f'<div class="wangp-addon-web-view"><iframe src="{WEB_PATH}/" title="Video Editor" '
             'style="width:100%;height:calc(100vh - 150px);min-height:640px;border:0;border-radius:8px;background:#16171b" '
-            'allow="fullscreen; autoplay; clipboard-write"></iframe>'
+            'allow="fullscreen; autoplay; clipboard-write"></iframe></div>'
         )
 
     def create_web_app(self):

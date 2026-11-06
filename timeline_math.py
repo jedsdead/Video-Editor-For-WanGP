@@ -244,9 +244,11 @@ def grade_params(grade):
     gamma_d, gamma_m = _wheel(grade.get("gamma"), GAMMA_RANGE)
     gain_d, gain_m = _wheel(grade.get("gain"), GAIN_RANGE)
     temperature, tint = float(grade.get("temperature") or 0), float(grade.get("tint") or 0)
+    # white balance (Colour panel: Auto, or picked from something neutral): per-channel gains before everything else
+    wbg = [float(v) for v in (grade.get("wbGain") or [1, 1, 1])][:3] if grade.get("wbOn") is not False else [1.0, 1.0, 1.0]
     params = {
         "exposure": 2.0 ** float(grade.get("exposure") or 0),
-        "wb": [1.0 + 0.2 * temperature, 1.0 - 0.2 * tint, 1.0 - 0.2 * temperature],
+        "wb": [(1.0 + 0.2 * temperature) * wbg[0], (1.0 - 0.2 * tint) * wbg[1], (1.0 - 0.2 * temperature) * wbg[2]],
         "lift": [lift_m + d for d in lift_d],
         "gain": [1.0 + gain_m + d for d in gain_d],
         "gamma": [max(0.05, 1.0 + gamma_m + d) for d in gamma_d],
