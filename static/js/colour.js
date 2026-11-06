@@ -5,6 +5,7 @@ import { state, P, bus } from "./model.js";
 import { api, el, toast, clamp } from "./util.js";
 import { ColorWheel, ZONES } from "./grade.js";
 import { CURVES } from "./keys.js";
+import { CurvesEditor } from "./curveseditor.js";
 
 const WHEELS = [["lift", "Lift", -0.5, 0.5], ["gamma", "Gamma", -0.8, 0.8], ["gain", "Gain", -0.8, 0.8]];
 const ZONE_LABELS = { master: "Master", shadows: "Shadows", mids: "Midtones", highs: "Highlights" };
@@ -91,8 +92,9 @@ export class ColourPanel {
     this.kClear = el("button.small", { title: "Remove all grade keyframes and keep the grade at the playhead", onclick: () => M.edit("Clear grade keyframes", () => { for (const c of this.targets()) M.clearGradeKeys(c.id, this.tauOf(c)); }) }, "Clear");
     this.keyNote = el("span.dim", { style: { fontSize: "11px" } });
 
-    this.controls = el("div", {},
-      el("div.btnrow", { style: { marginBottom: "8px" } },
+    // grouped so the Colour page's stage can lay them out side by side (.c-top, .c-wheels, .c-sliders, .c-curves, .c-side)
+    this.controls = el("div.colour-controls", {},
+      el("div.c-top", {}, el("div.btnrow", { style: { marginBottom: "8px" } },
         el("label", { style: { display: "flex", gap: "4px", alignItems: "center" }, title: "Compare with the ungraded image" }, this.bypass, "Bypass"),
         el("div.spacer"),
         el("button.small", { onclick: () => this.copy() }, "Copy"),
@@ -100,13 +102,15 @@ export class ColourPanel {
         el("button.small", { onclick: () => this.reset() }, "Reset")),
       el("div.btnrow.gradekeys", { style: { marginBottom: "8px", alignItems: "center" } },
         el("span.dim", {}, "Keyframes"), el("span.kctl", {}, this.kPrev, this.kDiamond, this.kNext), this.kEase, this.kClear, this.keyNote),
-      el("div.field.wide", { style: { marginBottom: "8px" } }, el("label", {}, "Wheels"), this.styleSelect),
-      this.lggBox, this.zonesBox, el("div", { style: { height: "10px" } }), sliderBox,
+      el("div.field.wide", { style: { marginBottom: "8px" } }, el("label", {}, "Wheels"), this.styleSelect)),
+      el("div.c-wheels", {}, this.lggBox, this.zonesBox), el("div.c-gap", { style: { height: "10px" } }), el("div.c-sliders", {}, sliderBox),
+      el("div.c-curves", {}, this.curvesSection()),
+      el("div.c-side", {}, this.matchSection(),
       el("div.insp-section", { style: { marginTop: "8px" } }, el("h4", {}, "LUT"),
         el("div.field.wide", {}, el("label", {}, "LUT"), this.lutSelect),
         el("div.field", {}, el("label", {}, "Mix"), this.lutMix, this.lutMixVal),
         el("div.btnrow", {}, el("button.small", { onclick: () => this.lutFile.click() }, "Import .cube…"), this.lutFile),
-        el("div.dim", { style: { fontSize: "11px", marginTop: "4px" } }, "The LUT is applied after the wheels and sliders. Imported LUTs are kept for every project.")),
+        el("div.dim", { style: { fontSize: "11px", marginTop: "4px" } }, "The LUT is applied after the wheels and sliders. Imported LUTs are kept for every project."))),
       el("div.dim", { style: { fontSize: "11px", marginTop: "8px" } }, "Changes apply to every selected video clip. Once a clip has grade keyframes, changes add or update a keyframe at the playhead. Copy/Paste moves a grade between clips (Ctrl+Alt+C / Ctrl+Alt+V)."));
     this.node = el("div", {}, el("div.panel-scroll", {}, this.note, this.controls));
     for (const name of ["selection", "project", "change"]) bus.on(name, () => this.sync());
@@ -114,6 +118,25 @@ export class ColourPanel {
     bus.on("time", () => { const now = performance.now(); if (now - last > 100) { last = now; this.sync(); } });
     this.refreshLuts();
     this.sync();
+  }
+
+  curvesSection() {
+    this.curves = new CurvesEditor({
+      getGrade: () => { const c = this.targets()[0]; return c ? M.mergeGrade(this.gradeOf(c)) : null; },
+      change: (label, fn) => this.apply(`curves-${label}`, (g) => { g.curves = JSON.parse(JSON.stringify(g.curves || {})); fn(g.curves, g); }),
+    });
+    return el("div.insp-section.curves-section", { style: { marginTop: "8px" } }, el("h4", {}, "Curves"), this.curves.node);
+  }
+
+  // Shot match (set from the Colour page: right-click a shot > Match to this shot): a correction after the grade
+  matchSection() {
+    this.matchOn = el("input", { type: "checkbox", onchange: () => this.apply("match-on", (g) => { if (g.match) g.match = { ...g.match, on: this.matchOn.checked }; }) });
+    this.matchInfo = el("span.dim", { style: { fontSize: "11px" } });
+    this.matchBox = el("div.insp-section", { style: { marginTop: "8px" } }, el("h4", {}, "Shot match"),
+      el("div.btnrow", { style: { alignItems: "center" } },
+        el("label", { style: { display: "flex", gap: "4px", alignItems: "center" } }, this.matchOn, "On"), this.matchInfo, el("div.spacer"),
+        el("button.small", { title: "Remove the shot match", onclick: () => this.apply("match-clear", (g) => { g.match = null; }) }, "Clear")));
+    return this.matchBox;
   }
 
   targets() {
@@ -219,6 +242,12 @@ export class ColourPanel {
       s.val.textContent = Number(g[key]).toFixed(2);
     }
     this.bypass.checked = g.enabled === false;
+    this.curves.sync();
+    this.matchBox.hidden = !g.match;
+    if (g.match) {
+      this.matchOn.checked = g.match.on !== false;
+      this.matchInfo.textContent = g.match.ref ? `Matched to ${g.match.ref}` : "Matched";
+    }
     const names = [...new Set([...this.lutNames, ...(g.lut ? [g.lut] : [])])];
     const sig = names.join("|");
     if (this.lutSelect.dataset.sig !== sig) {

@@ -37,7 +37,22 @@ uniform int uStyle;
 uniform vec3 uZoneOff[4];
 uniform vec4 uZoneSat;
 uniform float uZoneLo, uZoneHi;
+uniform sampler2D uCurves;          // CURVE_N x 9 rows (grade.js CURVE_ROWS), R channel
+uniform bool uCurvesRgb, uCurvesHsl, uMatchOn;
+uniform vec3 uMatchGain, uMatchOff;
 out vec4 o;
+float curve(int row, float x) { return texture(uCurves, vec2(clamp(x, 0.0, 1.0) * (255.0 / 256.0) + 0.5 / 256.0, (float(row) + 0.5) / 9.0)).r; }
+vec3 rgb2hsv(vec3 c) {
+  float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b)), d = mx - mn, h = 0.0;
+  if (d > 1e-6) {
+    if (mx == c.r) h = mod((c.g - c.b) / d, 6.0);
+    else if (mx == c.g) h = (c.b - c.r) / d + 2.0;
+    else h = (c.r - c.g) / d + 4.0;
+    h /= 6.0;
+  }
+  return vec3(h, mx > 1e-6 ? d / mx : 0.0, mx);
+}
+vec3 hsv2rgb(vec3 c) { vec3 k = clamp(abs(fract(c.x + vec3(0.0, 2.0, 1.0) / 3.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0); return c.z * mix(vec3(1.0), k, c.y); }
 void main() {
   vec4 t = texture(uTex, vUv);
   if (uPremul) { o = t * uAlpha; return; }   // an already premultiplied effect buffer
@@ -64,11 +79,20 @@ void main() {
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
     c = l + (c - l) * uSat;
     c = clamp(c, 0.0, 1.0);
+    if (uCurvesRgb) c = vec3(curve(0, curve(1, c.r)), curve(0, curve(2, c.g)), curve(0, curve(3, c.b)));
+    if (uCurvesHsl) {
+      float L = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      vec3 hsv = rgb2hsv(c);
+      float s2 = curve(8, hsv.y) * curve(5, hsv.x) * curve(7, L);
+      float v2 = hsv.z * (1.0 + (curve(6, hsv.x) - 1.0) * hsv.y);
+      c = clamp(hsv2rgb(vec3(fract(hsv.x + curve(4, hsv.x)), clamp(s2, 0.0, 1.0), v2)), 0.0, 1.0);
+    }
   }
   if (uLutOn) {
     vec3 coord = clamp(c, 0.0, 1.0) * ((uLutSize - 1.0) / uLutSize) + 0.5 / uLutSize;
     c = mix(c, texture(uLut, coord).rgb, uLutMix);
   }
+  if (uMatchOn) c = clamp(c * uMatchGain + uMatchOff, 0.0, 1.0);   // shot match, after everything else
   float a = uAlpha * t.a;
   o = vec4(c * a, a);
 }`;
@@ -283,6 +307,7 @@ export class Renderer {
     gl.uniform3f(u.uLevel, ...(item.level || [1, 1, 1]));
     const g = item.premul ? null : item.grade;
     gl.uniform1i(u.uGrade, g ? 1 : 0);
+    gl.uniform1i(u.uMatchOn, 0);
     if (g) {
       gl.uniform1f(u.uExposure, g.exposure);
       gl.uniform1f(u.uContrast, g.contrast);
@@ -292,6 +317,17 @@ export class Renderer {
       gl.uniform3f(u.uGain, ...g.gain);
       gl.uniform3f(u.uGammaInv, ...g.gammaInv);
       gl.uniform1i(u.uStyle, g.style || 0);
+      const cv = g.curves;
+      gl.uniform1i(u.uCurvesRgb, cv && cv.rgb ? 1 : 0);
+      gl.uniform1i(u.uCurvesHsl, cv && cv.hsl ? 1 : 0);
+      if (cv) {
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, this.curveTexture(cv));
+        gl.uniform1i(u.uCurves, 2);
+        gl.activeTexture(gl.TEXTURE0);
+      }
+      gl.uniform1i(u.uMatchOn, g.match ? 1 : 0);
+      if (g.match) { gl.uniform3f(u.uMatchGain, ...g.match.gain); gl.uniform3f(u.uMatchOff, ...g.match.offset); }
       if (g.style === 1) {
         gl.uniform3fv(u["uZoneOff[0]"], new Float32Array(g.zoneOff.flat()));
         gl.uniform4f(u.uZoneSat, ...g.zoneSat);
@@ -301,6 +337,24 @@ export class Renderer {
     }
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     return true;
+  }
+
+  // A grade's baked curves as a float texture (CURVE_N x 9), cached by their points.
+  curveTexture(cv) {
+    const gl = this.gl;
+    this.curveTex ||= new Map();
+    let tex = this.curveTex.get(cv.sig);
+    if (tex) return tex;
+    if (this.curveTex.size > 64) { for (const t of this.curveTex.values()) gl.deleteTexture(t); this.curveTex.clear(); }
+    tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, 256, 9, 0, gl.RED, gl.FLOAT, cv.data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.curveTex.set(cv.sig, tex);
+    return tex;
   }
 
   // Run effect passes on a buffer pair; returns the buffer holding the result.

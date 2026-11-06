@@ -179,11 +179,19 @@ body.dragging-media, body.dragging-media * { cursor: grabbing !important; user-s
 .ttile canvas { width: 100%; height: 44px; border-radius: 3px; display: block; margin-bottom: 4px; }
 .fxtile canvas { height: auto; aspect-ratio: 16 / 9; }
 .fxcard { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin: 6px 0; background: var(--panel2); }
+.eqmon { display: block; width: 100%; height: 120px; border-radius: 4px; margin: 4px 0 6px; touch-action: none; }
 .fxcard.off .field, .fxcard.off .fxname { opacity: .5; }
 .fxhead { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
 .fxhead .fxname { font-weight: 600; font-size: 12px; margin-left: 2px; }
 .fxhead .spacer { flex: 1; }
-.tsection { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 4px 0 6px; }
+.tsection { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 4px 0 6px; cursor: pointer; user-select: none;
+  padding: 4px 2px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 6px; }
+.tsection::before { content: "▾"; display: inline-block; transition: transform .12s; }
+.tsection:hover { color: var(--text); }
+.tsection .tcount { margin-left: auto; font-size: 10px; opacity: .7; letter-spacing: 0; }
+.tsection.collapsed::before { transform: rotate(-90deg); }
+.tsection.collapsed + .tgrid { display: none; }
+.filtering .tsection.collapsed + .tgrid { display: grid; }
 
 /* menus, modals, toasts */
 #menuLayer { position: fixed; inset: 0; pointer-events: none; z-index: 50; }
@@ -361,3 +369,48 @@ canvas.shotgraph { width: 100%; height: 110px; display: block; border-radius: 6p
 .seam.soft-bump { background: rgba(255, 200, 60, .18); color: #ffd36b; }
 .seam.hard-cut { background: rgba(255, 90, 90, .18); color: #ff8a8a; }
 .seam.unknown { background: var(--panel3); color: var(--muted); }
+
+/* curves editor */
+.curves-editor canvas.curves { display: block; width: 100%; aspect-ratio: 1.6; max-height: 260px; border-radius: 4px; touch-action: none; }
+.curve-tools { margin-bottom: 6px; gap: 3px; flex-wrap: wrap; align-items: center; }
+.curve-tools button.toggle.on { background: var(--panel3, #2a2d35); border-color: var(--sel); }
+
+/* pages: Edit / Colour / Audio */
+.toolgroup.pages { gap: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; padding: 0; }
+.page-btn { background: transparent; border: 0; border-radius: 0; padding: 4px 12px; color: var(--muted); font-weight: 600; }
+.page-btn + .page-btn { border-left: 1px solid var(--border); }
+.page-btn.active { background: var(--sel); color: #10131a; }
+body[data-page="colour"] #timelineArea { display: none; }
+body[data-page="colour"] .splitter[data-split="bottom"], body[data-page="colour"] #dock-bottom { display: none; }
+#stage { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--panel); overflow: hidden; }
+#stage[hidden] { display: none; }
+#stage > .panel.on-stage { display: flex; flex-direction: column; min-height: 0; }
+#stage > .shotstrip { flex: none; height: auto; order: -1; border-bottom: 1px solid var(--border); }
+#stage > .panel.on-stage:not(.shotstrip) { flex: 1; overflow: hidden; height: auto; min-height: 0; }
+#stage > .panel.on-stage:not(.shotstrip) > .panel-scroll { overflow: auto; flex: 1; }
+/* the Colour panel on the stage, side by side: settings and LUT | wheels | sliders | curves */
+#stage .colour-controls:not([hidden]) { display: grid; gap: 4px 22px; align-items: start;
+  grid-template-columns: minmax(230px, 280px) minmax(360px, 1.3fr) minmax(240px, 1fr) minmax(300px, 1.1fr);
+  grid-template-areas: "top wheels sliders curves" "side wheels sliders curves" "side note note curves"; }
+#stage .c-top { grid-area: top; } #stage .c-wheels { grid-area: wheels; } #stage .c-sliders { grid-area: sliders; }
+#stage .c-curves { grid-area: curves; } #stage .c-side { grid-area: side; } #stage .c-gap { display: none; }
+#stage .colour-controls > .dim { grid-area: note; }
+#stage .c-curves .insp-section { margin-top: 0 !important; }
+#stage .curves-editor canvas.curves { aspect-ratio: auto; height: 190px; }
+.shotstrip .shot-row { display: flex; gap: 8px; overflow-x: auto; padding: 8px 10px 10px; min-height: 104px; }
+.shot { flex: none; width: 128px; border: 2px solid transparent; border-radius: 6px; background: var(--panel2); cursor: pointer; user-select: none; overflow: hidden; }
+.shot:hover { border-color: var(--border); }
+.shot.selected { border-color: var(--sel); }
+.shot.current .shot-thumb::after { content: ""; position: absolute; inset: 0; box-shadow: inset 0 0 0 2px #ff5a5a; }
+.shot-thumb { height: 64px; background: #000 center / cover no-repeat; position: relative; }
+.shot-meta { display: flex; gap: 6px; align-items: center; font-size: 10px; padding: 3px 6px 0; color: var(--muted); }
+.shot-n { color: var(--text); font-weight: 600; }
+.shot-graded { color: #ffcc4d; }
+.shot-tc { font-size: 10px; padding: 0 6px 4px; color: var(--muted); font-family: ui-monospace, monospace; }
+/* analyser */
+.spectrum-panel { padding: 8px; }
+.spec-label { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 6px 0 4px; }
+.spec-main { display: block; width: 100%; height: 170px; border-radius: 4px; }
+.spec-loud { display: block; width: 100%; height: 110px; border-radius: 4px; }
+.spec-phase { display: block; width: 100%; height: 42px; border-radius: 4px; }
+.spec-readout { font-size: 11px; color: var(--muted); margin-top: 4px; font-family: ui-monospace, monospace; }

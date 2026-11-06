@@ -19,6 +19,8 @@ import { openRenderDialog, showFinals, ensureGenSettings } from "./finalrender.j
 import { CURVES, FADE_CURVES } from "./keys.js";
 import { TransformOverlay } from "./transform.js";
 import { MarkersPanel } from "./markers.js";
+import { ShotStrip } from "./shotstrip.js";
+import { SpectrumPanel } from "./spectrum.js";
 import { openShotDetect } from "./shotdetect.js";
 import { RegenJobs, openRegenDialog, canRegenerate } from "./regen.js";
 import { openGenerate, sides, MODE_LABEL } from "./gendialog.js";
@@ -565,7 +567,7 @@ function contextMenu(x, y, hit) {
 
 function showShortcuts() {
   const rows = [
-    ["Space", "Play / pause"], ["J / K / L", "Shuttle back / stop / forward (press again for 2x, 4x, 8x)"], ["← / →", "Previous / next frame (Shift: 1 second)"],
+    ["Shift+4 / 6 / 7", "Edit, Colour and Audio pages"], ["Space", "Play / pause"], ["J / K / L", "Shuttle back / stop / forward (press again for 2x, 4x, 8x)"], ["← / →", "Previous / next frame (Shift: 1 second)"],
     ["Shift+D", "Detect shots in the selected clip"], ["Shift+M", "Add a marker"], ["Shift+F", "Freeze frame at the playhead"], ["Shift+R", "Reverse selected clips"], ["Shift+T", "Add a title"], ["C", "Crop handles on the viewer"],
     ["↑ / ↓", "Previous / next edit point"], ["Home / End", "Start / end of timeline"], ["I / O, Alt+X", "Mark in / out, clear"],
     ["V / B / R", "Select / Blade / Range tool"], ["S / M", "Snapping / Magnetic timeline"], [K("Ctrl+Shift+L"), "Linked selection"],
@@ -622,6 +624,7 @@ function onKey(e) {
   if (ctrl && key.toLowerCase() === "e") { handled(); openExportDialog(app); return; }
   if (ctrl && key.toLowerCase() === "i") { handled(); app.bin.fileInput.click(); return; }
   if (ctrl) return;
+  if (e.shiftKey && !e.altKey && ["Digit4", "Digit6", "Digit7"].includes(e.code)) { handled(); app.setPage({ Digit4: "edit", Digit6: "colour", Digit7: "audio" }[e.code]); return; }
   if (e.altKey && key.toLowerCase() === "x") { handled(); clearInOut(); return; }
   switch (key) {
     case " ": handled(); pb.toggle(); break;
@@ -691,6 +694,8 @@ async function main() {
   initCollapsible(document.body);
   bus.on("regen-jobs", () => app.timeline && app.timeline.draw());
   app.markers = new MarkersPanel(app);
+  app.shots = new ShotStrip(app);
+  app.spectrum = new SpectrumPanel(app);
   app.docks = new Docks([
     { id: "media", title: "Media", node: app.bin.node, dock: "left" },
     { id: "transitions", title: "Transitions", node: app.transitions.node, dock: "left" },
@@ -700,7 +705,27 @@ async function main() {
     { id: "scopes", title: "Scopes", node: app.scopes.node, dock: "right", onShow: () => { app.scopes.visible = true; app.scopes.update(true); }, onHide: () => { app.scopes.visible = false; } },
     { id: "mixer", title: "Mixer", node: app.mixer.node, dock: "bottom", onShow: () => { app.mixer.visible = true; }, onHide: () => { app.mixer.visible = false; } },
     { id: "markers", title: "Markers", node: app.markers.node, dock: "left" },
+    { id: "shots", title: "Shots", node: app.shots.node, dock: "hidden", onShow: () => app.shots.render() },
+    { id: "spectrum", title: "Analyser", node: app.spectrum.node, dock: "hidden", onShow: () => { app.spectrum.visible = true; }, onHide: () => { app.spectrum.visible = false; } },
   ]);
+  // pages: Edit / Colour / Audio, each with its own panel layout (Resolve style); the project, viewer and playback stay
+  app.setPage = (page) => {
+    if (!["edit", "colour", "audio"].includes(page)) page = "edit";
+    document.body.dataset.page = page;
+    app.docks.setPage(page);
+    document.querySelectorAll(".page-btn").forEach(b => b.classList.toggle("active", b.dataset.page === page));
+    try { localStorage.setItem("ve_page", page); } catch (_) { /* storage blocked */ }
+    bus.emit("page", page);
+    if (page === "colour") {
+      // grade the shot under the playhead when nothing graded is selected
+      const sel = M.editTargets().filter(c => M.trackKind(c.trackId) === "video");
+      const cur = app.shots.current();
+      if (!sel.length && cur) M.select([cur.id]);
+      app.shots.render();
+    }
+    requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+  };
+  document.querySelectorAll(".page-btn").forEach(b => b.addEventListener("click", () => app.setPage(b.dataset.page)));
   app.docks.onTabMenu = (x, y, id) => showMenu(x, y, [{ head: "Move panel" },
     ...[["left", "To left dock"], ["right", "To right dock"], ["bottom", "To bottom dock"], ["hidden", "Hide"]].map(([d, l]) => ({ label: l, action: () => app.docks.place(id, d) }))]);
   app.timeline = new Timeline({
@@ -814,6 +839,9 @@ async function main() {
   setTool("select");
   syncToggles();
   updateInfo();
+  let page = "edit";
+  try { page = localStorage.getItem("ve_page") || "edit"; } catch (_) { /* storage blocked */ }
+  app.setPage(page);
 }
 
 main().catch((e) => { console.error(e); toast(`Editor failed to start: ${e.message}`, "error", 10000); });

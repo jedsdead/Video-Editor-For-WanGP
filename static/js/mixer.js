@@ -4,7 +4,7 @@ import * as M from "./model.js";
 import { P, bus } from "./model.js";
 import { el, clamp } from "./util.js";
 
-const fmtLufs = (v) => (v === null || v === undefined || !isFinite(v) ? "–" : v.toFixed(1));
+const fmtLufs = (v) => (v === null || v === undefined || !isFinite(v) || v < -70 ? "–" : v.toFixed(1));   // below -70 is silence
 
 export class MixerPanel {
   constructor(app) {

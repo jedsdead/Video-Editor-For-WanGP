@@ -418,7 +418,50 @@ class Compositor:
         c = (c - 0.5) * params["contrast"] + 0.5
         luma = (c * self.luma).sum(0, keepdim=True)
         c = luma + (c - luma) * params["saturation"]
-        return c.clamp(0.0, 1.0)
+        c = c.clamp(0.0, 1.0)
+        if params.get("curves"):
+            c = self.curves(c, params["curves"])
+        return c
+
+    def curves(self, c, cv):
+        """grade.curves, as the viewer's shader: RGB curves (channel then master), then hue / saturation / luminance
+        curves in HSV. The baked rows are looked up with linear interpolation between samples."""
+        torch = self.torch
+        key = id(cv)
+        rows = getattr(self, "_curve_rows", None)
+        if rows is None or rows[0] != key:
+            rows = (key, torch.tensor(cv["rows"], device=self.device, dtype=torch.float32))
+            self._curve_rows = rows
+        lut = rows[1]
+        n = lut.shape[1]
+
+        def look(row, x):
+            pos = x.clamp(0.0, 1.0) * (n - 1)
+            i0 = pos.floor().long().clamp(0, n - 2)
+            f = pos - i0.float()
+            r = lut[row]
+            return r[i0] * (1 - f) + r[i0 + 1] * f
+
+        if cv.get("rgb"):
+            c = torch.stack([look(0, look(1, c[0])), look(0, look(2, c[1])), look(0, look(3, c[2]))])
+        if cv.get("hsl"):
+            L = (c * self.luma).sum(0)
+            r, g, b = c[0], c[1], c[2]
+            mx, mn = c.max(0).values, c.min(0).values
+            d = mx - mn
+            safe = torch.where(d > 1e-6, d, torch.ones_like(d))
+            h = torch.where(mx == r, torch.remainder((g - b) / safe, 6.0), torch.where(mx == g, (b - r) / safe + 2.0, (r - g) / safe + 4.0)) / 6.0
+            h = torch.where(d > 1e-6, h, torch.zeros_like(h))
+            sat = torch.where(mx > 1e-6, d / torch.where(mx > 1e-6, mx, torch.ones_like(mx)), torch.zeros_like(mx))
+            s2 = (look(8, sat) * look(5, h) * look(7, L)).clamp(0.0, 1.0)
+            v2 = mx * (1.0 + (look(6, h) - 1.0) * sat)
+            h2 = h + look(4, h)
+            h2 = h2 - h2.floor()
+            offs = torch.tensor([0.0, 2.0 / 3.0, 1.0 / 3.0], device=self.device).view(3, 1, 1)
+            k = h2.unsqueeze(0) + offs
+            k = ((k - k.floor()) * 6.0 - 3.0).abs().sub(1.0).clamp(0.0, 1.0)
+            c = (v2.unsqueeze(0) * (1.0 + (k - 1.0) * s2.unsqueeze(0))).clamp(0.0, 1.0)
+        return c
 
     def place(self, img, x, y, alpha, rotation=0.0, crop=(0.0, 0.0, 0.0, 0.0)):
         """Crop (fractions l, r, t, b of the image), rotate (degrees, clockwise) and place an image whose centre sits at
@@ -795,6 +838,16 @@ class ExportJob:
         decode_scale = {}
 
         def apply_lut(img, grade):
+            """The grade's LUT, then its shot match (c * gain + offset), as the viewer's shader."""
+            img = _lut(img, grade)
+            match = T.match_params(grade)
+            if match:
+                gain = torch.tensor(match["gain"], dtype=img.dtype, device=img.device).view(3, 1, 1)
+                off = torch.tensor(match["offset"], dtype=img.dtype, device=img.device).view(3, 1, 1)
+                img = (img * gain + off).clamp(0, 1)
+            return img
+
+        def _lut(img, grade):
             name = (grade or {}).get("lut")
             if not name or (grade or {}).get("enabled") is False:
                 return img
@@ -921,7 +974,7 @@ class ExportJob:
             move = (abs(scale - 1) > 1e-4 or abs(sx - 1) > 1e-4 or abs(sy - 1) > 1e-4
                     or any(abs(T.prop(x, n, kt, 0.0)) > 1e-6 for n in ("x", "y", "rotation", "cropL", "cropR", "cropT", "cropB")))
             has_lut = bool(grade.get("lut")) and grade.get("enabled") is not False
-            if params is None and not has_lut and not FX.active(x) and alpha >= 1 and not move:
+            if params is None and not has_lut and not T.match_params(grade) and not FX.active(x) and alpha >= 1 and not move:
                 return layer
             a = layer[3:4]
             rgb = torch.where(a > 0, layer[:3] / a.clamp(min=1e-6), torch.zeros_like(layer[:3]))

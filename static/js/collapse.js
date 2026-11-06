@@ -1,5 +1,6 @@
-// Collapsible sections: click a section heading (Inspector, Colour, Mixer FX…) or an effect card's name to fold it
-// away. Alt+click folds or unfolds every section in that panel. What is folded is remembered in this browser.
+// Collapsible sections: click a section heading (Inspector, Colour, Mixer FX…), an effect card's name, or a group
+// heading in the Effects and Transitions panels to fold it away. Alt+click folds or unfolds every section in that panel.
+// What is folded is remembered in this browser.
 const KEY = "ve_collapsed";
 let folded;
 try { folded = new Set(JSON.parse(localStorage.getItem(KEY) || "[]")); } catch (_) { folded = new Set(); }
@@ -8,6 +9,7 @@ const save = () => { try { localStorage.setItem(KEY, JSON.stringify([...folded].
 // A section is remembered by its heading text (the same section folds for every clip); an effect card by its effect.
 function keyOf(node) {
   if (node.dataset.collapseKey) return node.dataset.collapseKey;
+  if (node.classList.contains("tsection")) return `group:${node.textContent.trim().toLowerCase()}`;
   const h = node.querySelector(":scope > h4");
   if (!h) return null;
   const text = [...h.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join(" ").trim() || h.textContent.trim();
@@ -31,6 +33,15 @@ function toggle(node, force) {
 export function initCollapsible(root = document.body) {
   root.addEventListener("click", (e) => {
     if (e.target.closest("input, button, select, textarea, label, a")) return;
+    const group = e.target.closest(".tsection");
+    if (group) {
+      if (e.altKey) {
+        const panel = group.closest(".panel, .panel-scroll") || document;
+        const fold = !group.classList.contains("collapsed");
+        panel.querySelectorAll(".tsection").forEach(s => toggle(s, fold));
+      } else toggle(group);
+      return;
+    }
     const head = e.target.closest(".insp-section > h4, .fxcard .fxname");
     if (!head) return;
     const node = head.closest(".fxcard") || head.parentElement;
@@ -44,8 +55,8 @@ export function initCollapsible(root = document.body) {
   });
   const scan = (n) => {
     if (n.nodeType !== 1) return;
-    if (n.matches(".insp-section, .fxcard")) apply(n);
-    n.querySelectorAll?.(".insp-section, .fxcard").forEach(apply);
+    if (n.matches(".insp-section, .fxcard, .tsection")) apply(n);
+    n.querySelectorAll?.(".insp-section, .fxcard, .tsection").forEach(apply);
   };
   new MutationObserver((records) => { for (const r of records) r.addedNodes.forEach(scan); }).observe(root, { childList: true, subtree: true });
   scan(root);

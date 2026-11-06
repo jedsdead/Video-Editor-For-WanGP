@@ -269,7 +269,111 @@ def grade_params(grade):
     neutral = (abs(params["exposure"] - 1) < 1e-6 and all(abs(v - 1) < 1e-6 for v in params["wb"] + params["gain"] + params["gamma"])
                and all(abs(v) < 1e-6 for v in params["lift"]) and abs(params["contrast"] - 1) < 1e-6 and abs(params["saturation"] - 1) < 1e-6
                and zones_neutral)
-    return None if neutral else params
+    curves = bake_curves(grade)
+    if curves:
+        params["curves"] = curves
+    return None if neutral and not curves else params
+
+
+# --------------------------------------------------------------------------- curves (mirrors grade.js)
+# grade.curves = {name: [[x, y], ...]} in 0..1. RGB curves (master, r, g, b) map a channel; the hue curves are periodic
+# with y = 0.5 neutral: hueHue shifts hue by (y - 0.5) turns, hueSat / hueLum / lumSat multiply by 2y; satSat maps
+# saturation. Each is baked to CURVE_N samples (monotone cubic through the points) and looked up with linear
+# interpolation, by the shader and by the export alike.
+CURVE_N = 256
+CURVE_ROWS = ("master", "r", "g", "b", "hueHue", "hueSat", "hueLum", "lumSat", "satSat")
+PERIODIC = ("hueHue", "hueSat", "hueLum")
+IDENTITY = ("master", "r", "g", "b", "satSat")
+
+
+def _monotone(xs, ys, t):
+    """Fritsch-Carlson monotone cubic through (xs, ys), at t (clamped to the ends)."""
+    n = len(xs)
+    if n == 1:
+        return ys[0]
+    if t <= xs[0]:
+        return ys[0]
+    if t >= xs[-1]:
+        return ys[-1]
+    d = [(ys[i + 1] - ys[i]) / max(1e-9, xs[i + 1] - xs[i]) for i in range(n - 1)]
+    m = [d[0]] + [0.0 if d[i - 1] * d[i] <= 0 else (d[i - 1] + d[i]) / 2 for i in range(1, n - 1)] + [d[-1]]
+    for i in range(n - 1):
+        if abs(d[i]) < 1e-12:
+            m[i] = m[i + 1] = 0.0
+            continue
+        a, b = m[i] / d[i], m[i + 1] / d[i]
+        h = a * a + b * b
+        if h > 9:
+            k = 3 / math.sqrt(h)
+            m[i], m[i + 1] = k * a * d[i], k * b * d[i]
+    i = 0
+    while i < n - 2 and t > xs[i + 1]:
+        i += 1
+    hgt = xs[i + 1] - xs[i]
+    u = (t - xs[i]) / max(1e-9, hgt)
+    h00, h10, h01, h11 = 2 * u ** 3 - 3 * u ** 2 + 1, u ** 3 - 2 * u ** 2 + u, -2 * u ** 3 + 3 * u ** 2, u ** 3 - u ** 2
+    return h00 * ys[i] + h10 * hgt * m[i] + h01 * ys[i + 1] + h11 * hgt * m[i + 1]
+
+
+def curve_points(curves, name):
+    pts = (curves or {}).get(name) or []
+    pts = sorted(([min(1.0, max(0.0, float(x))), min(1.0, max(0.0, float(y)))] for x, y in pts if x is not None and y is not None), key=lambda p: p[0])
+    return pts
+
+
+def curve_neutral(curves, name):
+    pts = curve_points(curves, name)
+    if not pts:
+        return True
+    if name in IDENTITY:
+        return all(abs(x - y) < 1e-4 for x, y in pts)
+    return all(abs(y - 0.5) < 1e-4 for _, y in pts)
+
+
+def bake_curve(curves, name):
+    """CURVE_N samples of a curve, as the value the grade uses (see above)."""
+    pts = curve_points(curves, name)
+    xs_out = [i / (CURVE_N - 1) for i in range(CURVE_N)]
+    if not pts:
+        ys = [x if name in IDENTITY else 0.5 for x in xs_out]
+    elif name in PERIODIC:
+        ext = [[x - 1, y] for x, y in pts] + pts + [[x + 1, y] for x, y in pts]
+        xs, yv = [p[0] for p in ext], [p[1] for p in ext]
+        ys = [_monotone(xs, yv, x) for x in xs_out]
+    else:
+        if name in IDENTITY:
+            pts = ([[0.0, 0.0]] if pts[0][0] > 1e-4 else []) + pts + ([[1.0, 1.0]] if pts[-1][0] < 1 - 1e-4 else [])
+        xs, yv = [p[0] for p in pts], [p[1] for p in pts]
+        ys = [_monotone(xs, yv, x) for x in xs_out]
+    if name == "hueHue":
+        return [y - 0.5 for y in ys]
+    if name in ("hueSat", "hueLum", "lumSat"):
+        return [max(0.0, 2 * y) for y in ys]
+    return [min(1.0, max(0.0, y)) for y in ys]
+
+
+def bake_curves(grade):
+    """The grade's curves as rows of CURVE_N values (CURVE_ROWS order), plus which stages are active; None if neutral."""
+    curves = (grade or {}).get("curves") or {}
+    if not curves or (grade or {}).get("curvesOn") is False:
+        return None
+    rgb = any(not curve_neutral(curves, n) for n in ("master", "r", "g", "b"))
+    hsl = any(not curve_neutral(curves, n) for n in ("hueHue", "hueSat", "hueLum", "lumSat", "satSat"))
+    if not (rgb or hsl):
+        return None
+    return {"rows": [bake_curve(curves, n) for n in CURVE_ROWS], "rgb": rgb, "hsl": hsl}
+
+
+def match_params(grade):
+    """A shot match (grade.match = {on, gain: [r, g, b], offset: [r, g, b]}): applied after the grade and LUT."""
+    m = (grade or {}).get("match") or {}
+    if not m or m.get("on") is False or (grade or {}).get("enabled") is False:
+        return None
+    gain = [float(v) for v in (m.get("gain") or [1, 1, 1])][:3]
+    off = [float(v) for v in (m.get("offset") or [0, 0, 0])][:3]
+    if all(abs(g - 1) < 1e-5 for g in gain) and all(abs(o) < 1e-5 for o in off):
+        return None
+    return {"gain": gain, "offset": off}
 
 
 DISSOLVE_STYLES = ("cross", "film", "additive", "nonadditive", "dip")

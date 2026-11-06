@@ -29,6 +29,11 @@
       <button class="icon" id="btnUndo" title="Undo (Ctrl+Z)"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3"/></svg></button>
       <button class="icon" id="btnRedo" title="Redo (Ctrl+Shift+Z)"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5M20 9H10a6 6 0 000 12h3"/></svg></button>
     </div>
+    <div class="toolgroup pages" id="pageSwitch" title="Pages: Edit (Shift+4), Colour (Shift+6), Audio (Shift+7)">
+      <button class="page-btn" data-page="edit" title="Edit page (Shift+4)">Edit</button>
+      <button class="page-btn" data-page="colour" title="Colour page (Shift+6): shots, wheels, curves and shot match">Colour</button>
+      <button class="page-btn" data-page="audio" title="Audio page (Shift+7): timeline, mixer, clip effects and analysers">Audio</button>
+    </div>
     <div id="projectTitle" title="Click to rename the project"></div>
     <div class="spacer"></div>
     <span id="saveState"></span>
@@ -69,6 +74,7 @@
     </div>
     <div class="splitter h" data-split="timeline"></div>
     <div id="lower">
+      <section id="stage" hidden></section>
       <section id="timelineArea">
         <div id="tlToolbar">
           <button class="small" id="btnAddVideoTrack" title="Add a video track">+ Video track</button>

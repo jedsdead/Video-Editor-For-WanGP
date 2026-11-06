@@ -4,6 +4,7 @@ import { state, P, bus } from "./model.js";
 import { api, el, toast, timecode, shortTime, clamp } from "./util.js";
 import { CURVES, FADE_CURVES } from "./keys.js";
 import { AUDIO_EFFECTS, AUDIO_EFFECT_GROUPS, defaultAudioParams } from "./audiofx.js";
+import { eqMonitor, MONITORED } from "./eqmonitor.js";
 import { FONT_FALLBACK } from "./titles.js";
 import { EFFECTS, EFFECT_ORDER, defaultEffectParams } from "./effects.js";
 import { openRegenDialog, canRegenerate } from "./regen.js";
@@ -433,7 +434,8 @@ export class Inspector {
           set: (v) => M.updateAudioEffect(clip.id, fx.id, f => { f.params = { ...(f.params || {}), [p.key]: v }; }),
           min: p.min, max: p.max, step: p.step, format: (v) => (+v).toFixed(p.step < 1 ? 1 : 0), editLabel: `${def.label} ${p.label}` });
       });
-      const card = el(`div.fxcard${fx.on === false ? ".off" : ""}`, { "data-collapse-key": `afx:${fx.id}` }, head, ...rows);
+      const monitor = MONITORED.includes(fx.type) ? eqMonitor(this.app, clip.id, fx.id, "curve") : null;
+      const card = el(`div.fxcard${fx.on === false ? ".off" : ""}`, { "data-collapse-key": `afx:${fx.id}` }, head, monitor, ...rows);
       this.refreshers.push(() => card.classList.toggle("off", fxLive().on === false));
       holder.append(card);
     });

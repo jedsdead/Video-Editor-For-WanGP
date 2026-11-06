@@ -1,9 +1,18 @@
 // Dock system: panels live in the left, right or bottom dock as tabs, can be moved between docks or hidden,
-// and dock sizes are resizable. The layout is remembered per browser.
+// and dock sizes are resizable. The layout is remembered per browser, and separately for each page (Edit, Colour,
+// Audio): a page can also hold panels on its own stage, the area that takes the timeline's place.
 import { el, clamp } from "./util.js";
 
 const KEY = "ve_layout_v1";
 const DOCKS = ["left", "right", "bottom"];
+
+// Each page's starting layout, over the Edit page's: placement, active tabs and sizes.
+const PAGE_PRESETS = {
+  colour: { placement: { colour: "stage", shots: "stage", scopes: "right", inspector: "hidden", mixer: "hidden", spectrum: "hidden" },
+            active: { right: "scopes", left: "media" }, sizes: { lower: 470, right: 420 } },
+  audio: { placement: { mixer: "bottom", spectrum: "right", inspector: "right", effects: "left", colour: "hidden", scopes: "hidden", shots: "hidden" },
+           active: { right: "inspector", left: "effects", bottom: "mixer" }, sizes: { lower: 460, bottom: 640, right: 380 } },
+};
 
 export class Docks {
   constructor(panels) {
@@ -16,10 +25,9 @@ export class Docks {
       floats: {},
     };
     this.defaults = JSON.parse(JSON.stringify(defaults));
-    let saved = null;
-    try { saved = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (_) { saved = null; }
-    this.layout = saved ? { ...defaults, ...saved, placement: { ...defaults.placement, ...saved.placement }, active: { ...defaults.active, ...saved.active },
-                            sizes: { ...defaults.sizes, ...saved.sizes }, floats: { ...(saved.floats || {}) } } : defaults;
+    this.page = "edit";
+    this.key = KEY;
+    this.layout = this.load();
     this.floatLayer = document.getElementById("floatLayer");
     this.floatEls = {};
     this.z = 10;
@@ -29,11 +37,35 @@ export class Docks {
     this.render();
   }
 
-  save() { try { localStorage.setItem(KEY, JSON.stringify(this.layout)); } catch (_) { /* storage blocked */ } }
+  // The current page's layout: saved, or the page's preset over the Edit page's defaults.
+  pageDefaults(page = this.page) {
+    const d = JSON.parse(JSON.stringify(this.defaults));
+    const pr = PAGE_PRESETS[page];
+    if (!pr) return d;
+    return { ...d, placement: { ...d.placement, ...pr.placement }, active: { ...d.active, ...pr.active }, sizes: { ...d.sizes, ...pr.sizes } };
+  }
+  load() {
+    const defaults = this.pageDefaults();
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(this.key) || "null"); } catch (_) { saved = null; }
+    // a panel that only a page's stage can hold goes back to its dock on another page
+    if (saved && this.page === "edit") for (const [id, d] of Object.entries(saved.placement || {})) if (d === "stage") saved.placement[id] = defaults.placement[id];
+    return saved ? { ...defaults, ...saved, placement: { ...defaults.placement, ...saved.placement }, active: { ...defaults.active, ...saved.active },
+                     sizes: { ...defaults.sizes, ...saved.sizes }, floats: { ...(saved.floats || {}) } } : defaults;
+  }
+  setPage(page) {
+    if (page === this.page) return;
+    this.save();
+    this.page = page;
+    this.key = page === "edit" ? KEY : `${KEY}_${page}`;
+    this.layout = this.load();
+    this.render();
+  }
+  save() { try { localStorage.setItem(this.key, JSON.stringify(this.layout)); } catch (_) { /* storage blocked */ } }
 
   visible(id) {
     const dock = this.layout.placement[id];
-    if (dock === "float") return true;
+    if (dock === "float" || dock === "stage") return true;
     return dock && dock !== "hidden" && this.layout.active[dock] === id;
   }
 
@@ -61,6 +93,15 @@ export class Docks {
       node.style.width = dock === "bottom" ? `${this.layout.sizes.bottom}px` : `${this.layout.sizes[dock]}px`;
     }
     document.getElementById("lower").style.height = `${this.layout.sizes.lower}px`;
+    // the page's stage: its panels in their listed order
+    const stage = document.getElementById("stage");
+    if (stage) {
+      const onStage = this.panels.filter(p => this.layout.placement[p.id] === "stage");
+      stage.innerHTML = "";
+      for (const p of onStage) { p.node.classList.add("panel", "active", "on-stage"); stage.append(p.node); }
+      for (const p of this.panels) if (this.layout.placement[p.id] !== "stage") p.node.classList.remove("on-stage");
+      stage.hidden = !onStage.length;
+    }
     this.renderFloats();
     for (const p of this.panels) {
       const vis = this.visible(p.id);
@@ -128,7 +169,7 @@ export class Docks {
     this.save();
     this.render();
   }
-  reset() { this.layout = JSON.parse(JSON.stringify(this.defaults)); this.save(); this.render(); }
+  reset() { this.layout = this.pageDefaults(); this.save(); this.render(); }
 
   startResize(e, which) {
     e.preventDefault();

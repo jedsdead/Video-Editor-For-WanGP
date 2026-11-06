@@ -18,8 +18,8 @@ export class TransitionsPanel {
       el("div.panel-toolbar", {}, el("span.dim", {}, "Duration"), durInput, el("span.dim", {}, "s"), el("div.spacer"),
         el("button.small", { title: "Add the highlighted video and audio transitions at the cut nearest the playhead (Ctrl+T)", onclick: () => this.applyAtPlayhead() }, "Apply at playhead")),
       el("div.panel-scroll", {},
-        el("div.tsection", {}, "Video"), grid(VIDEO_PRESETS, "video"),
-        el("div.tsection", {}, "Audio"), grid(AUDIO_TRANSITIONS, "audio"),
+        el("div.tsection", { "data-collapse-key": "group:transitions:video", title: "Click to fold or unfold" }, "Video", el("span.tcount", {}, String(VIDEO_PRESETS.length))), grid(VIDEO_PRESETS, "video"),
+        el("div.tsection", { "data-collapse-key": "group:transitions:audio", title: "Click to fold or unfold" }, "Audio", el("span.tcount", {}, String(AUDIO_TRANSITIONS.length))), grid(AUDIO_TRANSITIONS, "audio"),
         el("div.dim", { style: { fontSize: "11px" } }, "Drag a transition onto a cut between two clips, or click one to make it the default and use Apply at playhead. Select a transition on the timeline to change its angle, shape, style or edge in the Inspector, or drag its edges to change the length.")));
     bus.on("drop-transition", ({ type, hit }) => this.dropOnTimeline(type, hit));
   }

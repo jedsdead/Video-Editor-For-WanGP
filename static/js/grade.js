@@ -35,12 +35,98 @@ export function gradeUniforms(grade) {
     u.lift = [0, 0, 0]; u.gain = [1, 1, 1]; u.gammaInv = [1, 1, 1];
   }
   const zonesNeutral = u.style !== 1 || (u.zoneOff.every(o => o.every(v => Math.abs(v) < 1e-6)) && u.zoneSat.every(v => Math.abs(v - 1) < 1e-6));
-  const neutral = Math.abs(u.exposure - 1) < 1e-6 && [...u.wb, ...u.gain, ...u.gammaInv].every(v => Math.abs(v - 1) < 1e-6)
+  u.curves = bakeCurves(grade);
+  u.match = matchUniform(grade);
+  const neutral = !u.curves && !u.match && Math.abs(u.exposure - 1) < 1e-6 && [...u.wb, ...u.gain, ...u.gammaInv].every(v => Math.abs(v - 1) < 1e-6)
     && u.lift.every(v => Math.abs(v) < 1e-6) && Math.abs(u.contrast - 1) < 1e-6 && Math.abs(u.saturation - 1) < 1e-6 && zonesNeutral;
   return neutral ? null : u;
 }
 
 export function isNeutral(grade) { return gradeUniforms(grade) === null; }
+
+// ---- curves (mirrors timeline_math.bake_curves): grade.curves = {name: [[x, y], ...]} in 0..1.
+// master/r/g/b map a channel; hueHue shifts hue by (y - 0.5) turns; hueSat, hueLum and lumSat multiply by 2y (0.5 is
+// neutral); satSat maps saturation. Baked to CURVE_N samples by a monotone cubic through the points.
+export const CURVE_N = 256;
+export const CURVE_ROWS = ["master", "r", "g", "b", "hueHue", "hueSat", "hueLum", "lumSat", "satSat"];
+export const PERIODIC = ["hueHue", "hueSat", "hueLum"];
+export const IDENTITY = ["master", "r", "g", "b", "satSat"];
+
+export function monotone(xs, ys, t) {
+  const n = xs.length;
+  if (n === 1 || t <= xs[0]) return ys[0];
+  if (t >= xs[n - 1]) return ys[n - 1];
+  const d = [];
+  for (let i = 0; i < n - 1; i++) d.push((ys[i + 1] - ys[i]) / Math.max(1e-9, xs[i + 1] - xs[i]));
+  const m = [d[0]];
+  for (let i = 1; i < n - 1; i++) m.push(d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2);
+  m.push(d[n - 2]);
+  for (let i = 0; i < n - 1; i++) {
+    if (Math.abs(d[i]) < 1e-12) { m[i] = m[i + 1] = 0; continue; }
+    const a = m[i] / d[i], b = m[i + 1] / d[i], h = a * a + b * b;
+    if (h > 9) { const k = 3 / Math.sqrt(h); m[i] = k * a * d[i]; m[i + 1] = k * b * d[i]; }
+  }
+  let i = 0;
+  while (i < n - 2 && t > xs[i + 1]) i++;
+  const hgt = xs[i + 1] - xs[i], u = (t - xs[i]) / Math.max(1e-9, hgt);
+  const h00 = 2 * u ** 3 - 3 * u ** 2 + 1, h10 = u ** 3 - 2 * u ** 2 + u, h01 = -2 * u ** 3 + 3 * u ** 2, h11 = u ** 3 - u ** 2;
+  return h00 * ys[i] + h10 * hgt * m[i] + h01 * ys[i + 1] + h11 * hgt * m[i + 1];
+}
+
+export function curvePoints(curves, name) {
+  return ((curves || {})[name] || []).filter(p => p && Number.isFinite(+p[0]) && Number.isFinite(+p[1]))
+    .map(([x, y]) => [clamp(+x, 0, 1), clamp(+y, 0, 1)]).sort((a, b) => a[0] - b[0]);
+}
+export function curveNeutral(curves, name) {
+  const pts = curvePoints(curves, name);
+  if (!pts.length) return true;
+  return IDENTITY.includes(name) ? pts.every(([x, y]) => Math.abs(x - y) < 1e-4) : pts.every(([, y]) => Math.abs(y - 0.5) < 1e-4);
+}
+// The curve's shape in 0..1 (what the editor draws): y at each of CURVE_N points.
+export function curveShape(curves, name) {
+  let pts = curvePoints(curves, name);
+  const out = new Float32Array(CURVE_N);
+  for (let i = 0; i < CURVE_N; i++) out[i] = IDENTITY.includes(name) ? i / (CURVE_N - 1) : 0.5;
+  if (!pts.length) return out;
+  let xs, ys;
+  if (PERIODIC.includes(name)) {
+    const ext = [...pts.map(([x, y]) => [x - 1, y]), ...pts, ...pts.map(([x, y]) => [x + 1, y])];
+    xs = ext.map(p => p[0]); ys = ext.map(p => p[1]);
+  } else {
+    if (IDENTITY.includes(name)) pts = [...(pts[0][0] > 1e-4 ? [[0, 0]] : []), ...pts, ...(pts[pts.length - 1][0] < 1 - 1e-4 ? [[1, 1]] : [])];
+    xs = pts.map(p => p[0]); ys = pts.map(p => p[1]);
+  }
+  for (let i = 0; i < CURVE_N; i++) out[i] = monotone(xs, ys, i / (CURVE_N - 1));
+  return out;
+}
+export function bakeCurve(curves, name) {
+  const y = curveShape(curves, name);
+  for (let i = 0; i < CURVE_N; i++) {
+    if (name === "hueHue") y[i] = y[i] - 0.5;
+    else if (name === "hueSat" || name === "hueLum" || name === "lumSat") y[i] = Math.max(0, 2 * y[i]);
+    else y[i] = clamp(y[i], 0, 1);
+  }
+  return y;
+}
+// {data: Float32Array(CURVE_N * rows), rgb, hsl, sig} or null when the curves do nothing.
+export function bakeCurves(grade) {
+  const curves = grade?.curves;
+  if (!curves || grade.curvesOn === false) return null;
+  const rgb = ["master", "r", "g", "b"].some(n => !curveNeutral(curves, n));
+  const hsl = ["hueHue", "hueSat", "hueLum", "lumSat", "satSat"].some(n => !curveNeutral(curves, n));
+  if (!rgb && !hsl) return null;
+  const data = new Float32Array(CURVE_N * CURVE_ROWS.length);
+  CURVE_ROWS.forEach((n, r) => data.set(bakeCurve(curves, n), r * CURVE_N));
+  return { data, rgb, hsl, sig: JSON.stringify(curves) };
+}
+// A shot match: after the grade and the LUT, c * gain + offset.
+export function matchUniform(grade) {
+  const m = grade?.match;
+  if (!m || m.on === false || grade.enabled === false) return null;
+  const gain = (m.gain || [1, 1, 1]).slice(0, 3).map(Number), offset = (m.offset || [0, 0, 0]).slice(0, 3).map(Number);
+  if (gain.every(g => Math.abs(g - 1) < 1e-5) && offset.every(o => Math.abs(o) < 1e-5)) return null;
+  return { gain, offset };
+}
 
 // Colour shown on the wheel at an angle: the direction a puck pushes the image.
 function wheelColour(angle, strength = 1) {

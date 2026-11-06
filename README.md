@@ -2,7 +2,7 @@
 
 A multi-track video editor that runs as a plugin inside [WanGP](https://github.com/deepbeepmeep/Wan2GP), in its own tab. Cut your generations together, grade them, mix the audio and export, without leaving WanGP.
 
-**Version 1.8** · by jedsdeadbaby · MIT licence
+**Version 2.0** · by jedsdeadbaby · MIT licence
 
 ## Features
 
@@ -39,12 +39,18 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
   - In the Inspector, effects stack in order after the colour grade: switch each on or off, move it up or down, reset or remove it. Every slider keyframes with ◆.
   - Right-click a clip to copy, paste or remove its effects.
 
+**Pages**
+- Three pages, as in Resolve: **Edit** (Shift+4), **Colour** (Shift+6) and **Audio** (Shift+7), switched with the buttons in the top bar. They share the project, viewer and playback; each page remembers its own panel layout.
+- **Colour page:** a **Shots** strip of every shot on the timeline in order. Click a shot to grade it (it shows in the viewer), Ctrl/Shift+click to pick several. The wheels, sliders, curves, shot match and LUT sit side by side under it, with the scopes beside the viewer. Right-click a shot to **match the selected shots' colour to it**, copy its grade to them, or reset a grade. The Colour panel still works on the Edit page.
+- **Audio page:** the timeline with a wide mixer beside it, the audio effects in the Effects panel, the Inspector for clip effects, and an **Analyser**: the master spectrum with peak hold, loudness over the last 30 seconds (momentary and short-term LUFS) and a stereo phase and balance meter.
+
 **Audio effects**
 - **Sound:** reverb, echo / delay, pitch shift (same speed), distortion.
 - **EQ and filters:** bass / treble EQ, a ten-band **graphic EQ** (31 Hz to 16 kHz), **parametric EQ**, low cut, high cut, **band pass**, **notch** and an **auto filter** (a sweeping low-pass, auto-wah).
 - **Dynamics:** **compressor** (threshold, ratio, attack, release, knee, makeup) and **limiter** (input gain, ceiling, release).
 - **Modulation:** **chorus**, **flanger**, **phaser**, **tremolo**, **vibrato**, **auto pan** and **ring modulator**.
 - Drag one from the Effects panel onto an audio clip, click it to add it to the selected audio clips, or use **Add audio effect** in the Inspector, where they can be switched on and off, reordered, reset and removed. Whole tracks and the master bus also have an EQ and compressor under the mixer's **FX** buttons.
+- EQ and filter effects show their **curve over a live spectrum** of the clip (dim: before its effects, bright: after). Drag the points: graphic EQ bands up and down, the parametric EQ anywhere (scroll for its width), the shelves up and down, the cut, band and notch frequencies left and right. Double-click a band to flatten it.
 - They play in the viewer and render the same on export (the same filters, impulse responses, pitch shifter and compressor), before the clip's volume and fades. Modulation effects start their sweep at the clip's start on export; in the viewer the sweep runs freely, so its position can differ.
 
 **Titles**
@@ -54,6 +60,9 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - A constant speed, or a speed curve with keyframes that can go anywhere from 0% (a freeze frame) to 1000%. Presets: *Ramp to stop*, *Ease to slow-mo* and *Speed up*, starting at the playhead. A graph in the Inspector shows the curve.
 - Ramps keep the clip's length and change how much of the source it uses. Linked audio follows the same curve.
 - In-between frames on export: nearest frame, frame blend, or optical flow using WanGP's built-in RIFE v4.26 model. This also smooths 16 fps WanGP clips in a 24 or 30 fps project.
+
+**Panels**
+- The Effects and Transitions panels' groups (generators, video effects, each family of audio effects) fold away: click a heading, Alt+click to fold or unfold them all. What's folded is remembered.
 
 **Transitions**
 - **Dissolve:** cross, film, additive, non-additive, dip to colour.
@@ -70,6 +79,8 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
   - **Shadows / Midtones / Highlights** (Final Cut style): a Master wheel plus one per tonal range, each with its own colour, brightness and saturation, and adjustable range boundaries.
   Each clip keeps the values of both styles, and only the selected style is applied, so switching loses nothing.
 - Exposure, contrast, saturation, temperature and tint.
+- **Curves:** custom curves (master, red, green and blue) and **Hue vs Hue**, **Hue vs Sat**, **Hue vs Lum**, **Lum vs Sat** and **Sat vs Sat**. Click to add a point, drag it, double-click or right-click to remove it; the hue curves have quick R / Y / G / C / B / M points. Curves come after the wheels and sliders and before the LUT, and render the same on export.
+- **Shot match:** from the Colour page, a per-channel correction that brings a shot's colour and contrast to another shot's (measured over three frames of each, as graded). It sits after the grade and LUT, and can be switched off or cleared in the Colour panel.
 - **LUTs:** import `.cube` 3D LUTs and apply one per clip with a mix amount.
 - **Grade keyframes:** ◆ in the Colour panel keys the whole grade at the playhead, with an ease to the next keyframe.
 - Bypass, and copy and paste a grade between clips.

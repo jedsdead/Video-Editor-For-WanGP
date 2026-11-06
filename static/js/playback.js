@@ -289,6 +289,22 @@ export class Playback {
     } catch (e) { console.warn("audio effects", e); entry.node.connect(entry.gain); }
   }
 
+  // Spectrum taps on a clip's audio, before and after its effects (the EQ monitor reads them). Connecting again is
+  // harmless, and the post tap follows the chain when it is rebuilt.
+  analysers(clipId) {
+    const entry = this.pool.get(clipId);
+    if (!this.ctx || !entry || !entry.node) return null;
+    if (!entry.an) {
+      const mk = () => { const a = this.ctx.createAnalyser(); a.fftSize = 4096; a.smoothingTimeConstant = 0.75; return a; };
+      entry.an = { pre: mk(), post: mk() };
+    }
+    try {
+      entry.node.connect(entry.an.pre);
+      (entry.chain ? entry.chain.output : entry.node).connect(entry.an.post);
+    } catch (_) { /* a node mid-rebuild */ }
+    return entry.an;
+  }
+
   routeAudio(entry, trackId) {
     if (!entry.gain) return;
     if (entry.trackId === trackId) return;

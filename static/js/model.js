@@ -959,7 +959,9 @@ export function setGradeAt(clipId, tau, grade, { addKey = false } = {}) {
   const keyed = hasGradeKeys(clip);
   if (!keyed && !addKey) { clip.grade = JSON.parse(JSON.stringify(grade)); return; }
   tau = snapFrame(clamp(tau, 0, clipDur(clip)));
-  clip.grade = { ...mergeGrade(clip.grade), enabled: grade.enabled, lut: grade.lut ?? null, style: grade.style || "lgg" };
+  // the fields that aren't keyframed (on/off, LUT, wheel style, curves, shot match) live on the base grade
+  clip.grade = { ...mergeGrade(clip.grade), enabled: grade.enabled, lut: grade.lut ?? null, style: grade.style || "lgg",
+                 curves: grade.curves ?? null, curvesOn: grade.curvesOn, match: grade.match ?? null };
   for (const f of GRADE_FIELDS) storeKeys(clip, "grade:" + f, KeyOps.set(keysOf(clip, "grade:" + f), tau, gradeFieldValue(grade, f)));
 }
 export function removeGradeKeyAt(clipId, tau) {

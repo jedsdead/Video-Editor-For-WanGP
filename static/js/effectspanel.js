@@ -193,6 +193,7 @@ export class EffectsPanel {
         el("input", { type: "search", placeholder: "Filter", style: { flex: "1", minWidth: "60px" }, oninput: (e) => { this.filter = e.target.value.toLowerCase(); this.render(); } })),
       this.grid);
     bus.on("drop-effect", ({ type, hit }) => this.dropOnClip(type, hit));
+    bus.on("page", () => this.render());
     this.render();
   }
 
@@ -200,14 +201,18 @@ export class EffectsPanel {
 
   render() {
     this.grid.innerHTML = "";
-    const gens = GENERATORS.filter(g => this.match(g.label, g.id));
-    const fx = EFFECT_ORDER.filter(id => this.match(EFFECTS[id].label, id));
+    // the Audio page lists only audio effects
+    const audioPage = document.body.dataset.page === "audio";
+    const gens = audioPage ? [] : GENERATORS.filter(g => this.match(g.label, g.id));
+    const fx = audioPage ? [] : EFFECT_ORDER.filter(id => this.match(EFFECTS[id].label, id));
     const afxMatch = (id) => !this.filter || AUDIO_EFFECTS[id].label.toLowerCase().includes(this.filter) || AUDIO_EFFECTS[id].blurb.toLowerCase().includes(this.filter);
     const afxGroups = AUDIO_EFFECT_GROUPS.map(([group, ids]) => [group, ids.filter(afxMatch)]).filter(([, ids]) => ids.length);
     const afx = afxGroups.flatMap(([, ids]) => ids);
-    if (gens.length) this.grid.append(el("div.tsection", {}, "Generators"), el("div.tgrid", {}, gens.map(g => this.generatorTile(g))));
-    if (fx.length) this.grid.append(el("div.tsection", {}, "Video effects"), el("div.tgrid", {}, fx.map(id => this.effectTile(id))));
-    for (const [group, ids] of afxGroups) this.grid.append(el("div.tsection", {}, `Audio · ${group}`), el("div.tgrid", {}, ids.map(id => this.audioTile(id))));
+    const head = (title, n) => el("div.tsection", { "data-collapse-key": `group:effects:${title.toLowerCase()}`, title: "Click to fold or unfold. Alt+click folds or unfolds them all." }, title, el("span.tcount", {}, String(n)));
+    this.grid.classList.toggle("filtering", !!this.filter);
+    if (gens.length) this.grid.append(head("Generators", gens.length), el("div.tgrid", {}, gens.map(g => this.generatorTile(g))));
+    if (fx.length) this.grid.append(head("Video effects", fx.length), el("div.tgrid", {}, fx.map(id => this.effectTile(id))));
+    for (const [group, ids] of afxGroups) this.grid.append(head(`Audio · ${group}`, ids.length), el("div.tgrid", {}, ids.map(id => this.audioTile(id))));
     if (!gens.length && !fx.length && !afx.length) this.grid.append(el("div.empty-note", {}, "Nothing matches."));
     this.grid.append(el("div.dim", { style: { fontSize: "11px", marginTop: "8px", lineHeight: "1.45" } },
       "Generators: drag onto a video track, or double-click to add at the playhead on the top track. Effects: drag onto a clip, or click to add to the selected clips (audio effects go on audio clips). Edit, reorder and keyframe effects in the Inspector."));
