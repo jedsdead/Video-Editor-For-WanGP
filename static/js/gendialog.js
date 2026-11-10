@@ -7,6 +7,7 @@ import { state, P, bus } from "./model.js";
 import { api, el, modal, toast, clamp, debounce, timecode } from "./util.js";
 import { ensureGenSettings, genLabel, genOutput } from "./finalrender.js";
 import { ImagePick } from "./imagepick.js";
+import * as PC from "./promptcheck.js";
 
 const PREFS = "ve_gen_prefs";
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS) || "{}"); } catch (_) { return {}; } };
@@ -180,6 +181,7 @@ export async function openGenerate(app, mode, where) {
   })() : null;
   const promptBox = el("textarea.rgprompt", { rows: 10, spellcheck: false });
   const promptNote = el("div.dim.small");
+  const joinBox = el("div.joincheck", { hidden: true });
   const error = el("div.warn");
   const addonNote = status.h3?.installed || fresh ? null : el("div.warn", { style: { marginBottom: "8px" } },
     `The editor's H3 add-on isn't active in WanGP${status.h3?.problems?.length ? `: ${status.h3.problems.join("; ")}` : ""}. Restart WanGP after updating the plugin.`);
@@ -201,15 +203,62 @@ export async function openGenerate(app, mode, where) {
     field("Settings", srcClip.row, srcCurrent.row, modelNote),
     field("Size", sizeSel, sizeNote),
     field("Seed", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seedSel, seedInput)),
-    field("Prompt", promptBox, promptNote),
+    field("Prompt", promptBox, promptNote, joinBox),
     error);
   const m = modal({ title: `${MODE_LABEL[mode]}: generate in WanGP`, body, buttons: ["spacer", { label: "Cancel" }, { label: "Queue in WanGP", primary: true, id: "btnGenGo", action: () => { submit(); return false; } }] });
   m.box.classList.add("wide");
   const go = m.box.querySelector("#btnGenGo");
 
   let info = null, promptEdited = false;
+  // Join check: where the run continues a clip (or a window continues the one before), the prompt's first cut or line
+  // must come after the frames it can't change, and the clip it leaves shouldn't be cut in the middle of a word.
+  const joinCheck = () => {
+    joinBox.innerHTML = "";
+    if (!info) { joinBox.hidden = true; return; }
+    const held = s.left ? (info.lengths?.trimHead || 0) : 0;
+    const problems = PC.check(promptBox.value, { continues: !!s.left, held });
+    const rows = [];
+    if (problems.length) {
+      const say = (p) => {
+        const what = p.untimedCut ? "cuts to a new shot at 00:00" : `cuts or starts a line at ${PC.ts(p.at)}`;
+        return p.block === 0
+          ? `The prompt ${what}, but its first ${held.toFixed(2)}s are the held frames of ${s.left?.name ? `“${s.left.name}”` : "the previous clip"}, which can't change. The model makes the cut or the line straight after them instead: a jump at the join, and new speech over the end of the last line.`
+          : `Window ${p.block + 1} ${what}, inside the frames it shares with window ${p.block}: it will jump or talk over the end of window ${p.block}.`;
+      };
+      const need = Math.max(...problems.map(p => p.need));
+      const fixBtn = el("button.small", { onclick: () => {
+        const r = PC.fix(promptBox.value, problems);
+        promptBox.value = r.prompt; promptEdited = true;
+        toast(`Timings moved: the shot carries on and nobody speaks until ${PC.ts(need)}${r.lengthened.length ? `; ${r.lengthened.map(l => `window ${l.block + 1} lengthened from ${l.from}s to ${l.to}s`).join(", ")} to fit` : ""}`);
+        joinCheck();
+      } }, "Fix the timings");
+      rows.push(el("div.jc-row.warn", {}, el("div", {}, ...problems.map(p => el("div", {}, say(p))),
+        el("div.dim.small", {}, `Keep the shot going and nobody starting a line until ${PC.ts(need)}: Fix moves every timing later (and adds a first shot that carries straight on when the prompt opens on a cut).`)), fixBtn));
+    }
+    const sp = info.speech;
+    if (sp && sp.speaking) {
+      const sg = sp.suggest;
+      const left = s.left && M.getClip(s.left.id);
+      const move = sg && left ? el("button.small", { onclick: () => {
+        // trim the clip being left so the cut lands in the pause
+        const end = M.clipEnd(left) - (endSource(left) - sg.request) / Math.abs(left.speed || 1);
+        M.edit("Move the cut to a pause", () => M.trimEdge(left.id, "end", end, { snap: false }));
+        s.left = M.getClip(left.id);
+        toast(`Cut moved ${sg.earlier.toFixed(2)}s earlier, into the pause`);
+        prepare();
+      } }, `Move the cut ${sg.earlier.toFixed(2)}s earlier, into the pause`) : null;
+      rows.push(el("div.jc-row.warn", {}, el("div", {},
+        el("div", {}, "Someone is speaking at the cut: the held frames end in the middle of a word, so the new footage starts on a cut-off word."),
+        el("div.dim.small", {}, sg ? `There's a pause ${sg.earlier.toFixed(2)}s before it${keepCut.checked ? "" : " that the cut can land on (on H3's grid)"}.`
+          : keepCut.checked ? "There's no pause in the last 4 seconds; trim the clip back to one yourself." : "No pause in the last 4 seconds lands on H3's grid; tick Keep my exact cuts to cut on any frame, or trim the clip back yourself.")), move));
+    }
+    joinBox.hidden = !rows.length;
+    joinBox.append(...rows);
+  };
+  const joinCheckSoon = debounce(joinCheck, 250);
   promptBox.addEventListener("input", () => {
     promptEdited = true;
+    joinCheckSoon();
     if (slidingAllowed && !slidingTouched && /\[\s*\/\s*duration/i.test(promptBox.value) && !sliding.checked) { sliding.checked = true; syncSliding(); }
   });
 
@@ -262,6 +311,7 @@ export async function openGenerate(app, mode, where) {
       else promptNote.textContent = `Describe the whole run, pinned frames included: ${L.before ? `the first ${(L.before / info.fps).toFixed(2)}s are the previous clip's last frames` : ""}${L.before && L.after ? " and " : ""}${L.after ? `the last ${(L.after / info.fps).toFixed(2)}s are the next clip's first frames` : ""}. Started from ${promptClip?.name || "the clip"}'s prompt.`;
       seedSel.options[1].textContent = info.originalSeed != null ? `Same seed as the clip (${info.originalSeed})` : "Same seed as the clip";
     } catch (e) { info = null; error.textContent = e.message; }
+    joinCheck();
     update();
   }, 200);
 

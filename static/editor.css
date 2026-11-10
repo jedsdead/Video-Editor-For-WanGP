@@ -457,3 +457,9 @@ body.picking #viewerStage, body.picking #previewCanvas { cursor: crosshair !impo
 .imgpick .imgpick-thumb { max-height: 72px; max-width: 128px; width: auto; margin: 0; border-radius: 4px; }
 .imgpick.over { outline: 2px dashed var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .imgpick.off { opacity: .5; }
+/* join check under the generate dialog's prompt */
+.joincheck { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.joincheck[hidden] { display: none; }
+.jc-row { display: flex; gap: 10px; align-items: flex-start; padding: 7px 9px; border-radius: 6px; border: 1px solid color-mix(in srgb, #ffb84d 45%, transparent); background: color-mix(in srgb, #ffb84d 8%, transparent); }
+.jc-row > div { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.jc-row > button { flex: none; white-space: nowrap; }

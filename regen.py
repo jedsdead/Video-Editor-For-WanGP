@@ -548,6 +548,23 @@ def extract_frame(path, t, out_path):
     return out_path
 
 
+def speech_envelope(path, a, b, hop=0.01):
+    """Loudness of the speech band (250 Hz to 3.5 kHz) of a file between a and b seconds: (times, dB), one value per hop."""
+    import numpy as np
+    a = max(0.0, a)
+    rate = 16000
+    proc = subprocess.run([M.ffmpeg_path(), "-v", "error", "-ss", f"{a:.4f}", "-t", f"{max(0.05, b - a):.4f}", "-i", path, "-vn", "-ac", "1",
+                           "-af", "highpass=f=250,lowpass=f=3500", "-ar", str(rate), "-f", "f32le", "-"],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, **M.popen_kwargs())
+    x = np.frombuffer(proc.stdout, dtype=np.float32)
+    n = int(rate * hop)
+    if proc.returncode or x.size < n * 4:
+        return None, None
+    x = x[: x.size // n * n].reshape(-1, n)
+    db = 10 * np.log10(np.mean(x.astype(np.float64) ** 2, axis=1) + 1e-12)
+    return a + (np.arange(db.size) + 0.5) * hop, db
+
+
 def extract_audio(path, a, b, out_path):
     _run([M.ffmpeg_path(), "-v", "error", "-y", "-ss", f"{a:.4f}", "-t", f"{max(0.04, b - a):.4f}", "-i", path, "-vn", "-ac", "2",
           "-ar", "48000", "-c:a", "pcm_s16le", out_path])
@@ -940,6 +957,54 @@ class RegenService:
                 "inRun": block["frames"] - history_frames}
         return [history, held]
 
+    def _speech_at_cut(self, side, held, plan_pins):
+        """Whether someone is speaking where a clip is left: the held frames end at the cut, so a word running through it
+        is cut off there (the new footage can't finish it). Looks at the speech band around the cut and, if it's busy,
+        for the latest pause in the last few seconds where the cut can go instead (on the grid the pins will use).
+        plan_pins(cut_seconds) -> the pins for a cut there. Returns None when there's no sound to judge."""
+        import numpy as np
+        item = self._item(side["mediaId"])
+        if not item.get("has_audio") or not side.get("audio", True):
+            return None
+        cut = float(held["cut"])
+        span = 4.0
+        times, db = speech_envelope(item["path"], cut - span, cut + 0.3)
+        if times is None:
+            return None
+        loud = float(np.percentile(db, 95))
+        if loud < -50:                     # no speech to speak of
+            return {"speaking": False, "cut": cut}
+        quiet_level = loud - 18
+        near = (times >= cut - 0.06) & (times <= cut + 0.06)
+        speaking = bool(near.any() and float(db[near].max()) > loud - 12)
+        result = {"speaking": speaking, "cut": cut}
+        if not speaking:
+            return result
+        # quiet stretches of at least 0.12 s before the cut, latest first
+        quiet = (db < quiet_level) & (times < cut - 0.05)
+        runs, start = [], None
+        for i, q in enumerate(quiet):
+            if q and start is None:
+                start = i
+            if (not q or i == len(quiet) - 1) and start is not None:
+                end = i if not q else i + 1
+                if times[end - 1] - times[start] >= 0.12:
+                    runs.append((float(times[start]), float(times[end - 1])))
+                start = None
+        for a, b in reversed(runs):
+            # ask for a cut a little inside the pause; latent grade may move it onto the grid, so keep only cuts that
+            # still land in the pause
+            # (clear of the speech either side by more than the 0.06 s the check above looks at)
+            for want in (b - 0.1, (a + b) / 2, a + 0.1):
+                try:
+                    got = next(p for p in plan_pins(want) if p["kind"] != "history")
+                except (ValueError, StopIteration):
+                    continue
+                if a + 0.07 <= got["cut"] <= b - 0.07:
+                    result["suggest"] = {"request": round(want, 4), "cut": got["cut"], "earlier": round(cut - got["cut"], 3), "pause": [a, b]}
+                    return result
+        return result
+
     def _compose(self, req):
         ok, reason = self.host.available()
         mode = req.get("mode")
@@ -999,6 +1064,20 @@ class RegenService:
                     p["cut_frame"] += -n if p["place"] == "before" else n
                     p["cut"] = p["cut_frame"] / p["fps"]
                     p["trim"] = p["frames"] - n
+        speech = None
+        held_before = next((p for p in pins if p["place"] == "before" and p["kind"] != "history"), None)
+        if held_before and req.get("left"):
+            def plan_pins(cut_seconds):
+                side = {**req["left"], "cut": cut_seconds}
+                out = self._motion_masked_pins(side, window, gen_fps) if leave_mode == "motion_masked" else [self._pin(side, "before", window, gen_fps, kind=leave_mode)]
+                for p in out:   # the handover inside the held window, as above
+                    if p["kind"] in ("masked", "both") and p["grade"] == "latent" and "leave_mode" not in fallback:
+                        p["cut"] = (p["cut_frame"] - HANDOVER_BEFORE) / p["fps"]
+                return out
+            try:
+                speech = self._speech_at_cut(req["left"], held_before, plan_pins)
+            except Exception as error:
+                print(f"[Video Editor] speech check skipped: {error}")
         before = sum(p["inRun"] for p in pins if p["place"] == "before")
         after = sum(p["inRun"] for p in pins if p["place"] == "after")
         window_max = int(((model_def or {}).get("sliding_window_defaults") or {}).get("window_max") or 0)
@@ -1035,7 +1114,7 @@ class RegenService:
                                                           "trimTail": sum(p.get("trim", p["inRun"]) for p in pins if p["place"] == "after") / gen_fps,
                                                           "note": step_note},
                 "windows": sliding["count"], "windowFrames": sliding["window"],
-                "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "refmods": refmods,
+                "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "refmods": refmods, "speech": speech,
                 "available": ok, "reason": reason, "h3": self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}}
         return info, settings, model_def
 
