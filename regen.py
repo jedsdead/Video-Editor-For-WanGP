@@ -1122,7 +1122,24 @@ class RegenService:
         seed = int(seed)
         lengths = info["lengths"]
         prompt = str(req.get("prompt") or "").strip() or info["prompt"]
-        task = build_task(settings, prompt=prompt, seed=seed, frames=lengths["total"], fps=info["fps"], model_def=model_def)
+        job_id = uuid.uuid4().hex[:12]
+        folder = os.path.join(self.root, job_id)
+        os.makedirs(folder, exist_ok=True)
+        # start / end images: only on a side with nothing pinned (a pinned clip already sets those frames)
+        images = {}
+        caps = info["capabilities"]
+        pinned = {p["place"] for p in info["pins"]}
+        for key, side, allowed, name in (("startImage", "before", caps["start"], "start"), ("endImage", "after", caps["end"], "end")):
+            ref = req.get(key)
+            if not ref or not ref.get("mediaId"):
+                continue
+            if side in pinned:
+                raise ValueError(f"the {name} of this run is a pinned clip, so it can't also take a {name} image")
+            if not allowed:
+                raise ValueError(f"{info['model']['name']} can't take a {name} image")
+            item = self._item(ref["mediaId"])
+            images[f"{name}_image"] = extract_frame(item["path"], float(ref.get("t") or 0), os.path.join(folder, f"{name}.png"))
+        task = build_task(settings, prompt=prompt, seed=seed, frames=lengths["total"], fps=info["fps"], model_def=model_def, **images)
         apply_gen_size(task, req.get("gen"))
         # sliding windows: the length needs several, or you asked for them (a prompt's own [/duration=...] windows
         # set the real length); never for a run that arrives on a clip, whose pins must be in its only window
@@ -1149,9 +1166,6 @@ class RegenService:
             task["sliding_window_overlap"] = max(WINDOW_JOIN_OVERLAP, 1 + max(0, overlap - 1) // C.GRID * C.GRID)
             if int(task.get("sliding_window_discard_last_frames") or 0) < 4:
                 task["sliding_window_discard_last_frames"] = 4
-        job_id = uuid.uuid4().hex[:12]
-        folder = os.path.join(self.root, job_id)
-        os.makedirs(folder, exist_ok=True)
         # the add-on copies each window's interim file here, so the timeline can show the run as it goes
         spec.update(jobId=job_id, partialDir=folder)
         if any(p["kind"] in ("masked", "both") for p in info["pins"]) or window_join:

@@ -142,7 +142,8 @@ export class MediaBin {
       for (const err of res.errors) toast(`${err.path}: ${err.error}`, "error", 6000);
       this.register(res.media, place);
       if (res.media.length) toast(`Imported ${res.media.length} file${res.media.length > 1 ? "s" : ""}`);
-    } catch (e) { toast(`Upload failed: ${e.message}`, "error", 6000); }
+      return res.media;
+    } catch (e) { toast(`Upload failed: ${e.message}`, "error", 6000); return []; }
   }
 
   async importPaths(paths, place = null) {

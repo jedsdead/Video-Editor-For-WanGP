@@ -6,6 +6,7 @@ import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { api, el, modal, toast, clamp, debounce, timecode } from "./util.js";
 import { ensureGenSettings, genLabel, genOutput } from "./finalrender.js";
+import { ImagePick } from "./imagepick.js";
 
 const PREFS = "ve_gen_prefs";
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS) || "{}"); } catch (_) { return {}; } };
@@ -157,6 +158,26 @@ export async function openGenerate(app, mode, where) {
   const seedSel = el("select", {}, el("option", { value: "new" }, "New random seed"), el("option", { value: "same" }, "Same seed as the clip"), el("option", { value: "custom" }, "Custom seed…"));
   seedSel.value = prefs.seed === "custom" ? "custom" : "new";
   const seedInput = el("input", { type: "number", min: 0, step: 1, style: { width: "130px" }, value: prefs.customSeed || "" });
+  // Start / end images: the run's first and last frames, where nothing is pinned on that side (a new shot takes both,
+  // an extension can end on a picture, a prepend can start from one)
+  const wantStart = !s.left, wantEnd = !s.right;
+  const startPick = wantStart ? new ImagePick(app, "start", { onChange: () => imagesNote() }) : null;
+  const endPick = wantEnd ? new ImagePick(app, "end", { onChange: () => imagesNote() }) : null;
+  const imagesNoteEl = el("div.dim.small");
+  const imagesNote = () => {
+    const caps = info?.capabilities || {};
+    const lines = [];
+    if (startPick && !caps.start) lines.push("This model can't start from an image.");
+    if (endPick && !caps.end) lines.push("This model can't end on an image.");
+    const using = (startPick?.value && caps.start) || (endPick?.value && caps.end);
+    if (using) lines.push("The images count as the generation's own pictures in the prompt: the start image is <Picture 1> and the end image comes next; RefMod pictures move up after them.");
+    if (endPick?.value && caps.end && sliding.checked) lines.push("With sliding windows the end image steers every window and the last one lands on it.");
+    imagesNoteEl.textContent = lines.join(" ");
+  };
+  const imagesField = (startPick || endPick) ? (() => {
+    const row = (label, pick) => el("div.imgpick-line", {}, el("span.dim.small", { style: { width: "42px" } }, label), pick.node);
+    return el("div", {}, startPick ? row("Start", startPick) : null, endPick ? row("End", endPick) : null, imagesNoteEl);
+  })() : null;
   const promptBox = el("textarea.rgprompt", { rows: 10, spellcheck: false });
   const promptNote = el("div.dim.small");
   const error = el("div.warn");
@@ -176,6 +197,7 @@ export async function openGenerate(app, mode, where) {
       el("label.rrow", {}, joinMatch, el("span", {}, "Join match: correct the new footage's exposure and colour where it meets the clip it joins, fading out over about half a second")),
       el("label.rrow", {}, crossfade, el("span", {}, "Blend the joins: crossfade across the frames both sides rendered (pinned frames inside the run only)"))),
     field(fresh ? "Length" : "New footage", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seconds, el("span.dim", {}, "seconds")), lengthNote, slidingRow),
+    imagesField ? field(fresh ? "Start / end images" : wantStart ? "Start image" : "End image", imagesField) : null,
     field("Settings", srcClip.row, srcCurrent.row, modelNote),
     field("Size", sizeSel, sizeNote),
     field("Seed", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seedSel, seedInput)),
@@ -202,6 +224,8 @@ export async function openGenerate(app, mode, where) {
     useCurrent: srcCurrent.input.checked, settingsFrom: settingsItem?.id || (s.left || s.right)?.mediaId || null, promptRange,
     at: s.at ?? null, targetId: s.target?.id || null,
     gen: sizeSel.value === "project" ? gen : null,
+    startImage: startPick && !startPick.disabled ? startPick.value : null,
+    endImage: endPick && !endPick.disabled ? endPick.value : null,
   });
 
   const describePin = (p) => {
@@ -243,6 +267,9 @@ export async function openGenerate(app, mode, where) {
 
   const update = () => {
     seedInput.hidden = seedSel.value !== "custom";
+    const caps = info?.capabilities;
+    if (caps) { if (startPick) startPick.disabled = !caps.start; if (endPick) endPick.disabled = !caps.end; }
+    imagesNote();
     go.disabled = !info || !status.available || (!fresh && !status.h3?.installed);
   };
   sizeSel.addEventListener("change", () => { updateSizeNote(); prepare(); });
