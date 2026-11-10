@@ -76,6 +76,10 @@ textarea { resize: vertical; width: 100%; user-select: text; }
 #timelineArea { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--panel); }
 #tlToolbar { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--border); flex: none; }
 #tlToolbar input[type=range] { width: 140px; }
+#tlToolbar .tl-tools .tool, #tlToolbar .tl-tools .toggle { padding: 2px 6px; }
+#tlToolbar .tl-tools svg { width: 15px; height: 15px; }
+#tlInfo { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 1350px) { #tlToolbar .tl-tools .toggle span { display: none; } }
 #tlBody { flex: 1; display: flex; min-height: 0; position: relative; }
 #trackHeaders { width: 170px; flex: none; overflow: hidden; position: relative; background: var(--panel2); border-right: 1px solid var(--border); }
 #trackHeadersInner { position: absolute; left: 0; right: 0; top: 0; }
@@ -384,10 +388,26 @@ body[data-page="colour"] #timelineArea { display: none; }
 body[data-page="colour"] .splitter[data-split="bottom"], body[data-page="colour"] #dock-bottom { display: none; }
 #stage { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--panel); overflow: hidden; }
 #stage[hidden] { display: none; }
-#stage > .panel.on-stage { display: flex; flex-direction: column; min-height: 0; }
-#stage > .shotstrip { flex: none; height: auto; order: -1; border-bottom: 1px solid var(--border); }
-#stage > .panel.on-stage:not(.shotstrip) { flex: 1; overflow: hidden; height: auto; min-height: 0; }
-#stage > .panel.on-stage:not(.shotstrip) > .panel-scroll { overflow: auto; flex: 1; }
+#stage > .stage-item { display: flex; flex-direction: column; min-height: 0; flex: 1; border-bottom: 1px solid var(--border); }
+#stage > .stage-item.fixed { flex: none; }
+#stage > .stage-item > .panel.on-stage { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: hidden; height: auto; }
+#stage > .stage-item.fixed > .panel.on-stage { flex: none; }
+#stage > .stage-item > .panel.on-stage:not(.shotstrip) > .panel-scroll { overflow: auto; flex: 1; }
+.stage-head { display: flex; align-items: center; gap: 6px; padding: 1px 4px 1px 8px; font-size: 11px; color: var(--muted); background: var(--bg); cursor: grab; flex: none; user-select: none; }
+.stage-head .grip { opacity: .6; }
+.stage-head button.icon { width: 20px; height: 18px; font-size: 11px; opacity: .6; }
+.stage-head:hover button.icon { opacity: 1; }
+/* dragging a panel into place */
+.dock-tab { cursor: grab; }
+body.dock-dragging, body.dock-dragging * { cursor: grabbing !important; user-select: none; }
+.dock-drop-hint { position: fixed; z-index: 9000; pointer-events: none; border: 2px solid var(--accent); border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent); display: flex; align-items: flex-start; justify-content: center; }
+.dock-drop-hint[hidden] { display: none; }
+.dock-drop-hint span { margin-top: 10px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 10px; }
+.dock-drop-line { position: fixed; z-index: 9001; height: 4px; background: #fff; border-radius: 2px; pointer-events: none; box-shadow: 0 0 6px var(--accent); }
+.dock-drop-line[hidden] { display: none; }
+.dock-drag-label { position: fixed; z-index: 9002; pointer-events: none; background: var(--panel2); border: 1px solid var(--accent); color: var(--text);
+  font-size: 12px; padding: 3px 9px; border-radius: 4px; box-shadow: 0 4px 14px rgba(0,0,0,.5); }
 /* the Colour panel on the stage, side by side: settings and LUT | wheels | sliders | curves */
 #stage .colour-controls:not([hidden]) { display: grid; gap: 4px 22px; align-items: start;
   grid-template-columns: minmax(230px, 280px) minmax(360px, 1.3fr) minmax(240px, 1fr) minmax(300px, 1.1fr);

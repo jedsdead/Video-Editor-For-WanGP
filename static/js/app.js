@@ -5,7 +5,7 @@ import { api, el, toast, showMenu, closeMenu, modal, prompt_, confirm_, debounce
 import { Renderer } from "./renderer.js";
 import { Playback } from "./playback.js";
 import { Timeline } from "./timeline.js";
-import { Docks } from "./docks.js";
+import { Docks, PLACE_NAMES } from "./docks.js";
 import { MediaBin } from "./mediabin.js";
 import { Inspector } from "./inspector.js";
 import { ColourPanel } from "./colour.js";
@@ -393,7 +393,7 @@ function menuItems(name) {
     { label: "Zoom out", kbd: "-", action: () => app.timeline.setZoom(app.timeline.pps / 1.4) },
     { label: "Zoom to fit", kbd: "\\", action: () => app.timeline.zoomToFit() },
     "-",
-    { label: "Reset panel layout", action: () => app.docks.reset() },
+    { label: "Reset this page's panel layout", action: () => app.docks.reset() },
   ];
   return [
     { label: "Keyboard shortcuts", kbd: "?", action: showShortcuts },
@@ -735,8 +735,10 @@ async function main() {
     requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
   };
   document.querySelectorAll(".page-btn").forEach(b => b.addEventListener("click", () => app.setPage(b.dataset.page)));
-  app.docks.onTabMenu = (x, y, id) => showMenu(x, y, [{ head: "Move panel" },
-    ...[["left", "To left dock"], ["right", "To right dock"], ["bottom", "To bottom dock"], ["hidden", "Hide"]].map(([d, l]) => ({ label: l, action: () => app.docks.place(id, d) }))]);
+  app.docks.onTabMenu = (x, y, id) => showMenu(x, y, [{ head: "Move panel (or drag it)" },
+    ...app.docks.places().filter(([d]) => d !== app.docks.layout.placement[id])
+      .map(([d]) => ({ label: d === "hidden" ? "Hide" : `To ${PLACE_NAMES[d].replace(/^./, c => c.toLowerCase())}`, action: () => app.docks.place(id, d) })),
+    "-", { label: "Reset this page's layout", action: () => app.docks.reset() }]);
   app.timeline = new Timeline({
     canvas: $("tlCanvas"), wrap: $("tlCanvasWrap"), headers: $("trackHeaders"), headersInner: $("trackHeadersInner"),
     scrollbar: $("tlScrollbar"), scrollInner: $("tlScrollInner"), playback: app.playback,

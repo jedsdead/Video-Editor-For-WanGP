@@ -15,16 +15,6 @@
       <button class="menu-btn" data-menu="view">View</button>
       <button class="menu-btn" data-menu="help">Help</button>
     </nav>
-    <div class="toolgroup" id="tools">
-      <button class="tool" data-tool="select" title="Select tool (V)"><svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 1.5L16 20l-2.5 1-3-7.5L5 18z"/></svg></button>
-      <button class="tool" data-tool="blade" title="Blade tool (B) — click a clip to cut, Shift+click cuts every track"><svg viewBox="0 0 24 24"><path d="M14 3l7 7-9 9H8v-4zM4 21l4-4"/></svg></button>
-      <button class="tool" data-tool="range" title="Range tool (R) — drag across tracks to select a time range"><svg viewBox="0 0 24 24"><path d="M3 5h2v14H3zM19 5h2v14h-2zM7 11h10v2H7z"/></svg></button>
-    </div>
-    <div class="toolgroup">
-      <button class="toggle" id="tglSnap" title="Snapping (S)"><svg viewBox="0 0 24 24"><path d="M6 3h4v9a2 2 0 004 0V3h4v9a6 6 0 01-12 0zM6 3h4v3H6zM14 3h4v3h-4z"/></svg><span>Snap</span></button>
-      <button class="toggle" id="tglMagnetic" title="Magnetic timeline (M) — V1 closes gaps and pushes clips aside; clips above connect to it"><svg viewBox="0 0 24 24"><path d="M4 4h5v8a3 3 0 006 0V4h5v8a8 8 0 01-16 0z"/></svg><span>Magnetic</span></button>
-      <button class="toggle" id="tglLink" title="Linked selection (Ctrl+Shift+L) — video and its audio move together"><svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/></svg><span>Link</span></button>
-    </div>
     <div class="toolgroup">
       <button class="icon" id="btnUndo" title="Undo (Ctrl+Z)"><svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3"/></svg></button>
       <button class="icon" id="btnRedo" title="Redo (Ctrl+Shift+Z)"><svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5M20 9H10a6 6 0 000 12h3"/></svg></button>
@@ -81,6 +71,16 @@
           <button class="small" id="btnAddVideoTrack" title="Add a video track">+ Video track</button>
           <button class="small" id="btnAddAudioTrack" title="Add an audio track">+ Audio track</button>
           <span class="sep"></span>
+          <div class="toolgroup tl-tools" id="tools">
+            <button class="tool" data-tool="select" title="Select tool (V)"><svg viewBox="0 0 24 24"><path d="M5 3l14 8-6 1.5L16 20l-2.5 1-3-7.5L5 18z"/></svg></button>
+            <button class="tool" data-tool="blade" title="Blade tool (B) — click a clip to cut, Shift+click cuts every track"><svg viewBox="0 0 24 24"><path d="M14 3l7 7-9 9H8v-4zM4 21l4-4"/></svg></button>
+            <button class="tool" data-tool="range" title="Range tool (R) — drag across tracks to select a time range"><svg viewBox="0 0 24 24"><path d="M3 5h2v14H3zM19 5h2v14h-2zM7 11h10v2H7z"/></svg></button>
+          </div>
+          <div class="toolgroup tl-tools">
+            <button class="toggle" id="tglSnap" title="Snapping (S)"><svg viewBox="0 0 24 24"><path d="M6 3h4v9a2 2 0 004 0V3h4v9a6 6 0 01-12 0zM6 3h4v3H6zM14 3h4v3h-4z"/></svg><span>Snap</span></button>
+            <button class="toggle" id="tglMagnetic" title="Magnetic timeline (M) — V1 closes gaps and pushes clips aside; clips above connect to it"><svg viewBox="0 0 24 24"><path d="M4 4h5v8a3 3 0 006 0V4h5v8a8 8 0 01-16 0z"/></svg><span>Magnetic</span></button>
+            <button class="toggle" id="tglLink" title="Linked selection (Ctrl+Shift+L) — video and its audio move together"><svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/></svg><span>Link</span></button>
+          </div>
           <span id="tlInfo" class="dim"></span>
           <div class="spacer"></div>
           <button class="icon" id="btnZoomOut" title="Zoom out (-)"><svg viewBox="0 0 24 24"><path d="M5 11h14v2H5z"/></svg></button>
