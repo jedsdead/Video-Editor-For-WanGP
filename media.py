@@ -65,6 +65,29 @@ def _fraction(value):
         return 0.0
 
 
+def free_bytes(path):
+    """Free space on the drive that holds path (or its nearest existing parent); None when it can't be read."""
+    import shutil
+    p = os.path.abspath(path)
+    while p and not os.path.exists(p):
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    try:
+        return shutil.disk_usage(p).free
+    except Exception:
+        return None
+
+
+def need_space(path, need, what):
+    """Refuse (ValueError) to start something that needs about `need` bytes where the drive has less free."""
+    free = free_bytes(path)
+    if free is not None and free < need:
+        gb = lambda b: f"{b / 1e9:.1f} GB"
+        raise ValueError(f"Not enough disk space for {what}: about {gb(need)} needed on {os.path.splitdrive(os.path.abspath(path))[0] or os.path.abspath(path)}, {gb(free)} free")
+
+
 def media_kind(path):
     ext = os.path.splitext(path)[1].lower()
     if ext in IMAGE_EXT:

@@ -496,3 +496,9 @@ body.picking #viewerStage, body.picking #previewCanvas { cursor: crosshair !impo
 .cap-item textarea { grid-column: 1 / 2; width: 100%; resize: vertical; min-height: 36px; font-size: 12px; }
 .cap-item > button { grid-column: 2; grid-row: 1 / 3; align-self: start; }
 #tlSelect { max-width: 150px; font-size: 12px; }
+/* export self-check */
+.selfcheck { margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: var(--bg); font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+.selfcheck .sc-icon { display: inline-block; width: 16px; font-weight: 700; }
+.selfcheck .sc-ok .sc-icon { color: #7fd6a8; }
+.selfcheck .sc-warn .sc-icon, .selfcheck .sc-warn { color: #ffcc66; }
+.selfcheck .sc-error .sc-icon, .selfcheck .sc-error { color: #ff7a7a; }

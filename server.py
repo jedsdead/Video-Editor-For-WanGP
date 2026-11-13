@@ -559,6 +559,21 @@ def create_app(get_config, host=None):
         while os.path.exists(out_path):
             out_path = os.path.join(service.exports_dir, f"{base}_{counter}{codec['ext']}")
             counter += 1
+        # enough room for the file and the temporary sound mix? (a rough, generous estimate)
+        try:
+            ends = [float(c.get("start") or 0) + abs(float(c.get("out") or 0) - float(c.get("in") or 0)) / max(0.01, abs(float(c.get("speed") or 1)))
+                    for c in project.get("clips") or [] if not c.get("disabled")]
+            start, end = float(options.get("start") or 0), float(options.get("end") or 0) or max(ends or [0])
+            seconds = max(0.0, end - start)
+            w, h = int(options.get("width") or (project.get("settings") or {}).get("width") or 1920), int(options.get("height") or (project.get("settings") or {}).get("height") or 1080)
+            fps = float(options.get("fps") or (project.get("settings") or {}).get("fps") or 24)
+            key = (options.get("codec") or "h264").lower()
+            bpp = 4.5 if ("prores" in key or "dnx" in key) else 0.1 if ("265" in key or "hevc" in key or "av1" in key) else 0.25
+            video = 0 if codec.get("kind") in ("audio", "still") else w * h * fps * seconds * bpp / 8
+            M.need_space(out_path, int(video * 1.3 + 200e6), "this export")
+            M.need_space(service.temp_dir, int(seconds * 48000 * 2 * 4 * 1.2 + 100e6), "this export's temporary sound mix")
+        except ValueError as error:
+            raise HTTPException(400, str(error))
         job_id = uuid.uuid4().hex[:12]
         job = R.ExportJob(job_id, project, options, service.registry, out_path, service.temp_dir)
         service.jobs[job_id] = job

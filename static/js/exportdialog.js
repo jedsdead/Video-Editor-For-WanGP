@@ -114,7 +114,14 @@ export async function openExportDialog(app) {
               el("button.small", { onclick: async () => { try { const item = await api("api/exports/import", { method: "POST", body: { name: job.name } }); M.edit("Import media", () => M.registerMedia(item)); bus.emit("media"); toast("Added to the media bin"); } catch (e) { toast(e.message, "error"); } } }, "Add to media bin")));
           for (const i of job.info || []) result.append(el("div.dim", { style: { fontSize: "12px", marginTop: "4px" } }, i));
           for (const w of job.warnings || []) result.append(el("div.warn", {}, w));
-          toast("Export finished");
+          // the self-check of the finished file
+          if (job.checks?.length) {
+            const icon = { ok: "✓", warn: "!", error: "✕" };
+            result.append(el("div.selfcheck", {}, el("div.dim", { style: { fontSize: "11px", marginBottom: "2px" } }, "Self-check of the file"),
+              ...job.checks.map(c => el(`div.sc-${c.level}`, {}, el("span.sc-icon", {}, icon[c.level] || "·"), c.text))));
+          }
+          const bad = (job.checks || []).filter(c => c.level === "error").length;
+          toast(bad ? `Export finished, but the self-check found ${bad} problem${bad > 1 ? "s" : ""}` : "Export finished", bad ? "warn" : "info", bad ? 8000 : 4000);
         } else if (job.status === "error") result.append(el("div.warn", {}, job.error || "Export failed"));
         else result.append(el("div.dim", {}, "Export cancelled."));
       }

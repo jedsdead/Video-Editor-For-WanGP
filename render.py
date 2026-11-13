@@ -689,13 +689,16 @@ class ExportJob:
         self.error = None
         self.warnings = []
         self.info = []
+        self.checks = []          # the self-check of the finished file: [{"level": "ok" | "warn" | "error", "text"}]
+        self.planned = None       # seconds the export should last
+        self.expect_audio = False
         self.cancel_event = threading.Event()
         self.started = time.time()
         self.finished = None
 
     def public(self):
         return {"id": self.id, "status": self.status, "progress": round(self.progress, 4), "message": self.message,
-                "error": self.error, "warnings": self.warnings, "info": self.info, "output": self.out_path if self.status == "done" else None,
+                "error": self.error, "warnings": self.warnings, "info": self.info, "checks": self.checks, "output": self.out_path if self.status == "done" else None,
                 "name": os.path.basename(self.out_path), "elapsed": round((self.finished or time.time()) - self.started, 1)}
 
     def check(self):
@@ -706,9 +709,18 @@ class ExportJob:
         self.status = "running"
         try:
             self._run()
+            if self.planned:
+                self.message = "Checking the export..."
+                try:
+                    self._self_check()
+                except Cancelled:
+                    raise
+                except Exception as error:
+                    self.checks.append({"level": "warn", "text": f"The self-check couldn't run: {error}"})
             self.status = "done"
             self.progress = 1.0
-            self.message = "Export finished"
+            bad = sum(1 for c in self.checks if c["level"] == "error")
+            self.message = "Export finished" + (f", but the self-check found {bad} problem{'s' if bad > 1 else ''}" if bad else "")
         except Cancelled:
             self.status = "cancelled"
             self.message = "Export cancelled"
@@ -722,6 +734,80 @@ class ExportJob:
             self._remove(self.out_path)
         finally:
             self.finished = time.time()
+
+    def _self_check(self):
+        """Read the finished file back: it opens and decodes cleanly, it's as long as planned, it has picture and (when
+        the timeline has sound) sound, where it's black for a second or more, and its loudness and true peak."""
+        import re
+        out = self.out_path
+        add = lambda level, text: self.checks.append({"level": level, "text": text})
+        if not os.path.isfile(out) or os.path.getsize(out) < 1024:
+            add("error", "The file is missing or empty")
+            return
+        try:
+            info = M.probe(out)
+        except Exception as error:
+            add("error", f"The file can't be opened: {error}")
+            return
+        dur = float(info.get("duration") or 0)
+        is_video = info.get("kind") == "video"
+        if self.planned and dur:
+            off = dur - self.planned
+            fps = float(info.get("fps") or 24)
+            if abs(off) > max(2.0 / fps, 0.05):
+                add("warn", f"Length {dur:.2f}s, planned {self.planned:.2f}s ({off:+.2f}s)")
+            else:
+                add("ok", f"Length {dur:.2f}s as planned")
+        if self.expect_audio and not info.get("has_audio"):
+            add("error", "No sound in the file, though the timeline has sound")
+        # one decoding pass: errors, black stretches, loudness
+        args = [M.ffmpeg_path(), "-hide_banner", "-nostats", "-v", "info", "-i", out]
+        if is_video:
+            args += ["-map", "0:v:0", "-vf", "blackdetect=d=1.0:pic_th=0.98:pix_th=0.08"]
+        if info.get("has_audio"):
+            args += ["-map", "0:a:0", "-af", "ebur128=peak=true"] if is_video else ["-af", "ebur128=peak=true"]
+        args += ["-f", "null", "-"]
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace", **M.popen_kwargs())
+        lines = []
+        for line in proc.stderr:
+            lines.append(line)
+            if self.cancel_event.is_set():
+                proc.kill()
+                raise Cancelled()
+        proc.wait()
+        text = "".join(lines)
+        errors = [l.strip() for l in lines if re.search(r"error while decoding|corrupt|invalid data|concealing|missing reference", l, re.I)]
+        if proc.returncode != 0 or errors:
+            add("error", f"Decoding problems ({len(errors) or 'exit ' + str(proc.returncode)}): {errors[0][:160] if errors else text.strip()[-160:]}")
+        else:
+            add("ok", "Decodes cleanly")
+        if is_video:
+            blacks = [(float(a), float(b)) for a, b in re.findall(r"black_start:\s*([\d.]+)\s+black_end:\s*([\d.]+)", text)]
+            if blacks:
+                spans = ", ".join(f"{a:.1f}s-{b:.1f}s" for a, b in blacks[:6]) + (" …" if len(blacks) > 6 else "")
+                add("warn", f"Black for a second or more at {spans} (fine if that's a fade or a gap you meant)")
+            else:
+                add("ok", "No black stretches")
+        if info.get("has_audio"):
+            summary = text[text.rfind("Summary:"):] if "Summary:" in text else ""
+            m_i = re.search(r"I:\s*(-?[\d.]+)\s*LUFS", summary)
+            m_p = re.search(r"Peak:\s*(-?[\d.]+|-inf)\s*dBFS", summary)
+            lufs = float(m_i.group(1)) if m_i else None
+            peak = float(m_p.group(1)) if m_p and m_p.group(1) != "-inf" else None
+            if lufs is None or lufs <= -69:
+                add("warn" if not self.expect_audio else "error", "The sound is silent")
+            else:
+                target = self.options.get("loudness")
+                note = f"Loudness {lufs:.1f} LUFS"
+                if target not in (None, "", "off"):
+                    note += f" (target {float(target):g})"
+                note += f", true peak {peak:.1f} dBTP" if peak is not None else ""
+                level = "ok"
+                if peak is not None and peak > -0.1:
+                    level, note = "warn", note + ": it may clip on some players"
+                elif target not in (None, "", "off") and abs(lufs - float(target)) > 1.5:
+                    level, note = "warn", note + ": off the target"
+                add(level, note)
 
     @staticmethod
     def _remove(path):
@@ -751,6 +837,7 @@ class ExportJob:
         if end - start < 1.0 / tl.fps:
             raise RuntimeError("Nothing to export: the timeline (or the selected range) is empty")
         frames = int(round((end - start) * tl.fps))
+        self.planned = frames / tl.fps
 
         has_audio = any(tl.kind(c) in ("audio", "video") and tl.tracks.get(c["trackId"], {}).get("kind") == "audio" for c in tl.clips.values())
         audio_path = None
@@ -758,6 +845,7 @@ class ExportJob:
             self.message = "Mixing audio..."
             audio_path = os.path.join(self.temp_dir, f"{self.id}_mix.wav")
             self._mix_audio(tl, start, end, audio_path, loudness=opts.get("loudness"))
+            self.expect_audio = True
         self.check()
 
         if kind == "audio":

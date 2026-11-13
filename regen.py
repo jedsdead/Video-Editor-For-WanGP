@@ -679,6 +679,7 @@ class RegenService:
         return item
 
     def submit(self, req):
+        M.need_space(self.root, int(2e9), "a generation (its files and WanGP's output)")
         ok, reason = self.host.available()
         if not ok:
             raise ValueError(reason)
@@ -1190,6 +1191,7 @@ class RegenService:
         return {k: v for k, v in info.items()}
 
     def compose_submit(self, req):
+        M.need_space(self.root, int(2e9), "a generation (its files and WanGP's output)")
         info, settings, model_def = self._compose(req)
         if not info["available"]:
             raise ValueError(info["reason"])
@@ -1359,6 +1361,7 @@ class RegenService:
                 "loras": [l for l in meta.get("activated_loras") or [] if lora_name(l) != REGEN_LORA], "h3": self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}}
 
     def render_submit(self, req):
+        M.need_space(self.root, int(2e9), "a generation (its files and WanGP's output)")
         plan = self._render_plan(req)
         ok, reason = self.host.available()
         if not ok:
