@@ -703,8 +703,9 @@ export class Timeline {
       const edge = Math.min(EDGE, w / 3);
       let zone = "body";
       const hx0 = x0 + (clip.fadeIn || 0) * this.pps, hx1 = x1 - (clip.fadeOut || 0) * this.pps;
-      if (y < ry + 10 && w > 24 && Math.abs(x - hx0) < 6 && x >= x0 - 1) zone = "fadeIn";
-      else if (y < ry + 10 && w > 24 && Math.abs(x - hx1) < 6 && x <= x1 + 1) zone = "fadeOut";
+      const fades = state.tool === "select";   // the Trim tool trims right up to the top of the clip
+      if (fades && y < ry + 10 && w > 24 && Math.abs(x - hx0) < 6 && x >= x0 - 1) zone = "fadeIn";
+      else if (fades && y < ry + 10 && w > 24 && Math.abs(x - hx1) < 6 && x <= x1 + 1) zone = "fadeOut";
       else if (Math.abs(x - x1) <= edge && Math.abs(x - x0) > edge) zone = "trimR";
       else if (Math.abs(x - x0) <= edge) zone = "trimL";
       else if (x < x0 || x > x1) continue;
@@ -732,7 +733,7 @@ export class Timeline {
         const audio = row.kind === "audio";
         const fi = (audio ? closed.aFadeIn : closed.fadeIn) || 0, fo = (audio ? closed.aFadeOut : closed.fadeOut) || 0;
         const cx0 = this.x(cs), cx1 = this.x(ce);
-        if (y < ry + 10 && cx1 - cx0 > 24) {
+        if (y < ry + 10 && cx1 - cx0 > 24 && state.tool === "select") {
           if (Math.abs(x - (cx0 + fi * this.pps)) < 6 && x >= cx0 - 1) return { area: "clip", row, t, clip: closed, zone: "fadeIn", keyIndex: -1, compoundAudio: audio };
           if (Math.abs(x - (cx1 - fo * this.pps)) < 6 && x <= cx1 + 1) return { area: "clip", row, t, clip: closed, zone: "fadeOut", keyIndex: -1, compoundAudio: audio };
         }
@@ -832,6 +833,18 @@ export class Timeline {
       this.drag = { ...base, mode: "range", t0: Math.max(0, s.t), row0: row };
       return;
     }
+    if (tool === "trim" && h.area === "clip" && !h.row.track.locked) {
+      // Trim tool: an edit point between two clips rolls, a clip's edge ripple-trims, its body slips (Alt: slides)
+      const clip = h.clip;
+      if (!state.selection.has(clip.id)) M.select([clip.id]);
+      const roll = this.rollAt(h, x);
+      const pts = (ids) => this.snapPoints(new Set([...ids].flatMap(id => { const c = M.getClip(id); return c ? [c.id, ...M.partners(c).map(p => p.id)] : []; })));
+      if (roll) this.drag = { ...base, mode: "roll", left: roll.left.id, right: roll.right.id, snapData: M.snapshot(), points: pts([roll.left.id, roll.right.id]) };
+      else if (h.zone === "trimL" || h.zone === "trimR") this.drag = { ...base, mode: "ripple", clipId: clip.id, edge: h.zone === "trimL" ? "start" : "end", snapData: M.snapshot(), points: pts([clip.id]) };
+      else if (e.altKey) this.drag = { ...base, mode: "slide", clipId: clip.id, snapData: M.snapshot() };
+      else this.drag = { ...base, mode: "slip", clipId: clip.id, snapData: M.snapshot() };
+      return;
+    }
     if (h.area === "transition") {
       state.selTransition = h.transition.id;
       state.selection.clear();
@@ -914,6 +927,7 @@ export class Timeline {
       if (state.tool === "blade" && h.clip) h.bladeT = this.bladeTime(h.t, h.clip);
       const prev = this.hover;
       this.hover = h;
+      this.hoverX = x;
       this.canvas.style.cursor = this.cursorFor(h);
       if (state.tool === "blade" || (prev?.clip?.id !== h.clip?.id)) this.draw();
       return;
@@ -979,7 +993,7 @@ export class Timeline {
       return;
     }
     // model edits: restore the snapshot taken at pointerdown and re-apply the operation
-    if (firstMove) M.commit({ move: "Move", trim: "Trim", fade: "Fade", trdur: "Transition duration" }[d.mode] || "Edit");
+    if (firstMove) M.commit({ move: "Move", trim: "Trim", fade: "Fade", trdur: "Transition duration", roll: "Roll edit", ripple: "Ripple trim", slip: "Slip", slide: "Slide" }[d.mode] || "Edit");
     M.restore(d.snapData);
     if (d.mode === "move") {
       let dt = this.t(x) - this.t(d.startX);
@@ -994,6 +1008,26 @@ export class Timeline {
       let shift = 0;
       if (row && row.kind === d.kind) shift = this.kindIndex(row.track) - d.trackIndex;
       M.moveClips([...state.selection], dt, shift, d.kind);
+    } else if (d.mode === "roll" || d.mode === "ripple") {
+      const s = this.snap(this.t(x), d.points);
+      if (s.snapped) this.snapLine = s.t;
+      const t = s.snapped ? s.t : M.snapFrame(this.t(x));
+      if (d.mode === "roll") M.rollEdit(d.left, d.right, t, { linked: !e.altKey });
+      else M.rippleTrim(d.clipId, d.edge, t, { linked: !e.altKey });
+      const c = M.getClip(d.mode === "roll" ? d.left : d.clipId);
+      if (c) this.dragLabel = { x, y, text: d.mode === "roll" ? `Roll ${timecode(M.clipEnd(c), M.fps())}` : `Ripple ${(M.clipDur(c)).toFixed(2)}s` };
+    } else if (d.mode === "slip") {
+      const c0 = M.getClip(d.clipId);
+      if (c0) {
+        // the footage moves with the pointer: drag right to show earlier footage, left for later
+        const dSrc = (this.t(d.startX) - this.t(x)) * Math.abs(M.speedAt(c0, 0) || 1);
+        const got = M.slipClip(d.clipId, Math.round(dSrc * M.fps()) / M.fps());
+        const c = M.getClip(d.clipId);
+        this.dragLabel = { x, y, text: `Slip ${got >= 0 ? "+" : ""}${got.toFixed(2)}s · in ${timecode(c.in, M.fps())}` };
+      }
+    } else if (d.mode === "slide") {
+      const got = M.slideClip(d.clipId, this.t(x) - this.t(d.startX));
+      this.dragLabel = { x, y, text: `Slide ${got >= 0 ? "+" : ""}${got.toFixed(2)}s` };
     } else if (d.mode === "trim") {
       const s = this.snap(this.t(x), d.points);
       if (s.snapped) this.snapLine = s.t;
@@ -1054,8 +1088,26 @@ export class Timeline {
     this.drag = { mode: "pan", startX: x, startY: y, moved: true, scrollX: this.scrollX, scrollY: this.scrollY };
   }
 
+  // On the Trim tool: the edit point under the pointer when it's on a cut between two touching clips (within a few
+  // pixels of it), as {left, right}.
+  rollAt(h, x) {
+    if (!h.clip || (h.zone !== "trimL" && h.zone !== "trimR")) return null;
+    const edge = h.zone === "trimL" ? "start" : "end";
+    const other = M.neighbourAt(h.clip, edge);
+    if (!other) return null;
+    const cx = this.x(edge === "start" ? h.clip.start : M.clipEnd(h.clip));
+    if (Math.abs(x - cx) > 4) return null;
+    return edge === "start" ? { left: other, right: h.clip } : { left: h.clip, right: other };
+  }
+
   cursorFor(h) {
     if (state.tool === "blade") return h.clip ? "crosshair" : "default";
+    if (state.tool === "trim" && h.area === "clip") {
+      if (this.rollAt(h, this.hoverX ?? 0)) return "col-resize";
+      if (h.zone === "trimL") return "w-resize";
+      if (h.zone === "trimR") return "e-resize";
+      return "ew-resize";
+    }
     if (state.tool === "range") return "text";
     if (h.area === "ruler") return "col-resize";
     if (h.area === "marker") return "pointer";

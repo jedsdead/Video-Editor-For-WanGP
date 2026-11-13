@@ -792,6 +792,132 @@ export function trimLimits(clip, edge, groupIds) {
   return [clip.start + minDur, hi];
 }
 
+// ---- trim tool edits ----
+// A clip with the linked clips that share the given edge (or, for "both", start and end).
+function edgeGroup(clip, edge, linked = true) {
+  const at = (c) => edge === "start" ? c.start : clipEnd(c);
+  const group = [clip];
+  if (linked && state.linked) for (const p of partners(clip)) {
+    if (edge === "both" ? Math.abs(p.start - clip.start) < 1e-3 && Math.abs(clipEnd(p) - clipEnd(clip)) < 1e-3 : Math.abs(at(p) - at(clip)) < 1e-3) group.push(p);
+  }
+  return group.filter(c => !getTrack(c.trackId).locked);
+}
+// The clip butting up against a clip's edge on its track (null when there's a gap).
+export function neighbourAt(clip, edge) {
+  return clipsOn(clip.trackId).find(c => c.id !== clip.id && (edge === "end" ? Math.abs(c.start - clipEnd(clip)) < 1e-3 : Math.abs(clipEnd(c) - clip.start) < 1e-3)) || null;
+}
+
+// Roll: move the cut between two touching clips, the first getting longer as the second gets shorter. Nothing else
+// moves. Limited by the footage either clip has to spare.
+export function rollEdit(leftId, rightId, time, { linked = true } = {}) {
+  const L = getClip(leftId), R = getClip(rightId);
+  if (!L || !R) return;
+  const gl = edgeGroup(L, "end", linked), gr = edgeGroup(R, "start", linked);
+  const ids = new Set([...gl, ...gr].map(c => c.id));
+  let lo = -Infinity, hi = Infinity;
+  for (const c of gl) { const [a, b] = trimLimits(c, "end", ids); lo = Math.max(lo, a); hi = Math.min(hi, b); }
+  for (const c of gr) { const [a, b] = trimLimits(c, "start", ids); lo = Math.max(lo, a); hi = Math.min(hi, b); }
+  const t = clamp(snapFrame(time), lo, hi);
+  for (const c of gl) trimEndTo(c, t);
+  for (const c of gr) trimStartTo(c, t);
+}
+
+// Slip: show a different part of the clip's footage in the same place and length (in and out move together).
+export function slipClip(clipId, dSource) {
+  const clip = getClip(clipId);
+  if (!clip || isStill(clip)) return 0;
+  const group = edgeGroup(clip, "both").filter(c => c.mediaId === clip.mediaId);
+  let d = dSource;
+  for (const c of group) {
+    const total = (mediaOf(c) || {}).duration || c.out;
+    d = clamp(d, -c.in, Math.max(0, total - c.out));
+  }
+  for (const c of group) { c.in += d; c.out += d; if (hasSpeedKeys(c)) syncSpeedOut(c); }
+  return d;
+}
+
+// Slide: move a clip between its neighbours, the one before it getting longer or shorter to meet it and the one after
+// it the other way, so nothing else moves. Without a neighbour on a side the clip moves into the gap there.
+export function slideClip(clipId, dt) {
+  const clip = getClip(clipId);
+  if (!clip) return 0;
+  const group = edgeGroup(clip, "both");
+  const parts = group.map(c => ({ c, L: neighbourAt(c, "start"), R: neighbourAt(c, "end") }));
+  const ids = new Set(parts.flatMap(p => [p.c, p.L, p.R].filter(Boolean).map(x => x.id)));
+  let lo = -Infinity, hi = Infinity;
+  for (const { c, L, R } of parts) {
+    if (L) { const [a, b] = trimLimits(L, "end", ids); lo = Math.max(lo, a - c.start); hi = Math.min(hi, b - c.start); }
+    else { const prev = clipsOn(c.trackId).filter(x => !ids.has(x.id) && clipEnd(x) <= c.start + EPS); lo = Math.max(lo, Math.max(0, ...prev.map(clipEnd)) - c.start); }
+    if (R) { const [a, b] = trimLimits(R, "start", ids); lo = Math.max(lo, a - clipEnd(c)); hi = Math.min(hi, b - clipEnd(c)); }
+    else { const next = clipsOn(c.trackId).filter(x => !ids.has(x.id) && x.start >= clipEnd(c) - EPS); if (next.length) hi = Math.min(hi, Math.min(...next.map(x => x.start)) - clipEnd(c)); }
+  }
+  const d = clamp(snapFrame(dt), lo, hi);
+  if (!Number.isFinite(d) || Math.abs(d) < 1e-9) return 0;
+  for (const { c, L, R } of parts) {
+    const ns = c.start + d, ne = clipEnd(c) + d;
+    if (L) trimEndTo(L, ns);
+    if (R) trimStartTo(R, ne);
+    c.start = ns;
+  }
+  return d;
+}
+
+// Ripple trim: trim an edge and move everything after it on every track by the same amount, so no gap opens or closes
+// over. Trimming the start keeps the clip where it starts and pulls the rest up (or pushes it on).
+export function rippleTrim(clipId, edge, time, { linked = true } = {}) {
+  const clip = getClip(clipId);
+  if (!clip) return;
+  const group = edgeGroup(clip, edge, linked);
+  const all = new Set(P().clips.map(c => c.id));      // ignore neighbours: they move out of the way
+  let lo = -Infinity, hi = Infinity;
+  for (const c of group) { const [a, b] = trimLimits(c, edge, all); lo = Math.max(lo, a); hi = Math.min(hi, b); }
+  const t = clamp(snapFrame(time), lo, hi);
+  const oldStart = clip.start, oldEnd = clipEnd(clip);
+  const delta = edge === "end" ? t - oldEnd : oldStart - t;     // how much longer the clip gets
+  if (Math.abs(delta) < 1e-9) return;
+  const groupIds = new Set(group.map(c => c.id));
+  const movers = P().clips.filter(c => !groupIds.has(c.id) && !getTrack(c.trackId).locked && c.start >= oldEnd - 1e-4);
+  for (const c of group) {
+    if (edge === "end") trimEndTo(c, t);
+    else { trimStartTo(c, t); c.start = oldStart; }
+  }
+  for (const c of movers) c.start = Math.max(0, c.start + delta);
+  for (const m of P().markers || []) if (m.time >= oldEnd - 1e-4) m.time = Math.max(0, m.time + delta);
+  if (P().magnetic) pack();
+}
+
+// Q / W: ripple-trim the clips under the playhead so they start (Q) or end (W) there. Selected clips if any span the
+// playhead, otherwise every clip under it on unlocked tracks.
+export function trimToPlayhead(which) {
+  const t = state.playhead;
+  const under = P().clips.filter(c => c.start < t - EPS && clipEnd(c) > t + EPS && !getTrack(c.trackId).locked);
+  const sel = under.filter(c => state.selection.has(c.id));
+  const list = sel.length ? sel : under;
+  if (!list.length) return 0;
+  // one per linked group (the partners follow)
+  const done = new Set();
+  const heads = [];
+  for (const c of list) { if (done.has(c.id)) continue; done.add(c.id); for (const p of partners(c)) done.add(p.id); heads.push(c); }
+  // W first from the latest so earlier ripples don't move later targets; Q similar
+  heads.sort((a, b) => clipEnd(b) - clipEnd(a));
+  for (const c of heads) {
+    const fresh = getClip(c.id);
+    if (!fresh) continue;
+    if (which === "start") rippleTrim(fresh.id, "start", t);
+    else rippleTrim(fresh.id, "end", t);
+  }
+  return heads.length;
+}
+
+// Nudge the selected clips by a number of frames (left or right), magnetic mode permitting.
+export function nudgeSelection(frames) {
+  const ids = [...state.selection].filter(id => getClip(id));
+  if (!ids.length) return false;
+  const first = getClip(ids[0]);
+  moveClips(ids, frames * frameDur(), 0, trackKind(first.trackId));
+  return true;
+}
+
 export function trimEdge(clipId, edge, time, { linked = true, snap = true } = {}) {
   const clip = getClip(clipId);
   if (!clip) return;

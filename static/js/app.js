@@ -161,6 +161,18 @@ function setTool(tool) {
   updateInfo();
 }
 
+// Alt+← / →: move the selected clips a frame (Shift: 10 frames)
+function nudge(frames) {
+  if (!state.selection.size) { toast("Select clips to nudge them"); return; }
+  M.edit(`Nudge ${frames > 0 ? "right" : "left"}`, () => M.nudgeSelection(frames), { coalesceKey: "nudge" });
+}
+// Q / W: ripple-trim the clip under the playhead to start / end there
+function trimToPlayhead(which) {
+  let n = 0;
+  M.edit(which === "start" ? "Trim start to playhead" : "Trim end to playhead", () => { n = M.trimToPlayhead(which); });
+  if (!n) toast("No clip under the playhead to trim");
+}
+
 function syncToggles() {
   if (!P()) return;
   $("tglSnap").classList.toggle("active", !!P().snapping);
@@ -572,7 +584,7 @@ function showShortcuts() {
     ["Shift+4 / 6 / 7", "Edit, Colour and Audio pages"], ["Space", "Play / pause"], ["J / K / L", "Shuttle back / stop / forward (press again for 2x, 4x, 8x)"], ["← / →", "Previous / next frame (Shift: 1 second)"],
     ["Shift+D", "Detect shots in the selected clip"], ["Shift+M", "Add a marker"], ["Shift+F", "Freeze frame at the playhead"], ["Shift+R", "Reverse selected clips"], ["Shift+T", "Add a title"], ["C", "Crop handles on the viewer"],
     ["↑ / ↓", "Previous / next edit point"], ["Home / End", "Start / end of timeline"], ["I / O, Alt+X", "Mark in / out, clear"],
-    ["V / B / R", "Select / Blade / Range tool"], ["S / M", "Snapping / Magnetic timeline"], [K("Ctrl+Shift+L"), "Linked selection"],
+    ["V / B / T / R", "Select / Blade / Trim / Range tool"], ["Q / W", "Ripple-trim the clip's start / end to the playhead"], [K("Alt+← / →"), "Nudge selected clips a frame (Shift: 10)"], ["S / M", "Snapping / Magnetic timeline"], [K("Ctrl+Shift+L"), "Linked selection"],
     [K("Ctrl+B"), "Split at playhead (selected clips, or all)"], ["Del / Shift+Del", "Delete / ripple delete (clips, range or transition)"],
     [K("Ctrl+C / X / V"), "Copy / cut / paste at playhead"], [K("Ctrl+Z / Ctrl+Shift+Z"), "Undo / redo"], [K("Ctrl+A"), "Select all"],
     [K("Ctrl+L"), "Link / unlink selected clips"], [K("Ctrl+T"), "Transitions at the cut under the playhead"],
@@ -634,8 +646,10 @@ function onKey(e) {
     case "l": case "L": handled(); pb.shuttle(1); break;
     case "j": case "J": handled(); pb.shuttle(-1); break;
     case "c": case "C": handled(); app.overlay.setCropMode(!app.overlay.cropMode); break;
-    case "ArrowLeft": handled(); e.shiftKey ? (pb.pause(), pb.seek(state.playhead - 1)) : pb.step(-1); break;
-    case "ArrowRight": handled(); e.shiftKey ? (pb.pause(), pb.seek(state.playhead + 1)) : pb.step(1); break;
+    case "ArrowLeft": handled(); if (e.altKey) nudge(e.shiftKey ? -10 : -1); else e.shiftKey ? (pb.pause(), pb.seek(state.playhead - 1)) : pb.step(-1); break;
+    case "ArrowRight": handled(); if (e.altKey) nudge(e.shiftKey ? 10 : 1); else e.shiftKey ? (pb.pause(), pb.seek(state.playhead + 1)) : pb.step(1); break;
+    case "q": case "Q": if (!e.shiftKey) { handled(); trimToPlayhead("start"); } break;
+    case "w": case "W": if (!e.shiftKey) { handled(); trimToPlayhead("end"); } break;
     case "ArrowUp": handled(); jumpEdit(-1); break;
     case "ArrowDown": handled(); jumpEdit(1); break;
     case "Home": handled(); pb.pause(); pb.seek(0); break;
@@ -648,7 +662,7 @@ function onKey(e) {
     case "s": case "S": handled(); toggleSnap(); break;
     case "m": case "M": handled(); e.shiftKey ? addMarker() : toggleMagnetic(); break;
     case "f": case "F": if (e.shiftKey) { handled(); freezeFrame(); } break;
-    case "t": case "T": if (e.shiftKey) { handled(); app.effects.addGenerator(M.TITLE_MEDIA.id); } break;
+    case "t": case "T": handled(); if (e.shiftKey) app.effects.addGenerator(M.TITLE_MEDIA.id); else setTool("trim"); break;
     case "d": case "D": if (e.shiftKey) { handled(); detectShots(); } break;
     case "Delete": case "Backspace": handled(); deleteSelection(e.shiftKey); break;
     case "Escape": M.clearSelection(); state.range = null; bus.emit("range"); break;

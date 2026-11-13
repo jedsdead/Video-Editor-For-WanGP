@@ -185,7 +185,9 @@ Projects save automatically. **Help → Keyboard shortcuts** lists every key.
 | Space | Play / pause |
 | J / K / L | Shuttle back / stop / forward (again for 2x, 4x, 8x) |
 | ← → / ↑ ↓ | Previous or next frame / edit point |
-| V B R | Select, Blade, Range tool |
+| V B T R | Select, Blade, Trim, Range tool |
+| Q / W | Ripple-trim the clip under the playhead to start / end there |
+| Alt+← → | Nudge selected clips a frame (Shift: 10 frames) |
 | S / M | Snapping / Magnetic timeline |
 | Ctrl+B | Split at the playhead |
 | Del / Shift+Del | Delete / ripple delete |
