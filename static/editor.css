@@ -63,12 +63,29 @@ textarea { resize: vertical; width: 100%; user-select: text; }
 .panel-scroll { flex: 1; overflow: auto; padding: 8px; min-height: 0; }
 .empty-note { color: var(--muted); padding: 18px 10px; text-align: center; }
 
-#viewer { flex: 1; display: flex; flex-direction: column; min-width: 200px; background: #0b0b0d; }
+#viewer { flex: 1; display: flex; flex-direction: column; min-width: 200px; background: #0b0b0d; container-type: inline-size; container-name: viewer; overflow: hidden; }
 #viewerStage { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; min-height: 0; overflow: hidden; }
 #previewCanvas { background: #000; max-width: 100%; max-height: 100%; box-shadow: 0 0 0 1px #222; }
 #viewerMsg { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); color: var(--muted); font-size: 12px; background: rgba(0,0,0,.6); padding: 3px 10px; border-radius: 12px; pointer-events: none; }
 #viewerMsg:empty { display: none; }
 #transport { display: flex; align-items: center; gap: 10px; padding: 4px 10px; background: var(--panel); border-top: 1px solid var(--border); flex: none; }
+/* the controls shrink with the viewer (side docks dragged wider): shorter, then without the duration, then two rows */
+@container viewer (max-width: 640px) {
+  #transport { gap: 6px; padding: 4px 6px; }
+  #transport .timecode { font-size: 12px; letter-spacing: 0; }
+  #transport .transport-buttons { gap: 2px; }
+  #transport .transport-buttons button.icon { width: 26px; }
+  #transport select.small { max-width: 64px; padding-left: 3px; padding-right: 3px; }
+}
+@container viewer (max-width: 520px) {
+  #tcDuration, #rateBadge:empty { display: none; }
+  #tglLoop, #tglCrop { padding: 2px 5px; font-size: 11px; }
+}
+@container viewer (max-width: 430px) {
+  #transport { flex-wrap: wrap; row-gap: 3px; justify-content: center; }
+  #transport .transport-buttons { flex: 1 0 100%; order: -1; }
+  #tcCurrent { margin-right: auto; }
+}
 .transport-buttons { flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px; }
 .timecode { font-family: var(--mono); font-size: 14px; letter-spacing: .5px; }
 .timecode.dim { color: var(--muted); }

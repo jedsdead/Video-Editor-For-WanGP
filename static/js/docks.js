@@ -345,8 +345,12 @@ export class Docks {
     const move = (ev) => {
       const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
       const s = this.layout.sizes;
-      if (which === "left") s.left = clamp(start.sizes.left + dx, 200, window.innerWidth * 0.5);
-      if (which === "right") s.right = clamp(start.sizes.right - dx, 220, window.innerWidth * 0.55);
+      // the side docks can't squeeze the viewer below a usable width
+      const upperW = document.getElementById("upper").clientWidth;
+      const other = (d) => (this.dockEls[d].offsetParent !== null ? s[d] : 0);
+      const VIEWER_MIN = 300;
+      if (which === "left") s.left = clamp(start.sizes.left + dx, 200, Math.max(200, Math.min(window.innerWidth * 0.5, upperW - other("right") - VIEWER_MIN)));
+      if (which === "right") s.right = clamp(start.sizes.right - dx, 220, Math.max(220, Math.min(window.innerWidth * 0.55, upperW - other("left") - VIEWER_MIN)));
       if (which === "bottom") s.bottom = clamp(start.sizes.bottom - dx, 200, window.innerWidth * 0.6);
       if (which === "timeline") s.lower = clamp(start.sizes.lower - dy, 140, window.innerHeight - 220);
       this.dockEls.left.style.width = `${s.left}px`;
