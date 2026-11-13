@@ -896,7 +896,7 @@ export function setClipsEnabled(ids, on) {
 // Swap the footage of a clip (and its linked sound) for another media item, keeping its place, length, grade,
 // effects and keyframes. The new footage starts at the same point as the old where it can, and the clip gets shorter
 // if the new footage is. A video swapped for one without sound loses its linked sound clip.
-export function replaceClipMedia(clipId, mediaId) {
+export function replaceClipMedia(clipId, mediaId, { keepProvenance = false } = {}) {
   const clip = getClip(clipId);
   const item = P().media[mediaId];
   if (!clip || !item) return false;
@@ -917,8 +917,8 @@ export function replaceClipMedia(clipId, mediaId) {
     const inT = clamp(c.in, 0, Math.max(0, total - want));
     c.in = inT;
     c.out = Math.min(total, inT + want);
-    // provenance of the old footage no longer applies
-    for (const k of ["gen", "takes", "takeIndex", "seam", "parentId", "windows"]) delete c[k];
+    // provenance of the old footage no longer applies (a processed copy of the same footage keeps it)
+    if (!keepProvenance) for (const k of ["gen", "takes", "takeIndex", "seam", "parentId", "windows"]) delete c[k];
   }
   if (getClip(clip.id) && !partners(clip).length) delete clip.linkId;
   return true;

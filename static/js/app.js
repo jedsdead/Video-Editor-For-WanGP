@@ -188,6 +188,36 @@ function timelineMenu(x, y) {
   ]);
 }
 
+// Stabilise: a stabilised copy of the clip's file (made in the background), swapped in when it's ready
+function openStabilise(clip) {
+  const item = M.mediaOf(clip);
+  let smooth = "30", zoomOn = true;
+  try { const s = JSON.parse(localStorage.getItem("ve_stab") || "{}"); smooth = s.smooth || smooth; zoomOn = s.zoom ?? true; } catch {}
+  const level = el("select", {}, ...[["10", "Light (keeps intended camera moves)"], ["30", "Medium"], ["60", "Strong (locks the frame down)"]].map(([v, l]) => el("option", { value: v, selected: v === smooth }, l)));
+  const zoom = el("input", { type: "checkbox", checked: zoomOn });
+  modal({ title: "Stabilise", narrow: true, body: el("div", {},
+      el("div.field.wide", {}, el("label", {}, "Smoothing"), level),
+      el("div.field.wide", {}, el("label", {}, "Edges"), el("label", { style: { display: "flex", gap: "6px", alignItems: "center", color: "inherit" } }, zoom, "Zoom in to hide the moving edges")),
+      el("div.dim.small", {}, `Makes a stabilised copy of “${item.name}” (the whole file, sound unchanged) and puts it in this clip, keeping its timing, grade and effects. It runs in the background; the clip changes when it's done. Undo puts the original back.`)),
+    buttons: ["spacer", { label: "Cancel" }, { label: "Stabilise", primary: true, action: async () => {
+      try { localStorage.setItem("ve_stab", JSON.stringify({ smooth: level.value, zoom: zoom.checked })); } catch {}
+      let job;
+      try { job = await api(`api/media/${item.id}/stabilise`, { method: "POST", body: { smoothing: +level.value, zoom: zoom.checked } }); }
+      catch (e) { toast(`Couldn't stabilise: ${e.message}`, "error"); return; }
+      toast(`Stabilising “${item.name}”…`);
+      while (job.status === "running") {
+        await new Promise(r => setTimeout(r, 1500));
+        try { job = await api(`api/stabilise/${job.id}`); } catch (e) { toast(`Stabilising stopped: ${e.message}`, "error"); return; }
+      }
+      if (job.status !== "done") { toast(`Couldn't stabilise: ${job.error || "unknown error"}`, "error", 8000); return; }
+      app.bin.register([job.media], null);
+      const target = M.getClip(clip.id);
+      if (!target) { toast("Stabilised copy is in the media bin (the clip has gone)"); return; }
+      M.edit("Stabilise", () => M.replaceClipMedia(clip.id, job.media.id, { keepProvenance: true }));
+      toast(`Stabilised${job.method === "deshake" ? " (ffmpeg's deshake: this ffmpeg has no vidstab)" : ""}`);
+    } }] });
+}
+
 // Shift+E: turn the selected clips off (kept, but not played or exported) or back on
 function toggleEnabled() {
   const ids = [...state.selection].filter(id => M.getClip(id));
@@ -586,6 +616,7 @@ function contextMenu(x, y, hit) {
           action: () => M.edit("Clip colour", () => M.setClipLabel(new Set([...state.selection, clip.id]), name)) })),
         "-", { label: "None", disabled: !clip.label, action: () => M.edit("Clip colour", () => M.setClipLabel(new Set([...state.selection, clip.id]), null)) }] },
       replaceItem(clip, hit.row),
+      hit.row.kind === "video" && M.mediaOf(clip)?.kind === "video" ? { label: "Stabilise…", action: () => openStabilise(clip) } : null,
       audioClipsOf([...state.selection, clip.id]).length ? { label: "Audio", submenu: [
         { label: "Normalise loudness…", action: () => { if (!state.selection.has(clip.id)) M.select([clip.id]); openNormalise(app); } },
         hit.row.kind === "audio" ? { label: "Duck under dialogue…", title: "Lower this clip while someone speaks on the other audio tracks", action: () => { if (!state.selection.has(clip.id)) M.select([clip.id]); openDuck(app); } } : null] } : null,

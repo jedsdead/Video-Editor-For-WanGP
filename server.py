@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 import uuid
@@ -252,6 +253,80 @@ def create_app(get_config, host=None):
             except Exception as error:
                 raise HTTPException(500, str(error))
         return FileResponse(out, headers={"Cache-Control": "max-age=86400"})
+
+    # ------------------------------------------------------------------ stabilise
+    stab_jobs = {}
+    stab_caps = {}
+
+    def _has_vidstab():
+        if "vidstab" not in stab_caps:
+            try:
+                out = M.run([M.ffmpeg_path(), "-hide_banner", "-filters"], timeout=30).stdout or ""
+                stab_caps["vidstab"] = "vidstabdetect" in out and "vidstabtransform" in out
+            except Exception:
+                stab_caps["vidstab"] = False
+        return stab_caps["vidstab"]
+
+    def _stabilise(job_id, item, smoothing, zoom):
+        """Write a stabilised copy of a video: two-pass vidstab when this ffmpeg has it (motion analysis, then
+        smoothing over `smoothing` frames either side), else ffmpeg's deshake. zoom: scale up to hide the moving
+        edges, else leave them black. Sound is copied as it is."""
+        job = stab_jobs[job_id]
+        try:
+            folder = os.path.join(service.data_root, "stabilised")
+            os.makedirs(folder, exist_ok=True)
+            base = _safe_name(os.path.splitext(os.path.basename(item["path"]))[0], "clip")
+            out = os.path.join(folder, f"{base}_stab.mp4")
+            n = 1
+            while os.path.exists(out):
+                n += 1
+                out = os.path.join(folder, f"{base}_stab{n}.mp4")
+            enc = ["-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart"]
+            work = os.path.join(service.temp_dir, f"stab_{job_id}")
+            os.makedirs(work, exist_ok=True)
+            if _has_vidstab():
+                job.update(stage="Analysing the motion", method="vidstab")
+                # relative file names (run in the work folder): a Windows drive letter's colon would break the filter
+                r = subprocess.run([M.ffmpeg_path(), "-y", "-v", "error", "-i", item["path"], "-vf", "vidstabdetect=shakiness=6:accuracy=15:result=motion.trf", "-f", "null", "-"],
+                                   cwd=work, capture_output=True, text=True, timeout=7200, **M.popen_kwargs())
+                if r.returncode != 0:
+                    raise RuntimeError((r.stderr or "analysis failed").strip()[-300:])
+                job.update(stage="Smoothing and rendering")
+                vf = f"vidstabtransform=input=motion.trf:smoothing={int(smoothing)}:optzoom={1 if zoom else 0}:zoomspeed=0.2:interpol=bicubic,unsharp=5:5:0.4:3:3:0.2"
+            else:
+                job.update(stage="Stabilising", method="deshake")
+                w, h = int(item.get("width") or 0), int(item.get("height") or 0)
+                vf = "deshake=rx=48:ry=48:edge=blank" + (f",crop=iw*0.9:ih*0.9,scale={w}:{h}:flags=bicubic" if zoom and w and h else "")
+            r = subprocess.run([M.ffmpeg_path(), "-y", "-v", "error", "-i", item["path"], "-vf", vf] + enc + [out],
+                               cwd=work, capture_output=True, text=True, timeout=7200, **M.popen_kwargs())
+            if r.returncode != 0 or not os.path.isfile(out):
+                raise RuntimeError((r.stderr or "render failed").strip()[-300:])
+            job.update(status="done", stage="Done", media=service.registry.public(service.registry.register(out)))
+        except Exception as error:
+            job.update(status="error", error=str(error))
+        finally:
+            try:
+                import shutil
+                shutil.rmtree(os.path.join(service.temp_dir, f"stab_{job_id}"), ignore_errors=True)
+            except Exception:
+                pass
+
+    @app.post("/api/media/{media_id}/stabilise")
+    def media_stabilise(media_id: str, payload: dict = Body(default={})):
+        item = _item(media_id)
+        if item["kind"] != "video" or not os.path.isfile(item["path"]):
+            raise HTTPException(400, "Only video files can be stabilised")
+        job_id = uuid.uuid4().hex[:10]
+        stab_jobs[job_id] = {"id": job_id, "status": "running", "stage": "Starting", "mediaId": media_id}
+        smoothing = max(4, min(120, int(payload.get("smoothing") or 30)))
+        threading.Thread(target=_stabilise, args=(job_id, item, smoothing, payload.get("zoom", True) is not False), daemon=True).start()
+        return stab_jobs[job_id]
+
+    @app.get("/api/stabilise/{job_id}")
+    def stabilise_status(job_id: str):
+        if job_id not in stab_jobs:
+            raise HTTPException(404, "Unknown job")
+        return stab_jobs[job_id]
 
     @app.get("/api/media/{media_id}/loudness")
     def media_loudness(media_id: str, a: float = 0.0, b: float = 0.0):
