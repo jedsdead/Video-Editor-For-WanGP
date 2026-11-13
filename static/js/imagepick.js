@@ -8,7 +8,7 @@ import { el, timecode, toast } from "./util.js";
 // The picture at the playhead: the top visible video clip there, at its source time.
 export function playheadFrame(t = state.playhead) {
   const clip = M.videoTracks().slice().reverse().flatMap(tr => M.clipsOn(tr.id))
-    .find(c => c.start <= t + 1e-6 && M.clipEnd(c) > t + 1e-6 && !M.getTrack(c.trackId).hidden && M.mediaOf(c));
+    .find(c => c.start <= t + 1e-6 && M.clipEnd(c) > t + 1e-6 && !c.disabled && !M.getTrack(c.trackId).hidden && M.mediaOf(c));
   if (!clip) return null;
   const tau = Math.min(Math.max(0, t - clip.start), Math.max(0, M.clipDur(clip) - M.frameDur() / 2));
   return { mediaId: clip.mediaId, t: M.isStill(clip) ? 0 : M.srcTime(clip, tau), label: `${clip.name || "clip"} at ${timecode(t, P().fps || 24)}` };

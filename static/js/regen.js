@@ -146,6 +146,10 @@ export class RegenJobs {
       target = M.getClip(liveClip.id);
       placedNew = true;
       this.dropLiveMedia(job.id, item.id);
+    } else if (job.trackId && !M.getTrack(job.trackId)) {
+      // the track it was made for isn't on the timeline that's open (another timeline is)
+      if (live) return;
+      toast(`A ${job.mode} generation finished while another timeline was open; it was added to the Media panel`, "warn", 8000);
     } else if (live && (job.mode === "replace" || (job.mode === "new" ? !!targetId : !!M.generatedIn(job.mode, lineage.parent, lineage.child)))) {
       return;   // a new take on an existing clip: shown when it's done
     } else if ((job.left && !left) || (job.right && !right) || (job.mode === "replace" && !M.getClip(job.request?.replaceId)) || (targetId && !M.getClip(targetId))) {

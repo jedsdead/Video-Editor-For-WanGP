@@ -548,7 +548,7 @@ export class Playback {
         const want = clamp(this.elementTime(entry, clip, t - clip.start), 0, Math.max(0, (item.duration || 0) - 0.03));
         const frame = 1 / (item.fps || fps() || 24);
         // what's shown runs a frame or two behind while playing; a stale picture is from somewhere else entirely
-        const slack = (0.25 + 1.5 * frame) * Math.max(1, Math.abs(this.rate));
+        const slack = (0.25 + 1.5 * frame) * Math.max(1, Math.abs(this.rate)) * Math.max(1, speedAt(clip, t - clip.start));
         hold = el.seeking || el.readyState < 2 || (entry.shown != null && Math.abs(entry.shown - want) > slack);
       }
     }
@@ -614,7 +614,8 @@ export class Playback {
       let active = null;
       for (const tr of trs) {
         const info = transitionInfo(tr);
-        if (info && tm >= info.lo && tm < info.hi) { active = { tr, info }; break; }
+        // a transition with a clip that's turned off is left out (as the export leaves it out)
+        if (info && !info.a.disabled && !info.b.disabled && tm >= info.lo && tm < info.hi) { active = { tr, info }; break; }
       }
       if (active) {
         const { tr, info } = active;

@@ -918,7 +918,7 @@ export function replaceClipMedia(clipId, mediaId, { keepProvenance = false } = {
     c.in = inT;
     c.out = Math.min(total, inT + want);
     // provenance of the old footage no longer applies (a processed copy of the same footage keeps it)
-    if (!keepProvenance) for (const k of ["gen", "takes", "takeIndex", "seam", "parentId", "windows"]) delete c[k];
+    if (!keepProvenance) for (const k of ["gen", "takes", "takeIndex", "seam", "windows"]) delete c[k];
   }
   if (getClip(clip.id) && !partners(clip).length) delete clip.linkId;
   return true;
@@ -985,12 +985,15 @@ export function slideClip(clipId, dt) {
   }
   const d = clamp(snapFrame(dt), lo, hi);
   if (!Number.isFinite(d) || Math.abs(d) < 1e-9) return 0;
+  const groupIds = new Set(group.map(c => c.id));
   for (const { c, L, R } of parts) {
     const ns = c.start + d, ne = clipEnd(c) + d;
     if (L) trimEndTo(L, ns);
     if (R) trimStartTo(R, ne);
     c.start = ns;
   }
+  // clips connected to it (magnetic mode) move with its footage
+  for (const k of P().clips) if (k.parentId && groupIds.has(k.parentId) && !groupIds.has(k.id)) k.start = Math.max(0, k.start + d);
   return d;
 }
 
@@ -1003,16 +1006,32 @@ export function rippleTrim(clipId, edge, time, { linked = true } = {}) {
   const all = new Set(P().clips.map(c => c.id));      // ignore neighbours: they move out of the way
   let lo = -Infinity, hi = Infinity;
   for (const c of group) { const [a, b] = trimLimits(c, edge, all); lo = Math.max(lo, a); hi = Math.min(hi, b); }
-  const t = clamp(snapFrame(time), lo, hi);
+  let t = clamp(snapFrame(time), lo, hi);
   const oldStart = clip.start, oldEnd = clipEnd(clip);
-  const delta = edge === "end" ? t - oldEnd : oldStart - t;     // how much longer the clip gets
+  let delta = edge === "end" ? t - oldEnd : oldStart - t;     // how much longer the clip gets
   if (Math.abs(delta) < 1e-9) return;
   const groupIds = new Set(group.map(c => c.id));
   const movers = P().clips.filter(c => !groupIds.has(c.id) && !getTrack(c.trackId).locked && c.start >= oldEnd - 1e-4);
+  if (delta < 0) {
+    // pulling up: no further than the room on every track, so a clip spanning the edit on another track isn't run
+    // into (everything moves by the same amount, so the tracks stay in sync)
+    const byTrack = new Map();
+    for (const c of movers) byTrack.set(c.trackId, Math.min(byTrack.get(c.trackId) ?? Infinity, c.start));
+    for (const [trackId, first] of byTrack) {
+      const before = P().clips.filter(c => c.trackId === trackId && !groupIds.has(c.id) && c.start < oldEnd - 1e-4);
+      const stop = Math.max(0, ...before.map(clipEnd));
+      delta = Math.max(delta, Math.min(0, stop - first));
+    }
+    delta = Math.max(delta, -(oldEnd - oldStart) + frameDur());
+    if (delta > -1e-9) return;
+    t = edge === "end" ? oldEnd + delta : oldStart - delta;
+  }
   for (const c of group) {
     if (edge === "end") trimEndTo(c, t);
     else { trimStartTo(c, t); c.start = oldStart; }
   }
+  // trimming the head moves the clip's footage: clips connected to it (magnetic mode) within it move with it
+  if (edge === "start") for (const k of P().clips) if (k.parentId && groupIds.has(k.parentId) && !groupIds.has(k.id) && k.start < oldEnd - 1e-4) k.start = Math.max(oldStart, k.start + delta);
   for (const c of movers) c.start = Math.max(0, c.start + delta);
   for (const m of P().markers || []) if (m.time >= oldEnd - 1e-4) m.time = Math.max(0, m.time + delta);
   if (P().magnetic) pack();

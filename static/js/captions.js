@@ -79,7 +79,7 @@ const srtTime = (t) => {
   const h = Math.floor(ms / 3600000), m = Math.floor(ms / 60000) % 60, s = Math.floor(ms / 1000) % 60;
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")},${String(ms % 1000).padStart(3, "0")}`;
 };
-export function toSrt(list = captions()) {
+export function toSrt(list = captions().filter(c => !c.disabled)) {
   return list.map((c, i) => `${i + 1}\n${srtTime(c.start)} --> ${srtTime(M.clipEnd(c))}\n${(c.title?.text || "").trim()}\n`).join("\n");
 }
 export function parseSrt(text) {
@@ -214,7 +214,7 @@ export class CaptionsPanel {
   }
 
   exportSrt() {
-    const list = captions();
+    const list = captions().filter(c => !c.disabled);
     if (!list.length) { toast("No captions to export", "warn"); return; }
     const blob = new Blob([toSrt(list)], { type: "text/plain" });
     const a = el("a", { href: URL.createObjectURL(blob), download: `${(P().name || "captions").replace(/[\\/:*?"<>|]+/g, "_")}.srt` });
