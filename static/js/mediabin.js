@@ -94,7 +94,7 @@ export class MediaBin {
   }
 
   menu(e, item) {
-    const used = P().clips.some(c => c.mediaId === item.id);
+    const used = M.allTimelineClips().some(c => c.mediaId === item.id);
     showMenu(e.clientX, e.clientY, [
       { label: "Add to end of timeline", action: () => this.addToTimeline(item) },
       { label: "Insert at playhead", action: () => this.addToTimeline(item, state.playhead) },

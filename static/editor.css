@@ -478,3 +478,4 @@ body.picking #viewerStage, body.picking #previewCanvas { cursor: crosshair !impo
 .cap-item .cap-time:hover { color: var(--text); }
 .cap-item textarea { grid-column: 1 / 2; width: 100%; resize: vertical; min-height: 36px; font-size: 12px; }
 .cap-item > button { grid-column: 2; grid-row: 1 / 3; align-self: start; }
+#tlSelect { max-width: 150px; font-size: 12px; }

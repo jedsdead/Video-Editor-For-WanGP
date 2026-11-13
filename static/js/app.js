@@ -163,6 +163,31 @@ function setTool(tool) {
   updateInfo();
 }
 
+// Timelines: the switcher in the timeline toolbar
+function syncTimelines() {
+  const sel = $("tlSelect");
+  if (!sel || !P()) return;
+  const list = M.timelineList();
+  sel.innerHTML = "";
+  for (const t of list) sel.append(el("option", { value: t.id, selected: t.active }, t.name));
+  sel.title = list.length > 1 ? `${list.length} timelines in this project` : "Timelines in this project (alternate cuts share the media)";
+}
+function openTimeline(id) {
+  if (!M.edit("Switch timeline", () => M.switchTimeline(id))) return;
+  app.playback.seek(Math.min(state.playhead, M.timelineEnd()));
+  bus.emit("project");
+}
+function timelineMenu(x, y) {
+  const cur = M.timelineList().find(t => t.active);
+  showMenu(x, y, [
+    { label: "New timeline", action: () => { M.edit("New timeline", () => M.newTimeline()); bus.emit("project"); toast("New empty timeline"); } },
+    { label: "Duplicate this timeline", action: () => { M.edit("Duplicate timeline", () => M.newTimeline(`${cur.name} copy`, { duplicate: true })); bus.emit("project"); toast("Duplicated: you're on the copy"); } },
+    { label: "Rename…", action: async () => { const n = await prompt_("Rename timeline", "Name", cur.name); if (n) { M.edit("Rename timeline", () => M.renameTimeline(cur.id, n)); syncTimelines(); } } },
+    "-",
+    { label: "Delete this timeline", disabled: M.timelineList().length < 2, action: () => { M.edit("Delete timeline", () => M.deleteTimeline(cur.id)); bus.emit("project"); toast("Timeline deleted (Ctrl+Z brings it back)"); } },
+  ]);
+}
+
 // Shift+E: turn the selected clips off (kept, but not played or exported) or back on
 function toggleEnabled() {
   const ids = [...state.selection].filter(id => M.getClip(id));
@@ -808,6 +833,9 @@ async function main() {
     b.addEventListener("mouseenter", () => { if (document.querySelector(".menu-btn.open") && !b.classList.contains("open")) openMenu(b); });
   });
   document.querySelectorAll(".tool").forEach(b => b.addEventListener("click", () => setTool(b.dataset.tool)));
+  $("tlSelect").onchange = (e) => openTimeline(e.target.value);
+  $("btnTlMenu").onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); timelineMenu(r.left, r.bottom + 2); };
+  for (const ev of ["project", "change"]) bus.on(ev, () => syncTimelines());
   $("tglSnap").onclick = toggleSnap;
   $("tglMagnetic").onclick = toggleMagnetic;
   $("tglLink").onclick = toggleLinked;

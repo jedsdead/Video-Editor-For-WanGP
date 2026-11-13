@@ -792,6 +792,93 @@ export function trimLimits(clip, edge, groupIds) {
   return [clip.start + minDur, hi];
 }
 
+// ---- timelines ----
+// A project can hold several timelines (alternate cuts) sharing its media and settings. The open one lives at the top
+// level of the project, as it always has, so everything else works on it unchanged; the others are kept in
+// project.timelines[].data until they're opened.
+const TIMELINE_KEYS = ["tracks", "clips", "transitions", "markers", "compounds", "master", "magnetic", "snapping", "inPoint", "outPoint", "captionStyle"];
+function ensureTimelines() {
+  const p = P();
+  if (!Array.isArray(p.timelines) || !p.timelines.length) { const id = uid("t"); p.timelines = [{ id, name: "Timeline 1" }]; p.activeTimeline = id; }
+  if (!p.timelines.find(t => t.id === p.activeTimeline)) p.activeTimeline = p.timelines[0].id;
+  return p.timelines;
+}
+export function timelineList() {
+  const list = ensureTimelines();
+  return list.map(t => ({ id: t.id, name: t.name, active: t.id === P().activeTimeline }));
+}
+function stashActive() {
+  const p = P();
+  const cur = ensureTimelines().find(t => t.id === p.activeTimeline);
+  cur.data = {};
+  for (const k of TIMELINE_KEYS) if (k in p) cur.data[k] = p[k];
+  return cur;
+}
+function openData(tl) {
+  const p = P();
+  for (const k of TIMELINE_KEYS) delete p[k];
+  Object.assign(p, tl.data || {});
+  delete tl.data;
+  p.activeTimeline = tl.id;
+  p.tracks ||= newProject().tracks; p.clips ||= []; p.transitions ||= []; p.markers ||= [];
+  p.master ||= { volume: 0, fx: defaultFx() };
+  if (p.magnetic === undefined) p.magnetic = true;
+  if (p.snapping === undefined) p.snapping = true;
+  if (p.inPoint === undefined) p.inPoint = null;
+  if (p.outPoint === undefined) p.outPoint = null;
+  state.selection.clear(); state.selTransition = null; state.range = null;
+}
+export function switchTimeline(id) {
+  const target = ensureTimelines().find(t => t.id === id);
+  if (!target || id === P().activeTimeline) return false;
+  stashActive();
+  openData(target);
+  return true;
+}
+// A new empty timeline (with the current one's track layout but no clips), or a copy of the current one.
+export function newTimeline(name, { duplicate = false } = {}) {
+  const list = ensureTimelines();
+  const cur = stashActive();
+  const data = duplicate ? JSON.parse(JSON.stringify(cur.data)) : {
+    tracks: cur.data.tracks.map(t => ({ ...JSON.parse(JSON.stringify(t)), id: uid(t.kind === "video" ? "v" : "a"), ...(t.kind === "audio" ? { keys: {} } : {}) })).filter(t => !t.captions),
+    clips: [], transitions: [], markers: [], compounds: [], master: JSON.parse(JSON.stringify(cur.data.master || { volume: 0, fx: defaultFx() })),
+    magnetic: cur.data.magnetic ?? true, snapping: cur.data.snapping ?? true, inPoint: null, outPoint: null };
+  if (duplicate) {
+    // fresh ids, so the copy's clips are its own (links, transitions and compounds re-pointed)
+    const map = new Map();
+    const fresh = (id, pre) => { if (!map.has(id)) map.set(id, uid(pre)); return map.get(id); };
+    for (const t of data.tracks) t.id = fresh(t.id, t.kind === "video" ? "v" : "a");
+    for (const x of data.compounds || []) x.id = fresh(x.id, "x");
+    for (const c of data.clips) {
+      c.id = fresh(c.id, "c"); c.trackId = map.get(c.trackId) || c.trackId;
+      if (c.linkId) c.linkId = fresh(c.linkId, "l");
+      if (c.compound) c.compound = map.get(c.compound) || c.compound;
+      if (c.parentId) c.parentId = fresh(c.parentId, "c");
+    }
+    for (const tr of data.transitions) { tr.id = uid("tr"); tr.a = map.get(tr.a) || tr.a; tr.b = map.get(tr.b) || tr.b; if (tr.trackId) tr.trackId = map.get(tr.trackId) || tr.trackId; }
+    for (const m of data.markers || []) m.id = uid("m");
+  }
+  const tl = { id: uid("t"), name: name || `Timeline ${list.length + 1}`, data };
+  list.push(tl);
+  openData(tl);
+  return tl;
+}
+export function renameTimeline(id, name) {
+  const t = ensureTimelines().find(x => x.id === id);
+  if (t && name) t.name = name;
+}
+export function deleteTimeline(id) {
+  const list = ensureTimelines();
+  if (list.length < 2) return false;
+  if (id === P().activeTimeline) switchTimeline(list.find(t => t.id !== id).id);
+  P().timelines = list.filter(t => t.id !== id);
+  return true;
+}
+// Media used by any timeline (the open one or the stored ones), for anything that cleans up unused media.
+export function allTimelineClips() {
+  return [...P().clips, ...(P().timelines || []).flatMap(t => t.data?.clips || [])];
+}
+
 // ---- clip state ----
 // Clip colour labels (the timeline tints a labelled clip's header with its colour).
 export const CLIP_COLOURS = [["red", "#e5484d"], ["orange", "#f76b15"], ["yellow", "#e2b100"], ["green", "#30a46c"],
