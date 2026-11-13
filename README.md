@@ -9,7 +9,11 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 **Timeline**
 - Any number of video and audio tracks. A video's audio is linked to it and moves with it (toggle **Link**, or Alt-drag an edge to trim one side only).
 - **Magnetic mode (M):** V1 is the main storyline. It closes gaps and pushes clips aside, and clips on the tracks above connect to the V1 clip under them and move with it. Turn it off for free placement, where dropped clips overwrite what's underneath.
-- **Select (V)**, **Blade (B)** (Shift-click cuts every track) and **Range (R)** tools, with Snap, Magnetic and Link, sit in the timeline's own toolbar beside the zoom. In a range, Del removes it and Shift+Del ripples the rest of the timeline up.
+- **Select (V)**, **Blade (B)** (Shift-click cuts every track), **Trim (T)** and **Range (R)** tools, with Snap, Magnetic and Link, sit in the timeline's own toolbar beside the zoom.
+- **Trim tool (T):** drag a cut between two touching clips to **roll** it (one gets longer as the other gets shorter, nothing else moves); drag a clip's edge to **ripple-trim** it (everything after it moves up or along, on every track); drag the middle of a clip to **slip** it (a different part of its footage in the same place and length), or Alt-drag to **slide** it between its neighbours. A label shows the new timing; Alt on an edge leaves the linked clip alone.
+- **Q / W** ripple-trim the clip under the playhead so it starts or ends there (the selected clips if they're under it). **Alt+← / →** nudges the selected clips a frame (Shift: 10 frames).
+- **Turn a clip off (Shift+E):** it stays on the timeline, dimmed and hatched, but doesn't play or export. **Clip colours** (right-click → Clip colour) tint a clip and its linked sound. **Replace with…** swaps a clip's footage for the media bin's selected item, keeping its place, length, grade, effects and keyframes. **Unlink (Ctrl+L)** detaches a video's sound for good.
+- **Timelines:** a project can hold several timelines (alternate cuts) sharing its media and settings. Switch with the menu at the left of the timeline toolbar; ⋯ makes a new empty one, duplicates the current one, renames or deletes. Switching is undoable. In a range, Del removes it and Shift+Del ripples the rest of the timeline up.
 - Snapping (S), marquee and Ctrl/Shift multi-select, copy and paste, in/out points, and full undo and redo.
 - **Compound clips:** right-click selected clips (on one video track, with their linked audio) → **Make compound clip**. They then act as one clip: they move and trim together, and the compound has its own opacity, transform, fades, colour grade and effects, applied on top of the clips' own. Nothing is re-encoded: double-click to open it and edit, trim, switch takes or regenerate the clips inside, then right-click → **Close compound clip**. **Break apart** puts the clips back as they were.
 - **Markers (Shift+M):** named, coloured markers on the ruler and in a Markers panel. Drag to move, double-click to rename; ↑/↓ and snapping include them.
@@ -55,6 +59,17 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - EQ and filter effects show their **curve over a live spectrum** of the clip (dim: before its effects, bright: after). Drag the points: graphic EQ bands up and down, the parametric EQ anywhere (scroll for its width), the shelves up and down, the cut, band and notch frequencies left and right. Double-click a band to flatten it.
 - They play in the viewer and render the same on export (the same filters, impulse responses, pitch shifter and compressor), before the clip's volume and fades. Modulation effects start their sweep at the clip's start on export; in the viewer the sweep runs freely, so its position can differ.
 
+**Blend modes and masks** (Inspector → Blend & mask)
+- **Blend modes:** Normal, Multiply, Screen, Overlay, Add, Darken, Lighten, Difference and Soft light mix a clip with the tracks below it (for light leaks, smoke, overlays).
+- **Masks:** a rectangle or ellipse on any video clip, with centre, width, height, feather and invert. It's set on the clip's own picture, so it moves and scales with the clip (and mirrors with a flip). Applied before the clip's effects.
+- **Picture in picture:** one-click corners (or the centre) at 25%, 33% or 50%, in the Inspector beside Fit.
+- **Stabilise** (right-click a video clip): makes a stabilised copy of the clip's file in the background (ffmpeg's two-pass vidstab, or deshake when vidstab isn't there), Light, Medium or Strong, zoomed to hide the moving edges or not, and puts it in the clip, keeping its timing, grade, effects and WanGP lineage. Undo puts the original back. Copies go in `video_editor/stabilised`.
+
+**Captions** (Captions panel, or Edit → Captions)
+- Each caption is a title on a **Captions** track at the top of the timeline, so it shows in the viewer, burns into the export and moves and trims like any clip. Type them in the panel; click a time to go to one.
+- **Draft from prompts:** makes captions from the dialogue in the WanGP prompts of the clips on the timeline (the `<d>…</d>` lines, at their `At mm:ss` times, window by window), long enough to read and not past the next line.
+- **Style…** sets the font, size, colour, background box, outline and height for every caption. **Import SRT** and **Export SRT**. Untick **Show captions** to leave them out of the viewer and the export (an SRT export still works).
+
 **Titles**
 - Drag the **Title** generator from the Effects panel (or press Shift+T). Set the text, font, size, bold and italic, colour, alignment, line height, outline, drop shadow and background box in the Inspector, and animate it with the transform keyframes.
 
@@ -96,6 +111,8 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - **Track volume automation:** press **A** on an audio track header to show a volume line across the whole track, then Ctrl+click to add points.
 - **Loudness meter** on the master (EBU R128 momentary, short-term and integrated LUFS).
 - Clip volume keyframes and fade handles.
+- **Normalise loudness** (right-click → Audio, or Edit menu): sets each selected clip's volume so its own sound reaches -14, -16 or -23 LUFS (peaks kept under -1 dBFS) or a peak of -1 or -3 dBFS. Volume keyframes keep their shape.
+- **Duck under dialogue** (right-click an audio clip → Audio): lowers the selected clips (music, say) while someone speaks on the other audio tracks, with volume keyframes you can adjust: duck amount, fade down before the speech, fade back up after it, and how readily it counts something as speech.
 
 **Regenerate shots**
 - Right-click a WanGP clip or shot: **Re-generate shot with new seed**, **with same seed**, or **Regenerate / extend shot**, also in the Inspector.
