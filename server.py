@@ -95,6 +95,50 @@ def create_app(get_config, host=None):
                           {"label": "Editor exports", "path": service.exports_dir}]}
 
     # ------------------------------------------------------------------ browsing / import
+    @app.post("/api/media/relink")
+    def media_relink(payload: dict = Body(...)):
+        """Point a missing media item at its file's new place: {id, path, kind?, duration?}."""
+        try:
+            item, warning = service.registry.relink(payload["id"], payload["path"], payload)
+        except FileNotFoundError:
+            raise HTTPException(404, "File not found")
+        except (ValueError, KeyError) as error:
+            raise HTTPException(400, str(error))
+        return {"media": service.registry.public(item), "warning": warning}
+
+    @app.post("/api/media/relink-folder")
+    def media_relink_folder(payload: dict = Body(...)):
+        """Look for missing files by name in a folder and the folders under it (3 levels): {folder, items: [{id, name,
+        kind, duration}]}. Relinks each one found (a same-name file that's a different kind is left alone)."""
+        folder = os.path.abspath(payload.get("folder") or "")
+        if not os.path.isdir(folder):
+            raise HTTPException(404, "Folder not found")
+        wanted = {}
+        for it in payload.get("items") or []:
+            if it.get("id") and it.get("name"):
+                wanted.setdefault(it["name"].lower(), []).append(it)
+        found, relinked, warnings = {}, [], []
+        base_depth = folder.rstrip(os.sep).count(os.sep)
+        for root, dirs, files in os.walk(folder):
+            if root.count(os.sep) - base_depth >= 3:
+                dirs[:] = []
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for f in files:
+                if f.lower() in wanted and f.lower() not in found:
+                    found[f.lower()] = os.path.join(root, f)
+            if len(found) == len(wanted):
+                break
+        for name, path in found.items():
+            for it in wanted[name]:
+                try:
+                    item, warning = service.registry.relink(it["id"], path, it)
+                    relinked.append(service.registry.public(item))
+                    if warning:
+                        warnings.append(warning)
+                except Exception as error:
+                    warnings.append(f"{it['name']}: {error}")
+        return {"media": relinked, "warnings": warnings, "notFound": [it["name"] for n, its in wanted.items() if n not in found for it in its]}
+
     @app.get("/api/browse")
     def browse(path: str = ""):
         path = os.path.abspath(path or service.save_path)

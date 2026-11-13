@@ -277,6 +277,47 @@ class MediaRegistry:
         self.pool.submit(self._process, media_id)
         return item
 
+    def relink(self, media_id, path, known=None):
+        """Point a media item (by its id, which the project's clips use) at a file in a new place, keeping the id so
+        every clip that uses it comes back. known: what the project remembers of it (kind, duration), to say when the
+        file looks different. Returns (item, warning or None)."""
+        path = os.path.abspath(path)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        info = probe(path)
+        known = known or {}
+        with self.lock:
+            old = dict(self.items.get(media_id) or {})
+        kind = old.get("kind") or known.get("kind")
+        if kind and info["kind"] != kind:
+            raise ValueError(f"That's a{'n' if info['kind'][0] in 'aeiou' else ''} {info['kind']} file; the missing one is a{'n' if kind[0] in 'aeiou' else ''} {kind}")
+        was = float(old.get("duration") or known.get("duration") or 0)
+        warning = None
+        if was and abs(float(info.get("duration") or 0) - was) > 0.5:
+            warning = f"{os.path.basename(path)} is {info.get('duration', 0):.1f}s long; the missing file was {was:.1f}s"
+        same = bool(old) and not warning and old.get("width") == info.get("width") and old.get("height") == info.get("height")
+        meta = read_wangp_metadata(path) if info["kind"] in ("video", "image") else None
+        item = {**old, "id": media_id, "name": os.path.basename(path), "path": path, **info, "has_metadata": bool(meta)}
+        item.pop("missing", None)
+        item.pop("error", None)
+        # the same footage keeps its proxies and thumbnails; anything else is made again
+        if not same:
+            item.update(proxy="pending" if info["kind"] in ("video", "audio") else "none", thumbs="pending" if info["kind"] == "video" else "none",
+                        wave="pending" if (info["has_audio"] or info["kind"] == "audio") else "none")
+            item.pop("proxy_rev", None)
+        with self.lock:
+            self.items[media_id] = item
+            self._save()
+        if meta:
+            try:
+                with open(os.path.join(self.item_dir(media_id), "metadata.json"), "w", encoding="utf-8") as handle:
+                    json.dump(meta, handle, indent=1, default=str)
+            except Exception:
+                pass
+        if not same:
+            self.pool.submit(self._process, media_id)
+        return item, warning
+
     def _set(self, media_id, **values):
         with self.lock:
             item = self.items.get(media_id)
@@ -360,11 +401,18 @@ class MediaRegistry:
             json.dump({"rate": PEAKS_PER_SECOND, "peaks": peaks}, handle, separators=(",", ":"))
 
     def refresh(self, media_id):
-        """Re-queue derived files that a restart interrupted."""
+        """Re-queue derived files that a restart interrupted, and notice a file that has gone (or come back) since."""
         with self.lock:
             item = self.items.get(media_id)
             if item is None:
                 return None
+            there = os.path.isfile(item.get("path", ""))
+            if there == bool(item.get("missing")):
+                if there:
+                    item.pop("missing", None)
+                else:
+                    item["missing"] = True
+                self._save()
             requeue = False
             for key in ("proxy", "thumbs", "wave"):
                 if item.get(key) == "stale":

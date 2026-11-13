@@ -502,3 +502,8 @@ body.picking #viewerStage, body.picking #previewCanvas { cursor: crosshair !impo
 .selfcheck .sc-ok .sc-icon { color: #7fd6a8; }
 .selfcheck .sc-warn .sc-icon, .selfcheck .sc-warn { color: #ffcc66; }
 .selfcheck .sc-error .sc-icon, .selfcheck .sc-error { color: #ff7a7a; }
+/* missing media */
+.missing-bar { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin: 4px 6px 0; padding: 5px 8px; border-radius: 6px;
+  background: color-mix(in srgb, #ff7a7a 14%, transparent); border: 1px solid color-mix(in srgb, #ff7a7a 45%, transparent); color: #ffb3b3; font-size: 12px; }
+.missing-bar[hidden] { display: none; }
+.media-item .busy button { pointer-events: auto; }
