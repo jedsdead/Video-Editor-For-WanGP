@@ -6,6 +6,7 @@ import { Renderer } from "./renderer.js";
 import { Playback } from "./playback.js";
 import { Timeline } from "./timeline.js";
 import { Docks, PLACE_NAMES } from "./docks.js";
+import { openNormalise, openDuck, audioClipsOf } from "./audiotools.js";
 import { MediaBin } from "./mediabin.js";
 import { Inspector } from "./inspector.js";
 import { ColourPanel } from "./colour.js";
@@ -403,6 +404,9 @@ function menuItems(name) {
     { label: "Reverse selected clips", kbd: "Shift+R", action: toggleReverse },
     { label: "Add title at playhead", kbd: "Shift+T", action: () => app.effects.addGenerator(M.TITLE_MEDIA.id) },
     { label: "Detect shots in selected clip…", kbd: "Shift+D", action: detectShots },
+    { label: "Normalise loudness of selected clips…", action: () => openNormalise(app) },
+    { label: "Duck selected clips under dialogue…", action: () => openDuck(app) },
+    { label: "Turn selected clips off / on", kbd: "Shift+E", action: toggleEnabled },
     "-",
     { label: "Mark in", kbd: "I", action: setIn },
     { label: "Mark out", kbd: "O", action: setOut },
@@ -555,6 +559,9 @@ function contextMenu(x, y, hit) {
           action: () => M.edit("Clip colour", () => M.setClipLabel(new Set([...state.selection, clip.id]), name)) })),
         "-", { label: "None", disabled: !clip.label, action: () => M.edit("Clip colour", () => M.setClipLabel(new Set([...state.selection, clip.id]), null)) }] },
       replaceItem(clip, hit.row),
+      audioClipsOf([...state.selection, clip.id]).length ? { label: "Audio", submenu: [
+        { label: "Normalise loudness…", action: () => { if (!state.selection.has(clip.id)) M.select([clip.id]); openNormalise(app); } },
+        hit.row.kind === "audio" ? { label: "Duck under dialogue…", title: "Lower this clip while someone speaks on the other audio tracks", action: () => { if (!state.selection.has(clip.id)) M.select([clip.id]); openDuck(app); } } : null] } : null,
       "-",
       { label: "Reset speed to 100%", disabled: M.isStill(clip), action: () => M.edit("Reset speed", () => M.setSpeed([...state.selection], 1)) },
       { label: clip.reverse ? "Play forwards" : "Reverse", kbd: "Shift+R", disabled: M.isStill(clip), action: toggleReverse },

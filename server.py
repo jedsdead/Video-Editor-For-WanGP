@@ -253,6 +253,58 @@ def create_app(get_config, host=None):
                 raise HTTPException(500, str(error))
         return FileResponse(out, headers={"Cache-Control": "max-age=86400"})
 
+    @app.get("/api/media/{media_id}/loudness")
+    def media_loudness(media_id: str, a: float = 0.0, b: float = 0.0):
+        """Integrated loudness (LUFS) and true peak (dBTP) of a stretch of a file's sound (normalise a clip)."""
+        import re
+        item = _item(media_id)
+        if not os.path.isfile(item["path"]) or not (item.get("has_audio") or item["kind"] == "audio"):
+            raise HTTPException(404, "No sound")
+        args = [M.ffmpeg_path(), "-hide_banner", "-nostats", "-ss", f"{max(0.0, a):.4f}"]
+        if b > a:
+            args += ["-t", f"{b - a:.4f}"]
+        result = M.run(args + ["-i", item["path"], "-vn", "-af", "ebur128=peak=true", "-f", "null", "-"], timeout=900)
+        text = result.stderr or ""
+        summary = text[text.rfind("Summary:"):] if "Summary:" in text else text
+        num = lambda m: float(m.group(1)) if m and m.group(1) not in ("-inf", "inf", "nan") else None
+        return {"lufs": num(re.search(r"I:\s*(-?[\d.]+|-inf)\s*LUFS", summary)),
+                "peak": num(re.search(r"Peak:\s*(-?[\d.]+|-inf)\s*dBFS", summary))}
+
+    @app.get("/api/media/{media_id}/speech")
+    def media_speech(media_id: str, a: float = 0.0, b: float = 0.0, sensitivity: float = 0.5):
+        """Where someone is speaking in a stretch of a file: [[t0, t1], ...] in source seconds (auto-ducking).
+        Speech-band (250 Hz to 3.5 kHz) loudness against a threshold set between the stretch's quiet floor and its
+        loud level; sensitivity 0..1 lowers the threshold (more counts as speech). Short blips are dropped, short
+        pauses inside a line bridged."""
+        import numpy as np
+        item = _item(media_id)
+        if not os.path.isfile(item["path"]) or not (item.get("has_audio") or item["kind"] == "audio"):
+            raise HTTPException(404, "No sound")
+        end = b if b > a else float(item.get("duration") or 0)
+        times, db = RG.speech_envelope(item["path"], a, end, hop=0.02)
+        if times is None:
+            return {"segments": []}
+        loud, floor = float(np.percentile(db, 95)), float(np.percentile(db, 10))
+        if loud < -55 or loud - floor < 8:
+            return {"segments": [], "loud": loud, "floor": floor}
+        k = 0.75 - 0.5 * min(1.0, max(0.0, sensitivity))
+        level = floor + (loud - floor) * k
+        on = db > level
+        segs, start = [], None
+        for i, v in enumerate(on):
+            if v and start is None:
+                start = float(times[i]) - 0.01
+            if (not v or i == len(on) - 1) and start is not None:
+                segs.append([start, float(times[i]) + 0.01])
+                start = None
+        merged = []
+        for s0, s1 in segs:                      # bridge pauses under 0.3 s
+            if merged and s0 - merged[-1][1] < 0.3:
+                merged[-1][1] = s1
+            else:
+                merged.append([s0, s1])
+        return {"segments": [[round(x, 3), round(y, 3)] for x, y in merged if y - x >= 0.15], "loud": loud, "floor": floor}
+
     # ------------------------------------------------------------------ regeneration
     @app.get("/api/regen/status")
     def regen_status():
