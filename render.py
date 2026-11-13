@@ -949,6 +949,7 @@ class ExportJob:
                 img = comp.resize(img, img.shape[2] * scale * sx / base, img.shape[1] * scale * sy / base)
             alpha = min(1.0, max(0.0, T.prop(clip, "opacity", kt, 1.0)))
             alpha *= T.fade_factor(clip, kt, duration)
+            img = flipped(img, clip)
             crop = tuple(T.prop(clip, name, kt, 0.0) for name in ("cropL", "cropR", "cropT", "cropB"))
             placed = comp.place(img, T.prop(clip, "x", kt, 0.0) * tl.width / max(1, self._project_w(tl)),
                                 T.prop(clip, "y", kt, 0.0) * tl.height / max(1, self._project_h(tl)), alpha,
@@ -956,6 +957,11 @@ class ExportJob:
             return compound_post(clip, placed, t)
 
         compounds = {x["id"]: x for x in (self.project.get("compounds") or []) if x.get("id")}
+
+        def flipped(img, clip):
+            """Flip horizontal / vertical (as the viewer: after the effects, before the crop and rotation)."""
+            dims = ([2] if clip.get("flipH") else []) + ([1] if clip.get("flipV") else [])
+            return torch.flip(img, dims) if dims else img
 
         def compound_post(clip, layer, t):
             """A compound clip's own grade, effects, transform, opacity and fades on top of its clip's (as the viewer's
@@ -972,7 +978,8 @@ class ExportJob:
             scale = max(0.0, T.prop(x, "scale", kt, 1.0))
             sx, sy = max(0.0, T.prop(x, "scaleX", kt, 1.0)), max(0.0, T.prop(x, "scaleY", kt, 1.0))
             move = (abs(scale - 1) > 1e-4 or abs(sx - 1) > 1e-4 or abs(sy - 1) > 1e-4
-                    or any(abs(T.prop(x, n, kt, 0.0)) > 1e-6 for n in ("x", "y", "rotation", "cropL", "cropR", "cropT", "cropB")))
+                    or any(abs(T.prop(x, n, kt, 0.0)) > 1e-6 for n in ("x", "y", "rotation", "cropL", "cropR", "cropT", "cropB"))
+                    or x.get("flipH") or x.get("flipV"))
             has_lut = bool(grade.get("lut")) and grade.get("enabled") is not False
             if params is None and not has_lut and not T.match_params(grade) and not FX.active(x) and alpha >= 1 and not move:
                 return layer
@@ -988,6 +995,7 @@ class ExportJob:
                 if scale * sx <= 1e-4 or scale * sy <= 1e-4:
                     return None
                 img = comp.resize(img, img.shape[2] * scale * sx, img.shape[1] * scale * sy)
+            img = flipped(img, x)
             crop = tuple(T.prop(x, name, kt, 0.0) for name in ("cropL", "cropR", "cropT", "cropB"))
             return comp.place(img, T.prop(x, "x", kt, 0.0) * tl.width / max(1, self._project_w(tl)),
                               T.prop(x, "y", kt, 0.0) * tl.height / max(1, self._project_h(tl)), alpha,

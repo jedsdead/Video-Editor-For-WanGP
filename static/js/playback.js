@@ -457,6 +457,7 @@ export class Playback {
 
   // ---------------------------------------------------------------- per frame
   // Geometry shared with render.py Compositor.place: crop fractions, rotation (clockwise degrees), centre offset.
+  // A flip mirrors the picture (after its effects) before the crop and rotation, so crops stay on the sides as seen.
   geometry(clip, kt, srcW, srcH) {
     const p = P();
     const canvas = this.renderer.canvas;
@@ -470,8 +471,11 @@ export class Playback {
     const ox = (cl - cr) / 2 * w, oy = (ct - cb) / 2 * h;
     const cx = canvas.width / 2 + prop(clip, "x", kt) * k + ox * Math.cos(rot) - oy * Math.sin(rot);
     const cy = canvas.height / 2 + prop(clip, "y", kt) * k + ox * Math.sin(rot) + oy * Math.cos(rot);
+    const crop = [cl, ct, 1 - cr, 1 - cb];
+    // flipped: sample the source the other way round (a crop on the left as seen is then the source's right)
+    const uv = [clip.flipH ? 1 - cl : cl, clip.flipV ? 1 - ct : ct, clip.flipH ? cr : 1 - cr, clip.flipV ? cb : 1 - cb];
     return { center: [cx, cy], size: [Math.max(0, w * (1 - cl - cr)), Math.max(0, h * (1 - ct - cb))], rotation: rot,
-             uv: [cl, ct, 1 - cr, 1 - cb], full: [w, h], k };
+             uv, crop, full: [w, h], k };
   }
 
   // Effect passes for a clip at clip time kt, as a function of the buffer size (null when it has none).
@@ -530,7 +534,7 @@ export class Playback {
     const kt = clamp(t - clip.start, 0, d);
     const geo = this.geometry(clip, kt, sw, sh);
     const alpha = clamp(prop(clip, "opacity", kt), 0, 1) * fadeFactor(clip, kt, d);
-    return { type: "clip", clip, source: entry.el, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, full: geo.full, alpha,
+    return { type: "clip", clip, source: entry.el, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, crop: geo.crop, full: geo.full, alpha,
              level: levelAt(clip, t - clip.start),
              ...this.gradeFor(clip, kt), effects: this.effectsFor(clip, kt, t), post: this.compoundPost(clip, t) };
   }
@@ -542,7 +546,7 @@ export class Playback {
     const p = P();
     const kt = clamp(t - x.start, 0, clipDur(x));
     const geo = this.geometry(x, kt, p.settings.width, p.settings.height);
-    return { type: "clip", clip: x, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, full: geo.full,
+    return { type: "clip", clip: x, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, crop: geo.crop, full: geo.full,
              alpha: clamp(prop(x, "opacity", kt), 0, 1) };
   }
 

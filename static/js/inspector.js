@@ -166,6 +166,7 @@ export class Inspector {
         this.fitRow(video),
         this.keySlider("Position X", video, "x", { toUi: (v) => Math.round(v), fromUi: (v) => v, min: -pw, max: pw, step: 1 }),
         this.keySlider("Position Y", video, "y", { toUi: (v) => Math.round(v), fromUi: (v) => v, min: -ph, max: ph, step: 1 }),
+        this.flipRow(video),
         this.keySlider("Rotation", video, "rotation", { toUi: (v) => Math.round(v * 10) / 10, fromUi: (v) => v, min: -360, max: 360, step: 0.5, format: (v) => v.toFixed(1) }),
         this.keySlider("Crop left", video, "cropL", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 99, step: 0.5 }),
         this.keySlider("Crop right", video, "cropR", { toUi: (v) => Math.round(v * 1000) / 10, fromUi: (v) => v / 100, min: 0, max: 99, step: 0.5 }),
@@ -177,6 +178,7 @@ export class Inspector {
         this.curveSelect("Fade out shape", video, "fadeOutCurve"),
         el("div.btnrow", {}, el("button.small", { onclick: () => M.edit("Reset transform", each(video, c => {
             Object.assign(c, { opacity: 1, scale: 1, scaleX: 1, scaleY: 1, x: 0, y: 0, rotation: 0, cropL: 0, cropR: 0, cropT: 0, cropB: 0 });
+            delete c.flipH; delete c.flipV;
             for (const n of ["opacity", "scale", "scaleX", "scaleY", "x", "y", "rotation", "cropL", "cropR", "cropT", "cropB"]) if (c.keys) delete c.keys[n];
           })) }, "Reset transform"),
           el("button.small", { title: "Show crop handles on the viewer (C)", onclick: () => this.app.overlay.setCropMode(!this.app.overlay.cropMode) }, "Crop on viewer"),
@@ -215,6 +217,26 @@ export class Inspector {
 
   // Fit and fill: set the scales so the picture fits or fills the frame, as a whole or one axis at a time, and
   // desqueeze anamorphic footage. At the playhead when the scales are keyframed.
+  // Flip horizontal / vertical: mirror the picture (not keyframed). Several clips: flips them all one way.
+  flipRow(clips) {
+    const row = el("div.btnrow.fliprow");
+    const btn = (key, label, title, icon) => {
+      const on = () => clips.every(c => (M.getClip(c.id) || c)[key]);
+      const b = el("button.small", { title, onclick: () => {
+        const v = !on();
+        M.edit(label, () => { for (const c of clips) { const x = M.getClip(c.id); if (x) { if (v) x[key] = true; else delete x[key]; } } });
+      } }, icon, ` ${label}`);
+      const update = () => b.classList.toggle("active", on());
+      this.refreshers.push(update);
+      update();
+      return b;
+    };
+    row.append(el("span.dim", { style: { fontSize: "11px", minWidth: "64px" } }, "Flip"),
+      btn("flipH", "Flip horizontal", "Mirror the picture left to right", "⇋"),
+      btn("flipV", "Flip vertical", "Mirror the picture top to bottom", "⇵"));
+    return row;
+  }
+
   fitRow(list) {
     const apply = (label, fn) => M.edit(label, () => {
       const p = P();

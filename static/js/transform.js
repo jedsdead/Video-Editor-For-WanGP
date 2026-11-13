@@ -45,7 +45,7 @@ export class TransformOverlay {
   toCss(layer) {
     const preview = this.app.renderer.canvas;
     const s = preview.clientWidth / preview.width;
-    const [cl, ct, r1, b1] = layer.uv;
+    const [cl, ct, r1, b1] = layer.crop || layer.uv;   // the crop as seen (uv is turned round when flipped)
     const cw = layer.size[0] / Math.max(1e-6, r1 - cl), ch = layer.size[1] / Math.max(1e-6, b1 - ct);   // uncropped size
     const rot = layer.rotation;
     const ox = (cl - (1 - r1)) / 2 * cw, oy = (ct - (1 - b1)) / 2 * ch;
