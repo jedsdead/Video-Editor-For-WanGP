@@ -184,6 +184,7 @@ export class Inspector {
           el("button.small", { title: "Show crop handles on the viewer (C)", onclick: () => this.app.overlay.setCropMode(!this.app.overlay.cropMode) }, "Crop on viewer"),
           el("button.small", { onclick: () => this.app.docks.show("colour") }, "Colour…")),
         this.keyHelp());
+      this.section("Blend & mask", ...this.blendMaskRows(video));
     }
 
     if (adjust.length) this.renderAdjust(adjust);
@@ -217,6 +218,40 @@ export class Inspector {
 
   // Fit and fill: set the scales so the picture fits or fills the frame, as a whole or one axis at a time, and
   // desqueeze anamorphic footage. At the playhead when the scales are keyframed.
+  // Blend mode and a rectangle / ellipse mask (with feather and invert), for the selected video clips.
+  blendMaskRows(clips) {
+    const first = () => M.getClip(clips[0].id) || clips[0];
+    const each = (label, fn) => M.edit(label, () => { for (const c of clips) { const x = M.getClip(c.id); if (x) fn(x); } });
+    const BLENDS = [["normal", "Normal"], ["multiply", "Multiply"], ["screen", "Screen"], ["overlay", "Overlay"], ["add", "Add"], ["darken", "Darken"],
+      ["lighten", "Lighten"], ["difference", "Difference"], ["softlight", "Soft light"]];
+    const blend = el("select", { onchange: () => each("Blend mode", c => { if (blend.value === "normal") delete c.blend; else c.blend = blend.value; }) },
+      ...BLENDS.map(([v, l]) => el("option", { value: v }, l)));
+    const shape = el("select", { onchange: () => each("Mask", c => {
+      if (shape.value === "none") { delete c.mask; return; }
+      c.mask = { cx: 0.5, cy: 0.5, w: 0.6, h: 0.6, feather: 0.05, invert: false, ...(c.mask || {}), shape: shape.value, on: true };
+    }) }, el("option", { value: "none" }, "None"), el("option", { value: "ellipse" }, "Ellipse"), el("option", { value: "rect" }, "Rectangle"));
+    const invert = el("input", { type: "checkbox", onchange: () => each("Invert mask", c => { if (c.mask) c.mask.invert = invert.checked; }) });
+    const rows = el("div");
+    const pct = (label, key, min, max, fallback) => this.slider(label, {
+      get: () => Math.round(((first().mask || {})[key] ?? fallback) * 1000) / 10,
+      set: (v) => { for (const c of clips) { const x = M.getClip(c.id); if (x?.mask) x.mask[key] = v / 100; } },
+      min, max, step: 0.5, format: (v) => v.toFixed(1), editLabel: `Mask ${label.toLowerCase()}` });
+    rows.append(pct("Centre X", "cx", -50, 150, 0.5), pct("Centre Y", "cy", -50, 150, 0.5), pct("Width", "w", 1, 300, 0.6), pct("Height", "h", 1, 300, 0.6),
+      pct("Feather", "feather", 0, 50, 0.05),
+      el("div.field.wide", {}, el("label", {}, "Invert"), el("label", { style: { display: "flex", gap: "6px", alignItems: "center", color: "inherit" } }, invert, "Show outside the shape instead")));
+    const update = () => {
+      const c = first();
+      blend.value = c.blend || "normal";
+      shape.value = c.mask ? (c.mask.shape || "ellipse") : "none";
+      invert.checked = !!c.mask?.invert;
+      rows.hidden = !c.mask;
+    };
+    update();
+    this.refreshers.push(update);
+    return [el("div.field.wide", {}, el("label", {}, "Blend mode"), blend), el("div.field.wide", {}, el("label", {}, "Mask"), shape), rows,
+      el("div.dim", { style: { fontSize: "11px", marginTop: "4px" } }, "Mask sizes and positions are fractions of the clip's own picture (it moves and scales with the clip). Blend modes mix the clip with the tracks below it.")];
+  }
+
   // Flip horizontal / vertical: mirror the picture (not keyframed). Several clips: flips them all one way.
   flipRow(clips) {
     const row = el("div.btnrow.fliprow");
@@ -263,7 +298,17 @@ export class Inspector {
       if (f) apply("Desqueeze", ({ set }) => { set("scaleX", f); set("scaleY", 1); });
     } }, el("option", { value: "" }, "Anamorphic…"), [["1", "None (1×)"], ["1.25", "1.25×"], ["1.33", "1.33×"], ["1.5", "1.5×"], ["1.65", "1.65×"], ["1.8", "1.8×"], ["2", "2×"]]
       .map(([v, l]) => el("option", { value: v }, l)));
-    return el("div.field.wide", {}, el("label", {}, "Fit"), el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
+    // picture in picture: a corner (or the centre) at a chosen size, with a margin
+    const pipSize = el("select", { title: "Size of the picture in picture" }, ...[["0.25", "25%"], ["0.33", "33%"], ["0.5", "50%"]].map(([v, l]) => el("option", { value: v, selected: v === "0.33" }, l)));
+    const pip = (label, sx, sy) => btn(label, `Picture in picture: ${{ "↖": "top left", "↗": "top right", "↙": "bottom left", "↘": "bottom right", "⊙": "centre" }[label]}`, ({ w0, h0, pw, ph, v, set }) => {
+      const k = parseFloat(pipSize.value);
+      set("scale", k);
+      const w = w0 * k * v("scaleX"), h = h0 * k * v("scaleY"), margin = 0.035 * Math.min(pw, ph);
+      set("x", sx * (pw / 2 - w / 2 - margin)); set("y", sy * (ph / 2 - h / 2 - margin));
+    });
+    const pipRow = el("div.field.wide", {}, el("label", {}, "Picture in picture"), el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px", alignItems: "center" } },
+      pipSize, pip("↖", -1, -1), pip("↗", 1, -1), pip("↙", -1, 1), pip("↘", 1, 1), pip("⊙", 0, 0)));
+    return el("div", {}, el("div.field.wide", {}, el("label", {}, "Fit"), el("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" } },
       btn("Fit", "Fit the whole picture inside the frame (keeps its shape, including any stretch)", ({ w0, h0, pw, ph, v, set }) => { set("scale", Math.min(pw / (w0 * v("scaleX")), ph / (h0 * v("scaleY")))); centre(set); }),
       btn("Fill", "Fill the frame, cropping what spills over (keeps its shape)", ({ w0, h0, pw, ph, v, set }) => { set("scale", Math.max(pw / (w0 * v("scaleX")), ph / (h0 * v("scaleY")))); centre(set); }),
       btn("Stretch", "Stretch each axis to the frame exactly", ({ w0, h0, pw, ph, v, set }) => { set("scaleX", pw / (w0 * v("scale"))); set("scaleY", ph / (h0 * v("scale"))); centre(set); }),
@@ -272,7 +317,7 @@ export class Inspector {
       btn("Full size", "The clip at its own pixel size: one source pixel per project pixel, centred (e.g. 2048 × 2048 shown at 2048 × 2048 in a 1920 × 800 frame)",
         ({ w0, sw, set }) => { set("scale", sw / Math.max(1e-6, w0)); set("scaleX", 1); set("scaleY", 1); centre(set); }),
       btn("1:1", "Reset Scale X and Y to 100% (keeps Scale)", ({ set }) => { set("scaleX", 1); set("scaleY", 1); }),
-      anamorphic));
+      anamorphic)), pipRow);
   }
 
   // ---------------------------------------------------------------- keyframed fields

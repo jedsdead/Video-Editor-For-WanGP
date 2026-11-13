@@ -939,6 +939,11 @@ class ExportJob:
                 rgb = (rgb * torch.tensor(level, dtype=rgb.dtype, device=rgb.device).view(3, 1, 1)).clamp(0, 1)
             rgb = apply_lut(comp.grade(rgb, params), grade)
             img = self._cat(rgb, img[3:4]) if img.shape[0] == 4 else rgb
+            mask = clip.get("mask")
+            if mask and mask.get("on") is not False:
+                # the clip's mask, in its source picture's coordinates (as the viewer: before the effects)
+                alpha = img[3:4] if img.shape[0] == 4 else torch.ones_like(img[:1])
+                img = self._cat(img[:3], alpha * clip_mask(img.shape[1], img.shape[2], mask, clip, img.device))
             if FX.active(clip):
                 # effects run on premultiplied RGBA in the clip's own image space, then back to straight alpha
                 alpha = img[3:4] if img.shape[0] == 4 else torch.ones_like(img[:1])
@@ -962,6 +967,60 @@ class ExportJob:
             return compound_post(clip, placed, t)
 
         compounds = {x["id"]: x for x in (self.project.get("compounds") or []) if x.get("id")}
+
+        def clip_mask(h, w, m, clip, device):
+            """A rectangle or ellipse mask (1, h, w) with a linear feather, set as seen (so mirrored with the clip's
+            flips); the same maths as the viewer's layer shader."""
+            v = (torch.arange(h, device=device, dtype=torch.float32) + 0.5) / h
+            u = (torch.arange(w, device=device, dtype=torch.float32) + 0.5) / w
+            cx, cy = float(m.get("cx", 0.5)), float(m.get("cy", 0.5))
+            if clip.get("flipH"):
+                cx = 1 - cx
+            if clip.get("flipV"):
+                cy = 1 - cy
+            hw, hh = max(1e-4, float(m.get("w", 0.6)) / 2), max(1e-4, float(m.get("h", 0.6)) / 2)
+            f = max(0.0, float(m.get("feather", 0.0) or 0.0))
+            px = (u - cx).abs().view(1, w).expand(h, w)
+            py = (v - cy).abs().view(h, 1).expand(h, w)
+            if m.get("shape") == "rect":
+                if f > 1e-5:
+                    out = ((hw - px) / f + 0.5).clamp(0, 1) * ((hh - py) / f + 0.5).clamp(0, 1)
+                else:
+                    out = ((px <= hw) & (py <= hh)).float()
+            else:
+                r = torch.sqrt((px / hw) ** 2 + (py / hh) ** 2)
+                fr = f / min(hw, hh)
+                out = ((1 - r) / fr + 0.5).clamp(0, 1) if fr > 1e-5 else (r <= 1).float()
+            if m.get("invert"):
+                out = 1 - out
+            return out.unsqueeze(0)
+
+        def blend_over(canvas, layer, mode):
+            """A placed (premultiplied) layer over the canvas with a blend mode (the viewer's BLEND_FS)."""
+            a = layer[3:4]
+            if not mode or mode == "normal":
+                return layer[:3] + canvas * (1 - a)
+            s = torch.where(a > 0, layer[:3] / a.clamp(min=1e-6), torch.zeros_like(layer[:3])).clamp(0, 1)
+            b = canvas.clamp(0, 1)
+            if mode == "multiply":
+                f = b * s
+            elif mode == "screen":
+                f = 1 - (1 - b) * (1 - s)
+            elif mode == "overlay":
+                f = torch.where(b < 0.5, 2 * b * s, 1 - 2 * (1 - b) * (1 - s))
+            elif mode == "add":
+                f = (b + s).clamp(max=1)
+            elif mode == "darken":
+                f = torch.minimum(b, s)
+            elif mode == "lighten":
+                f = torch.maximum(b, s)
+            elif mode == "difference":
+                f = (b - s).abs()
+            elif mode == "softlight":
+                f = (1 - 2 * s) * b * b + 2 * s * b
+            else:
+                f = s
+            return b + (f - b) * a
 
         def flipped(img, clip):
             """Flip horizontal / vertical (as the viewer: after the effects, before the crop and rotation)."""
@@ -1048,23 +1107,23 @@ class ExportJob:
                     else:
                         p = (t - active_tr["lo"]) / active_tr["duration"]
                         layer = comp.transition(active_tr, a, b, p)
-                    layers = [layer] if layer is not None else []
+                    layers = [(layer, "normal")] if layer is not None else []
                 else:
                     layers = []
                     for clip in track_clips[track["id"]]:
                         s = float(clip["start"])
                         if s <= tm < s + tl.durations[clip["id"]]:
                             if tl.kind(clip) == "adjust":
-                                for layer in layers:
-                                    canvas = layer[:3] + canvas * (1 - layer[3:4])
+                                for layer, mode in layers:
+                                    canvas = blend_over(canvas, layer, mode)
                                 layers = []
                                 canvas = adjust(clip, canvas, t)
                                 continue
                             layer = clip_layer(clip, t)
                             if layer is not None:
-                                layers.append(layer)
-                for layer in layers:
-                    canvas = layer[:3] + canvas * (1 - layer[3:4])
+                                layers.append((layer, clip.get("blend") or "normal"))
+                for layer, mode in layers:
+                    canvas = blend_over(canvas, layer, mode)
             frame = canvas.clamp(0, 1).mul(255).round().to(torch.uint8).permute(1, 2, 0).contiguous().cpu().numpy()
             try:
                 encoder.stdin.write(frame.tobytes())

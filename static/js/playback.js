@@ -18,6 +18,13 @@ import { buildChain, PITCH_WORKLET, WORKLET_EFFECTS } from "./audiofx.js";
 
 const LOOKAHEAD = 2.5;
 
+// A clip's mask in source picture coordinates (the mask is set as seen, so a flip mirrors where it sits).
+export function maskFor(clip) {
+  const m = clip.mask;
+  if (!m || m.on === false) return null;
+  return { ...m, cx: clip.flipH ? 1 - (m.cx ?? 0.5) : (m.cx ?? 0.5), cy: clip.flipV ? 1 - (m.cy ?? 0.5) : (m.cy ?? 0.5), w: m.w ?? 0.6, h: m.h ?? 0.6 };
+}
+
 export class Playback {
   constructor(renderer, stage) {
     this.renderer = renderer;
@@ -535,6 +542,7 @@ export class Playback {
     const geo = this.geometry(clip, kt, sw, sh);
     const alpha = clamp(prop(clip, "opacity", kt), 0, 1) * fadeFactor(clip, kt, d);
     return { type: "clip", clip, source: entry.el, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, crop: geo.crop, full: geo.full, alpha,
+             blend: clip.blend || "normal", mask: maskFor(clip),
              level: levelAt(clip, t - clip.start),
              ...this.gradeFor(clip, kt), effects: this.effectsFor(clip, kt, t), post: this.compoundPost(clip, t) };
   }

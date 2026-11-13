@@ -40,6 +40,10 @@ uniform float uZoneLo, uZoneHi;
 uniform sampler2D uCurves;          // CURVE_N x 9 rows (grade.js CURVE_ROWS), R channel
 uniform bool uCurvesRgb, uCurvesHsl, uMatchOn;
 uniform vec3 uMatchGain, uMatchOff;
+uniform bool uMaskOn, uMaskInvert;   // a clip mask in the source picture's coordinates (render.py clip_mask)
+uniform int uMaskShape;              // 0 rectangle, 1 ellipse
+uniform vec2 uMaskC, uMaskHalf;
+uniform float uMaskFeather;
 out vec4 o;
 float curve(int row, float x) { return texture(uCurves, vec2(clamp(x, 0.0, 1.0) * (255.0 / 256.0) + 0.5 / 256.0, (float(row) + 0.5) / 9.0)).r; }
 vec3 rgb2hsv(vec3 c) {
@@ -93,7 +97,20 @@ void main() {
     c = mix(c, texture(uLut, coord).rgb, uLutMix);
   }
   if (uMatchOn) c = clamp(c * uMatchGain + uMatchOff, 0.0, 1.0);   // shot match, after everything else
-  float a = uAlpha * t.a;
+  float m = 1.0;
+  if (uMaskOn) {
+    vec2 p = abs(vUv - uMaskC), hw = max(uMaskHalf, vec2(1e-4));
+    float f = uMaskFeather;
+    if (uMaskShape == 0) {
+      vec2 e = f > 1e-5 ? clamp((hw - p) / f + 0.5, 0.0, 1.0) : step(p, hw);
+      m = e.x * e.y;
+    } else {
+      float r = length(p / hw), fr = f / min(hw.x, hw.y);
+      m = fr > 1e-5 ? clamp((1.0 - r) / fr + 0.5, 0.0, 1.0) : step(r, 1.0);
+    }
+    if (uMaskInvert) m = 1.0 - m;
+  }
+  float a = uAlpha * t.a * m;
   o = vec4(c * a, a);
 }`;
 
@@ -113,6 +130,32 @@ uniform vec3 uBorderColor, uColor;
 out vec4 o;
 ${TRANSITION_GLSL}
 void main() { o = transition(vUv); }`;
+
+// Blend modes: the layer (premultiplied) over the composite so far with a blend function (render.py blend_over).
+const BLEND_FS = `#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uBack, uLayer;
+uniform int uMode;
+out vec4 o;
+vec3 blendf(vec3 b, vec3 s) {
+  if (uMode == 1) return b * s;                                         // multiply
+  if (uMode == 2) return 1.0 - (1.0 - b) * (1.0 - s);                   // screen
+  if (uMode == 3) return mix(2.0 * b * s, 1.0 - 2.0 * (1.0 - b) * (1.0 - s), step(0.5, b));   // overlay
+  if (uMode == 4) return min(vec3(1.0), b + s);                         // add
+  if (uMode == 5) return min(b, s);                                     // darken
+  if (uMode == 6) return max(b, s);                                     // lighten
+  if (uMode == 7) return abs(b - s);                                    // difference
+  if (uMode == 8) return (1.0 - 2.0 * s) * b * b + 2.0 * s * b;         // soft light
+  return s;
+}
+void main() {
+  vec3 b = texture(uBack, vUv).rgb;
+  vec4 l = texture(uLayer, vUv);
+  vec3 s = l.a > 0.0 ? clamp(l.rgb / l.a, 0.0, 1.0) : vec3(0.0);
+  o = vec4(mix(b, blendf(b, s), l.a), 1.0);
+}`;
+export const BLEND_MODES = ["normal", "multiply", "screen", "overlay", "add", "darken", "lighten", "difference", "softlight"];
 
 const COPY_FS = `#version 300 es
 precision highp float;
@@ -165,6 +208,7 @@ export class Renderer {
     this.trans = compile(gl, FULL_VS, TRANS_FS);
     this.effect = compile(gl, FULL_VS, EFFECT_FS);
     this.copy = compile(gl, FULL_VS, COPY_FS);
+    this.blend = compile(gl, FULL_VS, BLEND_FS);
     this.pool = new Map();   // offscreen buffers by name and size
     this.quad = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
@@ -304,6 +348,15 @@ export class Renderer {
     gl.uniform1f(u.uLutSize, (lut || this.emptyLut).size);
     gl.activeTexture(gl.TEXTURE0);
     gl.uniform1f(u.uAlpha, item.alpha);
+    const mk = !item.premul && item.mask;
+    if (u.uMaskOn) gl.uniform1i(u.uMaskOn, mk ? 1 : 0);
+    if (mk) {
+      gl.uniform1i(u.uMaskShape, mk.shape === "rect" ? 0 : 1);
+      gl.uniform2f(u.uMaskC, mk.cx, mk.cy);
+      gl.uniform2f(u.uMaskHalf, mk.w / 2, mk.h / 2);
+      gl.uniform1f(u.uMaskFeather, Math.max(0, mk.feather || 0));
+      gl.uniform1i(u.uMaskInvert, mk.invert ? 1 : 0);
+    }
     gl.uniform3f(u.uLevel, ...(item.level || [1, 1, 1]));
     // the colour picker can ask for the picture before the grade ("source") or before the curves, LUT and shot match
     let g = item.premul ? null : item.grade;
@@ -398,7 +451,7 @@ export class Renderer {
     if (!this.drawLayer({ ...item, center: [w / 2, h / 2], size: [w, h], rotation: 0, uv: item.srcUv || [0, 0, 1, 1], alpha: 1 }, [w, h])) return null;
     const out = this.runEffects(a, b, item.effects(w, h));
     const [l, t, r, bo] = item.uv || [0, 0, 1, 1];
-    return { ...item, tex: out.tex, premul: true, uv: [l, 1 - t, r, 1 - bo] };
+    return { ...item, tex: out.tex, premul: true, mask: null, uv: [l, 1 - t, r, 1 - bo] };
   }
 
   // Draw a layer (with its effects, if any) into a target. A layer in a compound clip with outer properties is drawn
@@ -454,6 +507,40 @@ export class Renderer {
     this.drawLayer({ tex: out.tex, premul: true, center: [w / 2, h / 2], size: [w, h], rotation: 0, uv: [0, 1, 1, 0], alpha: entry.alpha });
   }
 
+  // A clip with a blend mode: drawn into its own buffer, then combined with a copy of the composite so far.
+  drawBlended(entry) {
+    const gl = this.gl;
+    const w = this.canvas.width, h = this.canvas.height;
+    const L = this.target("blendL", w, h), B = this.target("blendB", w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, L.fb);
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    const ok = this.drawInto(entry, L);
+    gl.disable(gl.BLEND);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, B.fb);
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(this.copy.program);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.acc.tex);
+    gl.uniform1i(this.copy.u.uSrc, 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.acc.fb);
+    gl.viewport(0, 0, w, h);
+    const { program, u } = this.blend;
+    gl.useProgram(program);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, B.tex);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, L.tex);
+    gl.uniform1i(u.uBack, 0); gl.uniform1i(u.uLayer, 1);
+    gl.uniform1i(u.uMode, Math.max(0, BLEND_MODES.indexOf(entry.blend)));
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    return ok;
+  }
+
   // entries: [{type:'clip', ...layer}], [{type:'transition', kind, p, a, b}] or [{type:'adjust', ...}] in bottom-to-top order
   render(entries) {
     const gl = this.gl;
@@ -468,6 +555,7 @@ export class Renderer {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     let pending = false;
     for (const entry of entries) {
+      if (entry.type === "clip" && entry.blend && entry.blend !== "normal") { if (!this.drawBlended(entry)) pending = true; continue; }
       if (entry.type === "clip") { if (!this.drawInto(entry, this.acc)) pending = true; continue; }
       if (entry.type === "adjust") { this.applyAdjust(entry); continue; }
       const layers = [entry.a, entry.b];
