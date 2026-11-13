@@ -7,6 +7,7 @@ import { Playback } from "./playback.js";
 import { Timeline } from "./timeline.js";
 import { Docks, PLACE_NAMES } from "./docks.js";
 import { openNormalise, openDuck, audioClipsOf } from "./audiotools.js";
+import { CaptionsPanel } from "./captions.js";
 import { MediaBin } from "./mediabin.js";
 import { Inspector } from "./inspector.js";
 import { ColourPanel } from "./colour.js";
@@ -404,6 +405,7 @@ function menuItems(name) {
     { label: "Reverse selected clips", kbd: "Shift+R", action: toggleReverse },
     { label: "Add title at playhead", kbd: "Shift+T", action: () => app.effects.addGenerator(M.TITLE_MEDIA.id) },
     { label: "Detect shots in selected clip…", kbd: "Shift+D", action: detectShots },
+    { label: "Captions…", action: () => app.docks.show("captions") },
     { label: "Normalise loudness of selected clips…", action: () => openNormalise(app) },
     { label: "Duck selected clips under dialogue…", action: () => openDuck(app) },
     { label: "Turn selected clips off / on", kbd: "Shift+E", action: toggleEnabled },
@@ -749,6 +751,7 @@ async function main() {
     .observe(document.body, { childList: true, subtree: true });
   droppers(document.body);
   app.spectrum = new SpectrumPanel(app);
+  app.captions = new CaptionsPanel(app);
   app.docks = new Docks([
     { id: "media", title: "Media", node: app.bin.node, dock: "left" },
     { id: "transitions", title: "Transitions", node: app.transitions.node, dock: "left" },
@@ -758,6 +761,7 @@ async function main() {
     { id: "scopes", title: "Scopes", node: app.scopes.node, dock: "right", onShow: () => { app.scopes.visible = true; app.scopes.update(true); }, onHide: () => { app.scopes.visible = false; } },
     { id: "mixer", title: "Mixer", node: app.mixer.node, dock: "bottom", onShow: () => { app.mixer.visible = true; }, onHide: () => { app.mixer.visible = false; } },
     { id: "markers", title: "Markers", node: app.markers.node, dock: "left" },
+    { id: "captions", title: "Captions", node: app.captions.node, dock: "left", onShow: () => app.captions.render() },
     { id: "shots", title: "Shots", node: app.shots.node, dock: "hidden", onShow: () => app.shots.render() },
     { id: "spectrum", title: "Analyser", node: app.spectrum.node, dock: "hidden", onShow: () => { app.spectrum.visible = true; }, onHide: () => { app.spectrum.visible = false; } },
   ]);
