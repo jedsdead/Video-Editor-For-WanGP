@@ -8,6 +8,7 @@ import { Timeline } from "./timeline.js";
 import { Docks, PLACE_NAMES } from "./docks.js";
 import { openNormalise, openDuck, audioClipsOf } from "./audiotools.js";
 import { CaptionsPanel } from "./captions.js";
+import { exportInterchange, collectProject, openCollected } from "./handoff.js";
 import { MediaBin } from "./mediabin.js";
 import { Inspector } from "./inspector.js";
 import { ColourPanel } from "./colour.js";
@@ -425,6 +426,7 @@ function menuItems(name) {
   if (name === "file") return [
     { label: "New project…", action: newProject },
     { label: "Open project…", action: openProjectDialog },
+    { label: "Open collected project (.zip)…", action: async () => { await saveNow(); openCollected(loadProject); } },
     { label: "Save now", kbd: K("Ctrl+S"), action: saveNow },
     { label: "Save as…", action: saveAs },
     { label: "Rename project…", action: renameProject },
@@ -435,6 +437,10 @@ function menuItems(name) {
     { label: "Project settings", action: () => { M.clearSelection(); state.selectedMedia = null; app.docks.show("inspector"); bus.emit("selection"); } },
     { label: "Render final…", action: () => openRenderDialog(app) },
     { label: "Export…", kbd: K("Ctrl+E"), action: () => openExportDialog(app) },
+    "-",
+    { label: "Export timeline for Premiere / Resolve (XML)…", action: () => exportInterchange("xml") },
+    { label: "Export EDL (main track)…", action: () => exportInterchange("edl") },
+    { label: "Collect project (ZIP with all media)…", action: async () => { await saveNow(); collectProject(); } },
   ];
   if (name === "edit") return [
     { label: "Undo", kbd: K("Ctrl+Z"), action: M.undo, disabled: !M.canUndo() },

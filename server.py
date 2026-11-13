@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import uuid
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
@@ -553,6 +554,128 @@ def create_app(get_config, host=None):
         if os.path.isfile(path):
             os.remove(path)
         return {"ok": True}
+
+    # ------------------------------------------------------------------ hand-off and collect
+    from . import interchange as IX
+    collect_jobs = {}
+
+    def _unique_export(base, ext):
+        base = _safe_name(base or "timeline")
+        out = os.path.join(service.exports_dir, base + ext)
+        k = 1
+        while os.path.exists(out):
+            out = os.path.join(service.exports_dir, f"{base}_{k}{ext}")
+            k += 1
+        return out
+
+    @app.post("/api/interchange/{fmt}")
+    def interchange(fmt: str, payload: dict = Body(...)):
+        """The open timeline as FCP 7 XML (Premiere, Resolve) or a CMX 3600 EDL, saved with the exports."""
+        project = payload.get("project") or {}
+        if fmt not in ("xml", "edl"):
+            raise HTTPException(400, "Unknown format")
+        text, notes = IX.to_xmeml(project) if fmt == "xml" else IX.to_edl(project)
+        if not text:
+            raise HTTPException(400, "; ".join(notes) or "Nothing to export")
+        tl = next((t.get("name") for t in project.get("timelines") or [] if t.get("id") == project.get("activeTimeline")), None)
+        out = _unique_export(f"{project.get('name') or 'project'}{'_' + tl if tl else ''}", "." + fmt)
+        with open(out, "w", encoding="utf-8", newline="\r\n" if fmt == "edl" else None) as handle:
+            handle.write(text)
+        return {"name": os.path.basename(out), "path": out, "notes": notes}
+
+    def _collect(job_id, project, out):
+        job = collect_jobs[job_id]
+        try:
+            res = IX.collect(project, service.luts_dir, out, progress=lambda f, msg: job.update(progress=round(f, 4), message=msg),
+                             cancelled=lambda: job.get("cancel"))
+            job.update(status="done", progress=1.0, message="Done", name=os.path.basename(out), path=out, **res)
+        except Exception as error:
+            try:
+                if os.path.exists(out + ".part"):
+                    os.remove(out + ".part")
+            except OSError:
+                pass
+            job.update(status="cancelled" if job.get("cancel") else "error", error=str(error))
+
+    @app.post("/api/collect")
+    def collect_start(payload: dict = Body(...)):
+        """Zip the project with every file it uses (all its timelines) and its LUTs, in the background."""
+        project = payload.get("project") or {}
+        media = project.get("media") or {}
+        need = sum(os.path.getsize(media[m]["path"]) for m in IX.used_media_ids(project) if os.path.isfile(media[m]["path"]))
+        out = _unique_export(f"{project.get('name') or 'project'}_collected", ".zip")
+        try:
+            M.need_space(out, int(need * 1.05 + 100e6), "the collected project")
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+        job_id = uuid.uuid4().hex[:10]
+        collect_jobs[job_id] = {"id": job_id, "status": "running", "progress": 0.0, "message": "Starting", "bytes_total": need}
+        threading.Thread(target=_collect, args=(job_id, project, out), daemon=True).start()
+        return collect_jobs[job_id]
+
+    @app.get("/api/collect/{job_id}")
+    def collect_status(job_id: str):
+        if job_id not in collect_jobs:
+            raise HTTPException(404, "Unknown job")
+        return collect_jobs[job_id]
+
+    @app.post("/api/collect/{job_id}/cancel")
+    def collect_cancel(job_id: str):
+        if job_id in collect_jobs:
+            collect_jobs[job_id]["cancel"] = True
+        return {"ok": True}
+
+    @app.post("/api/collect/open")
+    async def collect_open(file: UploadFile = File(...)):
+        """Open a collected project ZIP: unpack it under collected/, relink its files where they landed, save it as a
+        project and return its name."""
+        stem = _safe_name(os.path.splitext(os.path.basename(file.filename or "project"))[0], "project")
+        tmp = os.path.join(service.temp_dir, f"open_{uuid.uuid4().hex[:8]}.zip")
+        with open(tmp, "wb") as handle:
+            while True:
+                chunk = await file.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+        try:
+            dest = os.path.join(service.data_root, "collected", stem)
+            k = 1
+            while os.path.exists(dest):
+                k += 1
+                dest = os.path.join(service.data_root, "collected", f"{stem}_{k}")
+            os.makedirs(dest, exist_ok=True)
+            M.need_space(dest, int(os.path.getsize(tmp) * 1.05 + 100e6), "unpacking the project")
+            project = IX.open_collected(tmp, dest, service.luts_dir)
+        except (ValueError, zipfile.BadZipFile) as error:
+            raise HTTPException(400, str(error))
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        notes = []
+        for mid, item in (project.get("media") or {}).items():
+            if item.get("generator") or not item.get("path"):
+                continue
+            if not os.path.isfile(item["path"]):
+                notes.append(f"{item.get('name')} wasn't in the ZIP")
+                continue
+            try:
+                fresh, warning = service.registry.relink(mid, item["path"], item)
+                project["media"][mid] = {**item, **service.registry.public(fresh)}
+                if warning:
+                    notes.append(warning)
+            except Exception as error:
+                notes.append(f"{item.get('name')}: {error}")
+        name = _safe_name(project.get("name") or stem)
+        base, k = name, 1
+        while os.path.exists(_project_path(name)):
+            k += 1
+            name = f"{base} ({k})"
+        project["name"] = name
+        with open(_project_path(name), "w", encoding="utf-8") as handle:
+            json.dump(project, handle)
+        return {"name": name, "folder": dest, "notes": notes}
 
     # ------------------------------------------------------------------ projects
     def _project_path(name):
