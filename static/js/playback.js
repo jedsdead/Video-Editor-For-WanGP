@@ -589,6 +589,7 @@ export class Playback {
         continue;
       }
       for (const clip of clipsOn(track.id)) {
+        if (clip.disabled) continue;
         if (clip.start <= tm && tm < clip.start + clipDur(clip)) {
           needed.add(clip.id);
           if (mediaOf(clip)?.kind === "adjust") { const adj = this.adjustFor(clip, t); if (adj) entries.push(adj); continue; }
@@ -625,6 +626,7 @@ export class Playback {
   syncAudio(t, needed) {
     for (const track of audioTracks()) {
       for (const clip of clipsOn(track.id)) {
+        if (clip.disabled) continue;
         const item = mediaOf(clip);
         if (!item || !(item.has_audio || item.kind === "audio")) continue;
         const [w0, w1] = clipWindow(clip);
@@ -656,6 +658,7 @@ export class Playback {
     this.scrubbing = true;
     for (const track of audioTracks()) {
       for (const clip of clipsOn(track.id)) {
+        if (clip.disabled) continue;
         const item = mediaOf(clip);
         if (!item || !(item.has_audio || item.kind === "audio")) continue;
         if (t < clip.start || t >= clip.start + clipDur(clip)) continue;
@@ -696,6 +699,7 @@ export class Playback {
     for (const track of videoTracks()) {
       if (track.hidden) continue;
       for (const clip of clipsOn(track.id)) {
+        if (clip.disabled) continue;
         const [w0] = clipWindow(clip);
         if (w0 > t && w0 - t < LOOKAHEAD && !needed.has(clip.id)) {
           const item = mediaOf(clip);

@@ -161,6 +161,22 @@ function setTool(tool) {
   updateInfo();
 }
 
+// Shift+E: turn the selected clips off (kept, but not played or exported) or back on
+function toggleEnabled() {
+  const ids = [...state.selection].filter(id => M.getClip(id));
+  if (!ids.length) { toast("Select clips to turn them off or on"); return; }
+  const on = ids.every(id => M.getClip(id).disabled);
+  M.edit(on ? "Turn clips on" : "Turn clips off", () => M.setClipsEnabled(new Set(ids), on));
+}
+// Replace a clip's footage with the media bin's selected item
+function replaceItem(clip, row) {
+  if (M.isGenerator(clip)) return null;
+  const item = state.selectedMedia && P().media[state.selectedMedia];
+  const fits = item && item.id !== clip.mediaId && (row.kind === "video" ? (item.kind === "video" || item.kind === "image") : (item.has_audio || item.kind === "audio"));
+  return { label: item ? `Replace with “${item.name}”` : "Replace with… (select media in the bin first)", disabled: !fits,
+    title: "Swap the footage, keeping the clip's place, length, grade, effects and keyframes",
+    action: () => M.edit("Replace clip", () => M.replaceClipMedia(clip.id, item.id)) };
+}
 // Alt+← / →: move the selected clips a frame (Shift: 10 frames)
 function nudge(frames) {
   if (!state.selection.size) { toast("Select clips to nudge them"); return; }
@@ -532,7 +548,13 @@ function contextMenu(x, y, hit) {
       "-",
       { label: "Cut", action: () => copy(true) },
       { label: "Copy", action: () => copy() },
-      { label: clip.linkId ? "Unlink" : "Link selected", action: linkToggle },
+      { label: clip.linkId ? "Unlink (detach the sound)" : "Link selected", kbd: K("Ctrl+L"), action: linkToggle },
+      { label: clip.disabled ? "Turn clip on" : "Turn clip off", kbd: "Shift+E", action: toggleEnabled },
+      { label: "Clip colour", submenu: [
+        ...M.CLIP_COLOURS.map(([name, col]) => ({ label: name[0].toUpperCase() + name.slice(1), swatch: col, check: clip.label === name,
+          action: () => M.edit("Clip colour", () => M.setClipLabel(new Set([...state.selection, clip.id]), name)) })),
+        "-", { label: "None", disabled: !clip.label, action: () => M.edit("Clip colour", () => M.setClipLabel(new Set([...state.selection, clip.id]), null)) }] },
+      replaceItem(clip, hit.row),
       "-",
       { label: "Reset speed to 100%", disabled: M.isStill(clip), action: () => M.edit("Reset speed", () => M.setSpeed([...state.selection], 1)) },
       { label: clip.reverse ? "Play forwards" : "Reverse", kbd: "Shift+R", disabled: M.isStill(clip), action: toggleReverse },
@@ -584,7 +606,7 @@ function showShortcuts() {
     ["Shift+4 / 6 / 7", "Edit, Colour and Audio pages"], ["Space", "Play / pause"], ["J / K / L", "Shuttle back / stop / forward (press again for 2x, 4x, 8x)"], ["← / →", "Previous / next frame (Shift: 1 second)"],
     ["Shift+D", "Detect shots in the selected clip"], ["Shift+M", "Add a marker"], ["Shift+F", "Freeze frame at the playhead"], ["Shift+R", "Reverse selected clips"], ["Shift+T", "Add a title"], ["C", "Crop handles on the viewer"],
     ["↑ / ↓", "Previous / next edit point"], ["Home / End", "Start / end of timeline"], ["I / O, Alt+X", "Mark in / out, clear"],
-    ["V / B / T / R", "Select / Blade / Trim / Range tool"], ["Q / W", "Ripple-trim the clip's start / end to the playhead"], [K("Alt+← / →"), "Nudge selected clips a frame (Shift: 10)"], ["S / M", "Snapping / Magnetic timeline"], [K("Ctrl+Shift+L"), "Linked selection"],
+    ["V / B / T / R", "Select / Blade / Trim / Range tool"], ["Shift+E", "Turn selected clips off / on"], ["Q / W", "Ripple-trim the clip's start / end to the playhead"], [K("Alt+← / →"), "Nudge selected clips a frame (Shift: 10)"], ["S / M", "Snapping / Magnetic timeline"], [K("Ctrl+Shift+L"), "Linked selection"],
     [K("Ctrl+B"), "Split at playhead (selected clips, or all)"], ["Del / Shift+Del", "Delete / ripple delete (clips, range or transition)"],
     [K("Ctrl+C / X / V"), "Copy / cut / paste at playhead"], [K("Ctrl+Z / Ctrl+Shift+Z"), "Undo / redo"], [K("Ctrl+A"), "Select all"],
     [K("Ctrl+L"), "Link / unlink selected clips"], [K("Ctrl+T"), "Transitions at the cut under the playhead"],
@@ -665,6 +687,7 @@ function onKey(e) {
     case "t": case "T": handled(); if (e.shiftKey) app.effects.addGenerator(M.TITLE_MEDIA.id); else setTool("trim"); break;
     case "d": case "D": if (e.shiftKey) { handled(); detectShots(); } break;
     case "Delete": case "Backspace": handled(); deleteSelection(e.shiftKey); break;
+    case "e": case "E": if (e.shiftKey) { handled(); toggleEnabled(); } break;
     case "Escape": M.clearSelection(); state.range = null; bus.emit("range"); break;
     case "+": case "=": handled(); app.timeline.setZoom(app.timeline.pps * 1.4); break;
     case "-": case "_": handled(); app.timeline.setZoom(app.timeline.pps / 1.4); break;

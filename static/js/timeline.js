@@ -502,10 +502,13 @@ export class Timeline {
         }
       }
     }
-    // header strip
-    ctx.fillStyle = COLORS[kind + "Head"];
+    // header strip (a colour label tints it)
+    const labelCol = M.clipColour(clip);
+    ctx.fillStyle = labelCol || COLORS[kind + "Head"];
     ctx.fillRect(x0, top, w, headH);
+    if (labelCol) { ctx.fillStyle = labelCol + "33"; ctx.fillRect(x0, top + headH, w, h - headH); }
     const badges = [];
+    if (clip.disabled) badges.push("⊘ off");
     if (clip.linkId) badges.push("🔗");
     if (M.hasSpeedKeys(clip)) badges.push(M.keysOf(clip, "speed").every(k => k.v <= 1e-6) ? "❄ freeze" : "⏱ ramp");
     else if (Math.abs((clip.speed || 1) - 1) > 1e-6 && !M.isStillKind(item.kind)) badges.push(`${Math.round(clip.speed * 100)}%`);
@@ -534,6 +537,14 @@ export class Timeline {
     if (clip.fadeIn > 0) fadeShape(x0, clip.fadeIn, clip.fadeInCurve || "linear", 1);
     if (clip.fadeOut > 0) fadeShape(x1, clip.fadeOut, clip.fadeOutCurve || "linear", -1);
     if (!member) this.paintKeys(ctx, clip, row, x0, x1, top, h, headH, selected);
+    if (clip.disabled) {
+      // turned off: dimmed and hatched
+      ctx.fillStyle = "rgba(10,11,14,.6)"; ctx.fillRect(x0, top, w, h);
+      ctx.strokeStyle = "rgba(255,255,255,.12)"; ctx.lineWidth = 1; ctx.beginPath();
+      for (let sx = Math.floor((Math.max(x0, 0) - h) / 10) * 10; sx < Math.min(x1, this.width); sx += 10) { ctx.moveTo(sx, top + h); ctx.lineTo(sx + h, top); }
+      ctx.stroke();
+      ctx.fillStyle = "#e9ecf2"; ctx.fillText(label, Math.max(x0, 0) + 4, top + 2);
+    }
     if (item.missing) { ctx.fillStyle = "rgba(200,40,40,.55)"; ctx.fillRect(x0, top, w, h); ctx.fillStyle = "#fff"; ctx.fillText("Media offline", x0 + 4, top + headH + 4); }
     // seam verdicts of generated joins: green seamless, yellow soft bump, red hard cut
     const seamColor = { seamless: "#36c46f", "soft bump": "#ffc83c", "hard cut": "#ff5a5a" };

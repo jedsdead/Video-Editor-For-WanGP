@@ -124,7 +124,7 @@ function buildMenu(items, level) {
     if (item.head) { menu.append(el("div.mhead", {}, item.head)); continue; }
     if (item.custom) { menu.append(item.custom); continue; }
     const sub = item.submenu && item.submenu.filter(Boolean);
-    const row = el("div.mi", {}, el("span.check", {}, item.check === undefined ? "" : (item.check ? "✓" : "")), el("span", {}, item.label),
+    const row = el("div.mi", {}, el("span.check", {}, item.check === undefined ? "" : (item.check ? "✓" : "")), el("span", {}, item.swatch ? el("span.mswatch", { style: { background: item.swatch } }) : null, item.label),
       sub ? el("span.kbd.subarrow", {}, "›") : item.kbd ? el("span.kbd", {}, item.kbd) : null);
     if (item.disabled || (sub && !sub.length)) row.classList.add("disabled");
     if (sub) {

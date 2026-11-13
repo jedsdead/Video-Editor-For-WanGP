@@ -792,6 +792,51 @@ export function trimLimits(clip, edge, groupIds) {
   return [clip.start + minDur, hi];
 }
 
+// ---- clip state ----
+// Clip colour labels (the timeline tints a labelled clip's header with its colour).
+export const CLIP_COLOURS = [["red", "#e5484d"], ["orange", "#f76b15"], ["yellow", "#e2b100"], ["green", "#30a46c"],
+  ["teal", "#12a594"], ["blue", "#3e63dd"], ["purple", "#8e4ec6"], ["pink", "#d6409f"]];
+export const clipColour = (clip) => (CLIP_COLOURS.find(([n]) => n === clip?.label) || [])[1] || null;
+export function setClipLabel(ids, label) {
+  const set = withPartners([...ids]);
+  for (const c of P().clips) if (set.has(c.id)) { if (label) c.label = label; else delete c.label; }
+}
+// Turn clips off (they stay on the timeline but don't play or export) or back on; linked partners follow.
+export function setClipsEnabled(ids, on) {
+  const set = withPartners([...ids]);
+  for (const c of P().clips) if (set.has(c.id)) { if (on) delete c.disabled; else c.disabled = true; }
+}
+// Swap the footage of a clip (and its linked sound) for another media item, keeping its place, length, grade,
+// effects and keyframes. The new footage starts at the same point as the old where it can, and the clip gets shorter
+// if the new footage is. A video swapped for one without sound loses its linked sound clip.
+export function replaceClipMedia(clipId, mediaId) {
+  const clip = getClip(clipId);
+  const item = P().media[mediaId];
+  if (!clip || !item) return false;
+  const group = [clip, ...partners(clip).filter(p => p.mediaId === clip.mediaId && Math.abs(p.start - clip.start) < 1e-3)];
+  const still = isStillKind(item.kind);
+  const len = clipDur(clip);
+  for (const c of group) {
+    const isAudio = trackKind(c.trackId) === "audio";
+    if (isAudio && !(item.has_audio || item.kind === "audio")) { removeClip(c); continue; }
+    c.mediaId = mediaId;
+    c.name = item.name;
+    if (c.keys) delete c.keys.speed;
+    delete c.dur;
+    if (still) { c.speed = 1; c.reverse = false; c.in = 0; c.out = len; continue; }
+    const s = Math.max(0.01, c.speed || 1);
+    const total = item.duration || len * s;
+    const want = len * s;
+    const inT = clamp(c.in, 0, Math.max(0, total - want));
+    c.in = inT;
+    c.out = Math.min(total, inT + want);
+    // provenance of the old footage no longer applies
+    for (const k of ["gen", "takes", "takeIndex", "seam", "parentId", "windows"]) delete c[k];
+  }
+  if (getClip(clip.id) && !partners(clip).length) delete clip.linkId;
+  return true;
+}
+
 // ---- trim tool edits ----
 // A clip with the linked clips that share the given edge (or, for "both", start and end).
 function edgeGroup(clip, edge, linked = true) {

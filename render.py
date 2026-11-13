@@ -140,6 +140,11 @@ class Timeline:
     """Read-only view of a project with lookups the renderer needs."""
 
     def __init__(self, project, registry):
+        # clips that are turned off stay out of the render (and transitions that touch them)
+        off = {c.get("id") for c in project.get("clips", []) if c.get("disabled")}
+        if off:
+            project = {**project, "clips": [c for c in project.get("clips", []) if c.get("id") not in off],
+                       "transitions": [t for t in project.get("transitions", []) if t.get("a") not in off and t.get("b") not in off]}
         self.project = project
         self.registry = registry
         settings = project.get("settings", {})
