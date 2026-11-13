@@ -310,7 +310,8 @@ export class Renderer {
         entry.ready = true;
       }
     } else if (isVideo) {
-      if (source.readyState >= 2 && (!source.paused || entry.time !== source.currentTime || !entry.ready)) {
+      // not while it's seeking: until the seek lands it still shows the picture from where it was
+      if (source.readyState >= 2 && !source.seeking && (!source.paused || entry.time !== source.currentTime || !entry.ready)) {
         gl.bindTexture(gl.TEXTURE_2D, entry.tex);
         try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source); entry.ready = true; entry.time = source.currentTime; }
         catch (e) { /* frame not decodable yet */ }

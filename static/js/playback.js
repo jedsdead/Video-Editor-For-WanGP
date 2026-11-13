@@ -394,13 +394,26 @@ export class Playback {
         el.preload = "auto";
         el.playsInline = true;
         if (kind === "video") el.muted = true;
-        el.addEventListener("seeked", () => { this.dirty = true; });
+        // a finished seek has the frame at the new time ready to draw (a parked video reports no frame until it plays)
+        el.addEventListener("seeked", () => { this.dirty = true; const e = [...this.pool.values()].find(x => x.el === el); if (e) e.shown = el.currentTime; });
         el.addEventListener("loadeddata", () => { this.dirty = true; });
         el.addEventListener("error", () => { this.dirty = true; });
       }
       if (el.tagName !== "CANVAS") el.src = this.url(item, rev, kind);
       entry = { el, kind, rev, full, mediaId: clip.mediaId, used: performance.now(), created: performance.now(), trackId: null };
       this.pool.set(clip.id, entry);
+      // the frame the video is really showing (its reported time jumps the moment a seek is asked for; the picture
+      // follows later), so a cut can wait for the picture rather than draw a stale one
+      if (kind === "video" && el.requestVideoFrameCallback) {
+        const id = clip.id, made = entry;
+        const watch = () => el.requestVideoFrameCallback((_, meta) => {
+          if (this.pool.get(id) !== made) return;
+          made.shown = meta.mediaTime;
+          this.dirty = true;
+          watch();
+        });
+        watch();
+      }
       if (kind === "audio") this.connectAudio(entry);
     }
     entry.used = performance.now();
@@ -524,7 +537,21 @@ export class Playback {
     const kind = item.kind === "image" || GENERATOR_KINDS.has(item.kind) ? item.kind : "video";
     const entry = this.entryFor(clip, kind);
     if (!entry) return null;
-    if (kind === "video") this.syncElement(entry, clip, t, false);
+    let hold = false;
+    if (kind === "video") {
+      this.syncElement(entry, clip, t, false);
+      // just after a cut, the element may still be getting to its first frame: say so, so the viewer keeps the frame
+      // before rather than drawing a picture from the wrong place
+      if (this.playing && t - clip.start < 0.25) {
+        const el = entry.el;
+        const item = mediaOf(clip);
+        const want = clamp(this.elementTime(entry, clip, t - clip.start), 0, Math.max(0, (item.duration || 0) - 0.03));
+        const frame = 1 / (item.fps || fps() || 24);
+        // what's shown runs a frame or two behind while playing; a stale picture is from somewhere else entirely
+        const slack = (0.25 + 1.5 * frame) * Math.max(1, Math.abs(this.rate));
+        hold = el.seeking || el.readyState < 2 || (entry.shown != null && Math.abs(entry.shown - want) > slack);
+      }
+    }
     const p = P();
     if (kind === "title" || kind === "solid" || kind === "gradient") {
       const sig = JSON.stringify([kind, kind === "title" ? clip.title : clip.gen, p.settings.width, p.settings.height]);
@@ -542,7 +569,7 @@ export class Playback {
     const geo = this.geometry(clip, kt, sw, sh);
     const alpha = clamp(prop(clip, "opacity", kt), 0, 1) * fadeFactor(clip, kt, d);
     return { type: "clip", clip, source: entry.el, center: geo.center, size: geo.size, rotation: geo.rotation, uv: geo.uv, crop: geo.crop, full: geo.full, alpha,
-             blend: clip.blend || "normal", mask: maskFor(clip),
+             blend: clip.blend || "normal", mask: maskFor(clip), hold,
              level: levelAt(clip, t - clip.start),
              ...this.gradeFor(clip, kt), effects: this.effectsFor(clip, kt, t), post: this.compoundPost(clip, t) };
   }
@@ -697,9 +724,15 @@ export class Playback {
   // playback; the next clip waits paused on its in-point.)
   preload(entry, clip) {
     const el = entry.el;
-    const target = clamp(this.elementTime(entry, clip, 0), 0, Math.max(0, (mediaOf(clip).duration || 0) - 0.03));
+    const item = mediaOf(clip);
+    const maxT = Math.max(0, (item.duration || 0) - 0.03);
+    let target = clamp(this.elementTime(entry, clip, 0), 0, maxT);
+    // park on the middle of the first frame, never its edge: a seek to a frame boundary can land on the frame before
+    // (the last frame before the in-point), which then flashes up at the cut
+    const sf = item.fps || fps();
+    if (sf > 0) target = clamp((Math.floor(target * sf + 0.02) + 0.5) / sf, 0, maxT);
     if (!el.paused) el.pause();
-    if (!el.seeking && Math.abs(el.currentTime - target) > 0.05) el.currentTime = target;
+    if (!el.seeking && Math.abs(el.currentTime - target) > 0.25 / (sf || 24)) el.currentTime = target;
   }
 
   preloadVideo(t, needed) {
@@ -749,9 +782,18 @@ export class Playback {
     this.syncAudio(t, needed);
     this.updateStrips();
     this.measureLoudness(now);
+    // a clip that has just come on whose video isn't on its first frame yet: keep the frame on screen (for up to 3
+    // frames) rather than draw it from the wrong place
+    const waiting = this.playing && entries.some(e => e.hold || e.a?.hold || e.b?.hold);
+    if (waiting && (this.holdSince ??= now) && now - this.holdSince < 3000 / (fps() || 24)) { this.pending = true; return this.afterRender(t, needed, now, false); }
+    this.holdSince = null;
     const complete = this.renderer.render(entries);
     this.pending = !complete;
     this.dirty = false;
+    this.afterRender(t, needed, now, true);
+  }
+
+  afterRender(t, needed, now, drawn) {
     for (const [id, entry] of this.pool) {
       if (needed.has(id)) continue;
       if (entry.el.pause && !entry.el.paused && !this.scrubbing) entry.el.pause();
@@ -759,6 +801,6 @@ export class Playback {
       if (!getClip(id) || now - entry.used > 8000) this.dispose(id);
     }
     if (this.playing || this.lastEmit !== t) { this.lastEmit = t; bus.emit("time", t); }
-    bus.emit("rendered");
+    if (drawn) bus.emit("rendered");
   }
 }
