@@ -31,7 +31,11 @@ export function applySound(prompt, o = {}) {
     if (o.noMusic) {
       const had = section("non_diegetic_music", "N/A");
       const m = /<overall_soundscape>([\s\S]*?)<\/overall_soundscape>/i.exec(p);
-      if (m && /music|song|score|melod/i.test(m[1])) section("overall_soundscape", `${m[1].trim()} No music.`);
+      if (m && /music|song|score|melod/i.test(m[1])) {
+        // the soundscape's sentences that mention music go; the rest stay
+        const kept = m[1].trim().split(/(?<=[.!?])\s+/).filter(x => !/music|song|score|melod/i.test(x));
+        section("overall_soundscape", `${kept.join(" ")}${kept.length ? " " : ""}No music.`);
+      }
       else if (!had) lines.push("No music.");
     }
     if (o.noSpeech) lines.push("Nobody speaks: no dialogue, no voices.");
