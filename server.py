@@ -20,6 +20,7 @@ from . import render as R
 from . import regen as RG
 from . import shots as SH
 from . import titles as TT
+from . import transcribe as TX
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
@@ -630,6 +631,62 @@ def create_app(get_config, host=None):
     def collect_cancel(job_id: str):
         if job_id in collect_jobs:
             collect_jobs[job_id]["cancel"] = True
+        return {"ok": True}
+
+    # ------------------------------------------------------------------ speech to captions (WanGP's Whisper)
+    speech_jobs = {}
+
+    @app.get("/api/transcribe/available")
+    def transcribe_available():
+        return TX.available()
+
+    @app.post("/api/transcribe")
+    def transcribe_start(payload: dict = Body(...)):
+        """Transcribe stretches of source files ({ranges: [{key, mediaId, a, b}], model, language}) in the background.
+        Waits for no generation to be running (Whisper and a generation would share the GPU)."""
+        why = TX.available()["why"]
+        if why:
+            raise HTTPException(400, why)
+        ranges = []
+        for r in payload.get("ranges") or []:
+            item = _item(r["mediaId"])
+            if not os.path.isfile(item["path"]):
+                raise HTTPException(400, f"{item.get('name') or 'A file'} is missing: relink it first")
+            ranges.append({"key": str(r["key"]), "path": item["path"], "a": max(0.0, float(r.get("a") or 0)), "b": float(r.get("b") or item.get("duration") or 0)})
+        if not ranges:
+            raise HTTPException(400, "Nothing to transcribe")
+        job_id = uuid.uuid4().hex[:10]
+        job = speech_jobs[job_id] = {"id": job_id, "status": "running", "progress": 0.0, "message": "Starting"}
+
+        def busy():
+            return any(j.get("status") in ("queued", "running") for j in list(service.regen.jobs.values()))
+
+        def run():
+            def progress(f, m):
+                job.update(progress=f, message=m)
+            try:
+                while busy() and not job.get("cancel"):
+                    job["message"] = "Waiting for the generation that's running to finish (Whisper shares the GPU)"
+                    time.sleep(2)
+                job["result"] = TX.transcribe(ranges, os.path.join(service.data_root, "transcripts"), service.temp_dir,
+                                              model=payload.get("model") or None, language=payload.get("language") or None,
+                                              progress=progress, cancelled=lambda: bool(job.get("cancel")))
+                job.update(status="done", progress=1.0, message="Done")
+            except Exception as error:                              # noqa: BLE001
+                job.update(status="cancelled" if job.get("cancel") else "error", message=str(error))
+        threading.Thread(target=run, daemon=True, name=f"video_editor_speech_{job_id}").start()
+        return job
+
+    @app.get("/api/transcribe/{job_id}")
+    def transcribe_status(job_id: str):
+        if job_id not in speech_jobs:
+            raise HTTPException(404, "Unknown job")
+        return speech_jobs[job_id]
+
+    @app.post("/api/transcribe/{job_id}/cancel")
+    def transcribe_cancel(job_id: str):
+        if job_id in speech_jobs:
+            speech_jobs[job_id]["cancel"] = True
         return {"ok": True}
 
     @app.post("/api/collect/open")

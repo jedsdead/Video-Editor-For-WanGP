@@ -157,6 +157,124 @@ export async function draftFromPrompts(app, { replace = false } = {}) {
   return found.length;
 }
 
+// ---------------------------------------------------------------- speech to captions
+// Words (timeline seconds, [{w, s, e}] in order) grouped into captions: a new caption after a pause, at the end of a
+// sentence once there's enough on screen, when two lines are full, or after about six seconds.
+export function cuesFromWords(words, { maxLine = MAX_LINE, maxSeconds = 6, pause = 0.7 } = {}) {
+  const cues = [];
+  let cur = null;
+  const flush = () => { if (cur && cur.text.trim()) cues.push(cur); cur = null; };
+  for (const w of words) {
+    const word = w.w.trim();
+    if (!word) continue;
+    if (cur) {
+      const text = `${cur.text} ${word}`;
+      const sentenceDone = /[.!?…]["')\]]?$/.test(cur.text) && cur.text.length >= 18;
+      if (w.s - cur.end > pause || sentenceDone || text.length > maxLine * 2 || wrap(text, maxLine).split("\n").length > 2 || w.e - cur.start > maxSeconds) flush();
+    }
+    if (!cur) cur = { start: w.s, end: w.e, text: word };
+    else { cur.text += ` ${word}`; cur.end = w.e; }
+  }
+  flush();
+  // a little longer on screen than the words take, without running into the next caption
+  cues.forEach((c, i) => {
+    const next = cues[i + 1]?.start ?? Infinity;
+    c.end = Math.min(next - 0.04, Math.max(c.end + 0.25, c.start + 0.9));
+  });
+  return cues;
+}
+
+// The words heard in timeline clips: each clip's words (source seconds) placed where the clip plays them. A clip
+// with a speed ramp is left out. Where two clips hold the same speech (the same take on two tracks), it's kept once.
+export function placeWords(clips, results) {
+  const out = [];
+  for (const c of clips) {
+    const words = results[c.id]?.words || [];
+    const a = Math.min(c.in, c.out), b = Math.max(c.in, c.out), s = Math.abs(c.speed || 1), dur = M.clipDur(c);
+    for (const w of words) {
+      let t0 = c.reverse ? (b - w.e) / s : (w.s - a) / s, t1 = c.reverse ? (b - w.s) / s : (w.e - a) / s;
+      if ((t0 + t1) / 2 < 0 || (t0 + t1) / 2 > dur) continue;          // mostly outside the clip
+      t0 = Math.max(0, t0); t1 = Math.min(dur, Math.max(t0 + 0.02, t1));
+      out.push({ w: w.w, s: c.start + t0, e: c.start + t1 });
+    }
+  }
+  out.sort((x, y) => x.s - y.s);
+  const kept = [];
+  for (const w of out) {
+    const dup = kept.slice(-6).some(k => k.w.trim().toLowerCase() === w.w.trim().toLowerCase() && Math.min(k.e, w.e) - Math.max(k.s, w.s) > 0.5 * (w.e - w.s));
+    if (!dup) kept.push(w);
+  }
+  return kept;
+}
+
+export async function transcribeDialog(app) {
+  const avail = await (await fetch("api/transcribe/available")).json().catch(() => ({ ok: false, why: "The server didn't answer" }));
+  if (!avail.ok) { toast(avail.why, "error", 9000); return; }
+  const tracks = M.audioTracks().filter(t => M.clipsOn(t.id).some(c => !c.disabled));
+  if (!tracks.length) { toast("There's no sound on the timeline to transcribe", "warn"); return; }
+  let pref = {};
+  try { pref = JSON.parse(localStorage.getItem("ve_transcribe") || "{}"); } catch {}
+  const boxes = tracks.map((t, i) => {
+    const box = el("input", { type: "checkbox", checked: pref.tracks ? pref.tracks.includes(t.id) : !t.mute });
+    return [t, box, el("label", { style: { display: "flex", gap: "6px", alignItems: "center", color: "inherit" } }, box, t.name || `A${M.audioTracks().indexOf(t) + 1}`, t.mute ? el("span.dim", {}, " (muted)") : null)];
+  });
+  const model = el("select", {}, ...[["", "WanGP's setting (Configuration > Extensions)"], ["medium", "Medium (faster, 1.6 GB)"], ["large-v3", "Large-v3 (more accurate, 3.1 GB)"]]
+    .map(([v, l]) => el("option", { value: v, selected: (pref.model || "") === v }, l)));
+  const lang = el("input", { type: "text", value: pref.language || "", placeholder: "auto", style: { width: "80px" }, title: "Language code (en, fr, de…) or blank to detect it" });
+  const inOut = el("input", { type: "checkbox", checked: false });
+  const hasRange = P().inPoint != null && P().outPoint != null && P().outPoint > P().inPoint;
+  const existing = captions().length;
+  const replace = el("input", { type: "checkbox", checked: false });
+  const status = el("div.dim.small", { style: { marginTop: "8px", minHeight: "1.2em" } });
+  const row = (l, ...c) => el("div.field.wide", {}, el("label", {}, l), el("div", { style: { display: "flex", flexWrap: "wrap", gap: "10px", alignItems: "center" } }, ...c));
+  let job = null;
+  const m = modal({ title: "Transcribe speech to captions", narrow: true, body: el("div", {},
+      el("div.dim.small", { style: { marginBottom: "8px" } }, "Listens to the sound on the tracks you pick with WanGP's Whisper (the model Deepy uses) and makes captions timed to the words. It waits for any generation that's running, since it uses the GPU. The first run may download the model."),
+      row("Tracks", ...boxes.map(b => b[2])), row("Model", model), row("Language", lang, el("span.dim", {}, "blank: detect")),
+      hasRange ? row("Range", el("label", { style: { display: "flex", gap: "6px", alignItems: "center", color: "inherit" } }, inOut, "Only between the in and out points")) : null,
+      existing ? row("Existing", el("label", { style: { display: "flex", gap: "6px", alignItems: "center", color: "inherit" } }, replace, `Replace the ${existing} captions there (otherwise the new ones fill around them)`)) : null,
+      status),
+    buttons: ["spacer", { label: "Cancel", action: () => { if (job) fetch(`api/transcribe/${job}/cancel`, { method: "POST" }); } },
+      { label: "Transcribe", primary: true, action: () => { run(); return false; } }] });
+  const run = async () => {
+    if (job) return;
+    const ids = boxes.filter(b => b[1].checked).map(b => b[0].id);
+    if (!ids.length) { status.textContent = "Pick a track to listen to."; return; }
+    try { localStorage.setItem("ve_transcribe", JSON.stringify({ tracks: ids, model: model.value, language: lang.value.trim() })); } catch {}
+    const lo = hasRange && inOut.checked ? P().inPoint : -Infinity, hi = hasRange && inOut.checked ? P().outPoint : Infinity;
+    const clips = P().clips.filter(c => ids.includes(c.trackId) && !c.disabled && !M.hasSpeedKeys(c) && M.clipEnd(c) > lo && c.start < hi
+      && (M.mediaOf(c)?.has_audio || M.mediaOf(c)?.kind === "audio"));
+    if (!clips.length) { status.textContent = "No sound clips there (clips with a speed ramp are left out)."; return; }
+    const ranges = clips.map(c => ({ key: c.id, mediaId: c.mediaId, a: Math.min(c.in, c.out), b: Math.max(c.in, c.out) }));
+    status.textContent = "Starting…";
+    try {
+      const r = await fetch("api/transcribe", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ranges, model: model.value, language: lang.value.trim() }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || r.statusText);
+      job = j.id;
+      let st = j;
+      while (st.status === "running") {
+        await new Promise(x => setTimeout(x, 1000));
+        if (!status.isConnected) { fetch(`api/transcribe/${job}/cancel`, { method: "POST" }); return; }
+        st = await (await fetch(`api/transcribe/${job}`)).json();
+        status.textContent = `${st.message || ""}${st.progress ? ` (${Math.round(st.progress * 100)}%)` : ""}`;
+      }
+      if (st.status !== "done") throw new Error(st.message || st.status);
+      const words = placeWords(clips, st.result || {}).filter(w => w.s >= lo - 0.05 && w.e <= hi + 0.05);
+      const cues = cuesFromWords(words);
+      if (!cues.length) { status.textContent = "No speech was heard."; job = null; return; }
+      let made = 0;
+      M.edit("Transcribe speech to captions", () => {
+        const tr = captionsTrack(true);
+        if (replace.checked) for (const c of M.clipsOn(tr.id).filter(c => c.start < hi && M.clipEnd(c) > lo)) M.deleteClips([c.id]);
+        for (const q of cues) if (addCaption(q.start, q.end, q.text)) made++;
+      });
+      toast(`Made ${made} caption${made === 1 ? "" : "s"} from the speech${made < cues.length ? ` (${cues.length - made} left out where captions were already)` : ""}`);
+      m.close();
+    } catch (e) { status.textContent = `Couldn't transcribe: ${e.message}`; job = null; }
+  };
+}
+
 // ---------------------------------------------------------------- panel
 export class CaptionsPanel {
   constructor(app) {
@@ -179,6 +297,7 @@ export class CaptionsPanel {
       el("div.cap-tools", {},
         btn("+ At playhead", "Add a caption at the playhead (2 seconds)", () => this.addAtPlayhead()),
         btn("Draft from prompts", "Make captions from the dialogue (<d>…</d>) in the WanGP prompts of the clips on the timeline, at the times the prompts give", () => this.draft()),
+        btn("Transcribe speech…", "Make captions from what's said on the audio tracks, timed to the words (WanGP's Whisper)", () => transcribeDialog(this.app)),
         btn("Style…", "Font, size, colour, background and height for every caption", () => this.styleDialog()),
         btn("Import SRT", "Add captions from an .srt file", () => fileIn.click()),
         btn("Export SRT", "Save the captions as an .srt file", () => this.exportSrt()), fileIn),
