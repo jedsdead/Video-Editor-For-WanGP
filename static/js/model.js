@@ -916,6 +916,19 @@ export function blockLead(block) {
   return clipsOn(block.trackId).filter(c => !c.block && clipEnd(c) <= block.start + 1e-3 && clipEnd(c) > block.start - 0.25).pop() || null;
 }
 
+// Insert a gap: everything at or after t (on unlocked tracks) moves later by `seconds`; a clip running through t is
+// split there first, so its second part moves with the rest.
+export function insertGap(t, seconds) {
+  t = snapFrame(t); seconds = Math.max(frameDur(), snapFrame(seconds));
+  const open = (c) => !getTrack(c.trackId).locked;
+  const spanning = P().clips.filter(c => open(c) && c.start < t - EPS && clipEnd(c) > t + EPS).map(c => c.id);
+  if (spanning.length) splitAt(t, { ids: new Set(spanning) });
+  for (const c of P().clips) if (open(c) && c.start >= t - EPS) c.start += seconds;
+  for (const m of P().markers || []) if (m.t >= t - EPS) m.t += seconds;
+  if (P().inPoint != null && P().inPoint >= t - EPS) P().inPoint += seconds;
+  if (P().outPoint != null && P().outPoint >= t - EPS) P().outPoint += seconds;
+}
+
 // ---- clip state ----
 // Clip colour labels (the timeline tints a labelled clip's header with its colour).
 export const CLIP_COLOURS = [["red", "#e5484d"], ["orange", "#f76b15"], ["yellow", "#e2b100"], ["green", "#30a46c"],
@@ -1070,7 +1083,7 @@ export function rippleTrim(clipId, edge, time, { linked = true } = {}) {
   // trimming the head moves the clip's footage: clips connected to it (magnetic mode) within it move with it
   if (edge === "start") for (const k of P().clips) if (k.parentId && groupIds.has(k.parentId) && !groupIds.has(k.id) && k.start < oldEnd - 1e-4) k.start = Math.max(oldStart, k.start + delta);
   for (const c of movers) c.start = Math.max(0, c.start + delta);
-  for (const m of P().markers || []) if (m.time >= oldEnd - 1e-4) m.time = Math.max(0, m.time + delta);
+  for (const m of P().markers || []) if (m.t >= oldEnd - 1e-4) m.t = Math.max(0, m.t + delta);
   if (P().magnetic) pack();
 }
 

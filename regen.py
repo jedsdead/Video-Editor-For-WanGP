@@ -636,6 +636,49 @@ class RegenService:
                 "current": {"modelType": current.get("model_type"), "name": self.host.model_name(current.get("model_type")),
                             "capturedAt": current.get("_captured_at")} if current else None}
 
+    DRIFT_KEYS = [("model_type", "Model"), ("num_inference_steps", "Steps"), ("guidance_phases", "Phases"), ("guidance_scale", "Guidance"),
+                  ("guidance2_scale", "Guidance (phase 2)"), ("flow_shift", "Shift"), ("sample_solver", "Sampler"), ("custom_sigmas", "Sigmas"),
+                  ("resolution", "Resolution"), ("audio_guidance_scale", "Audio guidance")]
+
+    def drift(self, media_ids):
+        """How each generated file's settings differ from WanGP's current ones: {mediaId: [{label, was, now}]} (LoRAs
+        compared by name and multiplier). Files without WanGP settings are left out."""
+        current = self.host.current_settings() or {}
+        if not current:
+            raise ValueError("No Media Generator settings yet: open the Video Generator tab, then come back to the Video Editor")
+        def loras(settings):
+            names = [os.path.basename(str(x)) for x in settings.get("activated_loras") or []]
+            mults = str(settings.get("loras_multipliers") or "").split()
+            return {n: (mults[i] if i < len(mults) else "1") for i, n in enumerate(names)}
+        now_l = loras(current)
+        out = {}
+        for mid in media_ids:
+            try:
+                meta = self._meta(self._item(mid))
+            except Exception:
+                meta = None
+            if not meta:
+                continue
+            diffs = []
+            for key, label in self.DRIFT_KEYS:
+                a, b = meta.get(key), current.get(key)
+                if b in (None, "") and key not in current:
+                    continue                      # WanGP didn't report this one
+                if str("" if a is None else a).strip() != str("" if b is None else b).strip():
+                    if key == "model_type":
+                        a, b = self.host.model_name(a) or a, self.host.model_name(b) or b
+                    diffs.append({"label": label, "was": "–" if a in (None, "") else str(a), "now": "–" if b in (None, "") else str(b)})
+            was_l = loras(meta)
+            for n in sorted(set(was_l) | set(now_l)):
+                if n not in now_l:
+                    diffs.append({"label": f"LoRA {n}", "was": was_l[n], "now": "not loaded"})
+                elif n not in was_l:
+                    diffs.append({"label": f"LoRA {n}", "was": "not used", "now": now_l[n]})
+                elif was_l[n] != now_l[n]:
+                    diffs.append({"label": f"LoRA {n}", "was": was_l[n], "now": now_l[n]})
+            out[mid] = diffs
+        return out
+
     def _settings_for(self, item, use_current):
         if use_current:
             current = self.host.current_settings()

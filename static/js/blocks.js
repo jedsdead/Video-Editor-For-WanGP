@@ -91,3 +91,32 @@ export async function generateAll(app) {
   }
   if (done) toast(`Generate all: ${done} block${done > 1 ? "s" : ""} generated`);
 }
+
+// Settings drift: the generated clips on the timeline whose WanGP settings differ from the Media Generator's current
+// ones (model, steps, phases, guidance, shift, sampler, sigmas, resolution, LoRAs), to see which shots to redo.
+export async function openDrift(app) {
+  const clips = P().clips.filter(c => M.trackKind(c.trackId) === "video" && !c.block && M.mediaOf(c)?.has_metadata);
+  if (!clips.length) { toast("There are no WanGP generations on this timeline", "warn"); return; }
+  const ids = [...new Set(clips.map(c => M.originalOf ? M.originalOf(c).mediaId : c.mediaId))];
+  let res;
+  try {
+    const r = await fetch("api/gen/drift", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mediaIds: ids }) });
+    res = await r.json();
+    if (!r.ok) throw new Error(res.detail || r.statusText);
+  } catch (e) { toast(`Couldn't compare: ${e.message}`, "error", 6000); return; }
+  const drifted = clips.filter(c => (res[M.originalOf ? M.originalOf(c).mediaId : c.mediaId] || []).length);
+  const same = clips.length - drifted.length;
+  const list = el("div.drift-list");
+  for (const c of drifted.sort((a, b) => a.start - b.start)) {
+    const d = res[M.originalOf ? M.originalOf(c).mediaId : c.mediaId];
+    list.append(el("div.drift-item", {},
+      el("div.drift-name", { title: "Go to this clip", onclick: () => { app.playback.pause(); app.playback.seek(c.start + 1e-3); M.select([c.id]); } }, c.name || M.mediaOf(c).name),
+      el("div.drift-diffs", {}, ...d.map(x => el("div", {}, el("span.dim", {}, `${x.label}: `), `${x.was} → `, el("b", {}, x.now))))));
+  }
+  modal({ title: "Settings drift", body: el("div", {},
+      el("div.dim.small", { style: { marginBottom: "8px" } }, drifted.length
+        ? `${drifted.length} of ${clips.length} generated clips were made with settings that differ from the Media Generator's current ones (was → now). ${same ? `${same} match.` : ""}`
+        : `All ${clips.length} generated clips match the Media Generator's current settings.`),
+      list),
+    buttons: ["spacer", { label: "Close" }, ...(drifted.length ? [{ label: "Select these clips", primary: true, action: () => M.select(drifted.map(c => c.id)) }] : [])] });
+}

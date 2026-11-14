@@ -481,6 +481,13 @@ def create_app(get_config, host=None):
         except (ValueError, KeyError) as error:
             raise HTTPException(400, str(error))
 
+    @app.post("/api/gen/drift")
+    def gen_drift(payload: dict = Body(...)):
+        try:
+            return service.regen.drift(payload.get("mediaIds") or [])
+        except ValueError as error:
+            raise HTTPException(400, str(error))
+
     @app.post("/api/gen/windows")
     def gen_windows(payload: dict = Body(...)):
         try:

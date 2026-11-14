@@ -13,6 +13,37 @@ const PREFS = "ve_gen_prefs";
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS) || "{}"); } catch (_) { return {}; } };
 const savePrefs = (p) => { try { localStorage.setItem(PREFS, JSON.stringify({ ...loadPrefs(), ...p })); } catch (_) { /* storage blocked */ } };
 
+// The sound switches, written into the prompt: an H3 prompt's own sections are rewritten where it has them, otherwise
+// a line is added at the end.
+export function applySound(prompt, o = {}) {
+  let p = String(prompt || "");
+  const section = (tag, text) => {
+    const re = new RegExp(`(<${tag}>)([\\s\\S]*?)(</${tag}>)`, "i");
+    if (re.test(p)) { p = p.replace(re, `$1\n${text}\n$3`); return true; }
+    return false;
+  };
+  const lines = [];
+  if (o.ambience) {
+    section("non_diegetic_music", "N/A");
+    if (!section("overall_soundscape", "Only quiet, steady room tone. No music, no voices, no sound effects.")) lines.push("Sound: only quiet room tone; no music, no voices, no sound effects.");
+    if (/<d>/i.test(p)) lines.push("Nobody speaks; any lines above are not spoken.");
+  } else {
+    if (o.noMusic) {
+      const had = section("non_diegetic_music", "N/A");
+      const m = /<overall_soundscape>([\s\S]*?)<\/overall_soundscape>/i.exec(p);
+      if (m && /music|song|score|melod/i.test(m[1])) section("overall_soundscape", `${m[1].trim()} No music.`);
+      else if (!had) lines.push("No music.");
+    }
+    if (o.noSpeech) lines.push("Nobody speaks: no dialogue, no voices.");
+    if (o.noFx) {
+      const m = /<overall_soundscape>([\s\S]*?)<\/overall_soundscape>/i.exec(p);
+      if (m) section("overall_soundscape", `${m[1].trim()} Only ambience and voices: no sound effects.`);
+      else lines.push("No sound effects: only ambience and voices.");
+    }
+  }
+  return lines.length ? `${p.trimEnd()}\n${lines.join(" ")}` : p;
+}
+
 export const MODE_LABEL = { new: "New shot", extend: "Extend", prepend: "Prepend", bridge: "Bridge", replace: "Replace", fill: "Fill gap", loop: "Loop" };
 
 // Which clips a mode pins, from where the user asked. Returns {left, right, anchor, trackId, gap} or a reason.
@@ -186,6 +217,14 @@ export async function openGenerate(app, mode, where, preset = {}) {
   })() : null;
   const promptBox = el("textarea.rgprompt", { rows: 10, spellcheck: false });
   const promptNote = el("div.dim.small");
+  // sound switches: applied to the prompt as it's sent (the box keeps what you wrote)
+  const soundPrefs = loadPrefs().sound || {};
+  const sndBox = (key, label, title) => { const i = el("input", { type: "checkbox", checked: !!soundPrefs[key] }); i.dataset.key = key; return el("label.snd", { title }, i, label); };
+  const soundRow = el("div.sound-row", {}, sndBox("noMusic", "No music", "Clears the prompt's music section (or adds a line saying so)"),
+    sndBox("noSpeech", "No speech", "Nobody speaks: adds a line saying so (dialogue in the prompt is still sent: take it out if it's there)"),
+    sndBox("ambience", "Ambience only", "Only quiet room tone: no music, voices or sound effects"),
+    sndBox("noFx", "No sound effects", "Keeps the soundscape to ambience and voices"));
+  const soundFlags = () => Object.fromEntries([...soundRow.querySelectorAll("input")].map(i => [i.dataset.key, i.checked]));
   const joinBox = el("div.joincheck", { hidden: true });
   const error = el("div.warn");
   const addonNote = status.h3?.installed || fresh ? null : el("div.warn", { style: { marginBottom: "8px" } },
@@ -209,6 +248,7 @@ export async function openGenerate(app, mode, where, preset = {}) {
     field("Size", sizeSel, sizeNote),
     field("Seed", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seedSel, seedInput)),
     field("Prompt", promptBox, promptNote, joinBox),
+    field("Sound", soundRow),
     error);
   const m = modal({ title: `${MODE_LABEL[mode]}: generate in WanGP`, body, buttons: ["spacer", { label: "Cancel" }, { label: "Queue in WanGP", primary: true, id: "btnGenGo", action: () => { submit(); return false; } }] });
   m.box.classList.add("wide");
@@ -351,8 +391,8 @@ export async function openGenerate(app, mode, where, preset = {}) {
       seed = parseInt(seedInput.value, 10);
       if (!Number.isFinite(seed) || seed < 0) { error.textContent = "Enter a seed of 0 or more"; return; }
     }
-    const req = { ...request(), seed, prompt: promptBox.value };
-    savePrefs({ size: sizeSel.value, window: req.window, leaveMode: req.leaveMode, leaveModeV2: true, arriveMode: req.arriveMode, crossfade: req.crossfade, joinMatch: req.joinMatch, splitWindows: splitWindows.checked, windowJoin: windowJoin.checked, sliding: sliding.checked, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
+    const req = { ...request(), seed, prompt: applySound(promptBox.value, soundFlags()) };
+    savePrefs({ sound: soundFlags(), size: sizeSel.value, window: req.window, leaveMode: req.leaveMode, leaveModeV2: true, arriveMode: req.arriveMode, crossfade: req.crossfade, joinMatch: req.joinMatch, splitWindows: splitWindows.checked, windowJoin: windowJoin.checked, sliding: sliding.checked, newSeconds: s.gap || s.replace || fresh ? prefs.newSeconds : req.newSeconds,
       freshSeconds: fresh && !s.target ? req.newSeconds : prefs.freshSeconds, keepCut: keepCut.checked, carryAudio: carryAudio.checked,
       useCurrent: req.useCurrent, seed: seedSel.value === "custom" ? "custom" : "new", customSeed: seedInput.value });
     go.disabled = true;

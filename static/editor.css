@@ -507,3 +507,10 @@ body.picking #viewerStage, body.picking #previewCanvas { cursor: crosshair !impo
   background: color-mix(in srgb, #ff7a7a 14%, transparent); border: 1px solid color-mix(in srgb, #ff7a7a 45%, transparent); color: #ffb3b3; font-size: 12px; }
 .missing-bar[hidden] { display: none; }
 .media-item .busy button { pointer-events: auto; }
+.sound-row { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.sound-row .snd { display: flex; align-items: center; gap: 5px; font-size: 12px; color: inherit; }
+/* settings drift */
+.drift-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow: auto; }
+.drift-item { display: grid; grid-template-columns: 180px 1fr; gap: 10px; padding: 6px 8px; border-radius: 6px; background: var(--bg); font-size: 12px; }
+.drift-name { cursor: pointer; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.drift-name:hover { color: var(--accent); }

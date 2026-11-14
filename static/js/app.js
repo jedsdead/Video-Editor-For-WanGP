@@ -9,7 +9,7 @@ import { Docks, PLACE_NAMES } from "./docks.js";
 import { openNormalise, openDuck, audioClipsOf } from "./audiotools.js";
 import { CaptionsPanel } from "./captions.js";
 import { exportInterchange, collectProject, openCollected } from "./handoff.js";
-import { blockDialog, generateBlock, generateAll, stopAll, generatingAll, planFor } from "./blocks.js";
+import { blockDialog, generateBlock, generateAll, stopAll, generatingAll, planFor, openDrift } from "./blocks.js";
 import { MediaBin } from "./mediabin.js";
 import { Inspector } from "./inspector.js";
 import { ColourPanel } from "./colour.js";
@@ -467,6 +467,14 @@ function menuItems(name) {
     { label: "Reverse selected clips", kbd: "Shift+R", action: toggleReverse },
     { label: "Add title at playhead", kbd: "Shift+T", action: () => app.effects.addGenerator(M.TITLE_MEDIA.id) },
     { label: "Detect shots in selected clip…", kbd: "Shift+D", action: detectShots },
+    { label: "Compare clips with current WanGP settings…", title: "Which generated clips were made with different settings (model, steps, LoRAs…) than the Media Generator has now", action: () => openDrift(app) },
+    { label: "Insert gap at playhead…", title: "Move everything from the playhead on later (clips running through it are split)", action: async () => {
+      const v = await prompt_("Insert gap at playhead", "Seconds of gap", "2");
+      const sec = parseFloat(v);
+      if (!Number.isFinite(sec) || sec <= 0) return;
+      M.edit("Insert gap", () => M.insertGap(state.playhead, sec));
+      if (P().magnetic) toast("Magnetic mode closes gaps on V1: turn it off (M) to keep a gap there", "warn", 6000);
+    } },
     { label: "Captions…", action: () => app.docks.show("captions") },
     generatingAll() ? { label: "Stop Generate all", action: stopAll } : { label: `Generate all blocks${M.blocks().length ? ` (${M.blocks().length})` : ""}`, disabled: !M.blocks().length, action: () => generateAll(app) },
     { label: "Normalise loudness of selected clips…", action: () => openNormalise(app) },
