@@ -63,12 +63,17 @@ export function pinProblem(clip) {
 const endSource = (clip) => Math.max(clip.in, clip.out);     // forward clips only (see pinProblem)
 const startSource = (clip) => Math.min(clip.in, clip.out);
 
-export async function openGenerate(app, mode, where) {
-  if (!P()) return;
+// preset: {prompt, seconds, blockId, auto} — a block to generate: its prompt and length, and with auto the dialog
+// queues itself once it's ready without being shown (it's shown instead if something needs looking at). With auto
+// the returned promise gives the job id, or null when it didn't queue.
+export async function openGenerate(app, mode, where, preset = {}) {
+  if (!P()) return null;
   const s = sides(mode, where);
-  if (s.reason) { toast(s.reason, "warn"); return; }
+  if (s.reason) { toast(s.reason, "warn"); return null; }
   const problem = pinProblem(s.left) || pinProblem(s.right);
-  if (problem) { toast(`${problem}, so its frames can't be pinned`, "warn"); return; }
+  if (problem) { toast(`${problem}, so its frames can't be pinned`, "warn"); return null; }
+  let resolveAuto = () => {};
+  const autoDone = new Promise(r => { resolveAuto = r; });
   const prefs = loadPrefs();
   const leftItem = s.left && M.mediaOf(s.left), rightItem = s.right && M.mediaOf(s.right);
   const replaceItem = s.replace && P().media[M.originalOf(s.replace).mediaId];
@@ -118,7 +123,7 @@ export async function openGenerate(app, mode, where) {
   arriveSel.value = prefs.arriveMode || "both";
   const modeNote = el("div.dim.small", {}, "Motion context hands H3 the frames before the cut as history, the way Wan2GP continues a sliding window. Masked holds the neighbour's frames inside the run with a denoise mask (WanGP's Denoise Control Video), so they are never re-drawn and the join has one rendering. Motion + masked does both: the earlier frames go in as history, the last ones are held. Pinned keyframes are re-drawn by the model and trimmed off.");
   const modeRow = (label, sel) => el("div", { style: { display: "flex", gap: "8px", alignItems: "center", margin: "6px 0 2px" } }, el("span.dim.small", { style: { width: "92px" } }, label), sel);
-  const seconds = el("input", { type: "number", min: 0.5, max: fresh || !s.right ? 120 : 19, step: 0.1, value: (+defaultSeconds).toFixed(2), style: { width: "76px" } });
+  const seconds = el("input", { type: "number", min: 0.5, max: fresh || !s.right ? 120 : 19, step: 0.1, value: (+(preset.seconds || defaultSeconds)).toFixed(2), style: { width: "76px" } });
   const lengthNote = el("div.dim.small");
   const pinsBox = el("div.gpins");
   const keepCut = el("input", { type: "checkbox", checked: !!prefs.keepCut });
@@ -210,6 +215,9 @@ export async function openGenerate(app, mode, where) {
   const go = m.box.querySelector("#btnGenGo");
 
   let info = null, promptEdited = false;
+  if (preset.prompt) { promptBox.value = preset.prompt; promptEdited = true; }
+  if (preset.auto) m.box.parentElement.style.display = "none";
+  let autoTried = false;
   // Join check: where the run continues a clip (or a window continues the one before), the prompt's first cut or line
   // must come after the frames it can't change, and the clip it leaves shouldn't be cut in the middle of a word.
   const joinCheck = () => {
@@ -263,6 +271,8 @@ export async function openGenerate(app, mode, where) {
   });
 
   const request = () => ({
+    blockId: preset.blockId || null,
+    blockSeconds: preset.blockId ? (+preset.seconds || null) : null,
     project: P().name, mode, trackId: s.trackId, clipId: s.anchor?.id,
     left: s.left ? { clipId: s.left.id, mediaId: s.left.mediaId, cut: endSource(s.left), pixel: keepCut.checked, audio: carryAudio.checked } : null,
     right: s.right ? { clipId: s.right.id, mediaId: s.right.mediaId, cut: startSource(s.right), pixel: keepCut.checked, audio: carryAudio.checked } : null,
@@ -313,6 +323,12 @@ export async function openGenerate(app, mode, where) {
     } catch (e) { info = null; error.textContent = e.message; }
     joinCheck();
     update();
+    // a block run: queue straight away when it's ready, or show the dialog to say why not
+    if (preset.auto && !autoTried) {
+      autoTried = true;
+      if (info && !go.disabled) submit();
+      else { m.box.parentElement.style.display = ""; resolveAuto(null); }
+    }
   }, 200);
 
   const update = () => {
@@ -342,14 +358,19 @@ export async function openGenerate(app, mode, where) {
     go.disabled = true;
     try {
       const job = await api("api/gen/submit", { method: "POST", body: req });
-      toast(`${MODE_LABEL[mode]} queued in WanGP (seed ${job.seed})`);
+      if (!preset.auto) toast(`${MODE_LABEL[mode]} queued in WanGP (seed ${job.seed})`);
       m.close();
       app.regen.poll();
-    } catch (e) { error.textContent = e.message; go.disabled = false; }
+      resolveAuto(job.id);
+    } catch (e) {
+      error.textContent = e.message; go.disabled = false;
+      if (preset.auto) { m.box.parentElement.style.display = ""; resolveAuto(null); }
+    }
   }
 
   update();
   prepare();
+  return preset.auto ? autoDone : null;
 }
 
 // Reroll: the same generation again with a new seed (from a generated clip's lineage).

@@ -124,7 +124,9 @@ export class RegenJobs {
     // on the file's own frame grid: a duration rounded to 0.1 ms would otherwise put every later cut a hair off it
     const ff = item.fps || M.fps(), onGrid = (x) => Math.round(x * ff) / ff;
     const inT = onGrid(Math.min(job.trimHead || 0, Math.max(0, dur - 1 / ff)));
-    const outT = Math.max(inT + 1 / ff, onGrid(dur - (job.trimTail || 0)));
+    let outT = Math.max(inT + 1 / ff, onGrid(dur - (job.trimTail || 0)));
+    // made from a block: as long as the block (the rest of the footage is still there to drag out)
+    if (job.request?.blockSeconds) outT = Math.max(inT + 1 / ff, Math.min(outT, inT + onGrid(+job.request.blockSeconds)));
     const length = outT - inT;
     const left = job.left && M.getClip(job.left.clipId), right = job.right && M.getClip(job.right.clipId);
     const joins = (job.left?.cut != null || job.right?.cut != null) ? {
@@ -133,6 +135,11 @@ export class RegenJobs {
     const lineage = { mode: job.mode, parent: job.left?.clipId || null, child: job.right?.clipId || null, jobId: job.id, seed: job.seed, pins: job.pins, joins };
     let target = null, placedNote = "", placedNew = false;
     const targetId = job.request?.targetId;
+    // a block this was generated from makes way for it
+    const blockId = job.request?.blockId;
+    const blockClip = blockId && M.getClip(blockId)?.block ? M.getClip(blockId) : null;
+    const blockRoom = blockClip ? M.clipDur(blockClip) : 0;     // the space it held: the new clip goes into it
+    if (blockClip) M.edit("Generated block", () => M.deleteClips([blockId], false), { coalesceKey: live ? `live-${job.id}` : null });
     const liveClip = P().clips.find(c => c.live === job.id && M.trackKind(c.trackId) === "video");
     if (liveClip) {
       M.edit(live ? "Live generation" : `Add ${job.mode}`, () => {
@@ -177,7 +184,7 @@ export class RegenJobs {
           return;
         }
         const L = left && M.getClip(left.id), R = right && M.getClip(right.id);
-        let at, room = 0;
+        let at, room = blockRoom;
         if (job.mode === "new") {
           at = Math.max(0, +job.request?.at || 0);
           const gap = M.gapAt(job.trackId, at);

@@ -141,7 +141,7 @@ class Timeline:
 
     def __init__(self, project, registry):
         # clips that are turned off stay out of the render (and transitions that touch them)
-        off = {c.get("id") for c in project.get("clips", []) if c.get("disabled")}
+        off = {c.get("id") for c in project.get("clips", []) if c.get("disabled") or c.get("block")}   # turned off, or a block to generate
         if off:
             project = {**project, "clips": [c for c in project.get("clips", []) if c.get("id") not in off],
                        "transitions": [t for t in project.get("transitions", []) if t.get("a") not in off and t.get("b") not in off]}

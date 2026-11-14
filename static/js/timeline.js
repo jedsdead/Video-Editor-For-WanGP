@@ -509,6 +509,7 @@ export class Timeline {
     if (labelCol) { ctx.fillStyle = labelCol + "33"; ctx.fillRect(x0, top + headH, w, h - headH); }
     const badges = [];
     if (clip.disabled) badges.push("⊘ off");
+    if (clip.block) badges.push("▶ to generate");
     if (clip.linkId) badges.push("🔗");
     if (M.hasSpeedKeys(clip)) badges.push(M.keysOf(clip, "speed").every(k => k.v <= 1e-6) ? "❄ freeze" : "⏱ ramp");
     else if (Math.abs((clip.speed || 1) - 1) > 1e-6 && !M.isStillKind(item.kind)) badges.push(`${Math.round(clip.speed * 100)}%`);
@@ -537,6 +538,16 @@ export class Timeline {
     if (clip.fadeIn > 0) fadeShape(x0, clip.fadeIn, clip.fadeInCurve || "linear", 1);
     if (clip.fadeOut > 0) fadeShape(x1, clip.fadeOut, clip.fadeOutCurve || "linear", -1);
     if (!member) this.paintKeys(ctx, clip, row, x0, x1, top, h, headH, selected);
+    if (clip.block) {
+      // a block to generate: a dashed outline round a dark body, with the start of its prompt
+      ctx.fillStyle = "rgba(20,22,30,.82)"; ctx.fillRect(x0, top + headH, w, h - headH);
+      ctx.save(); ctx.setLineDash([5, 4]); ctx.strokeStyle = labelCol || "#8e4ec6"; ctx.lineWidth = 1.5;
+      ctx.strokeRect(x0 + 1, top + 1, w - 2, h - 2); ctx.restore();
+      const text = (clip.block.prompt || "(no prompt yet: double-click to write one)").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      ctx.save(); ctx.beginPath(); ctx.rect(x0, top + headH, w, h - headH); ctx.clip();
+      ctx.fillStyle = "rgba(220,224,232,.75)"; ctx.font = "11px sans-serif"; ctx.fillText(text.slice(0, Math.max(0, Math.floor(w / 6))), Math.max(x0, 0) + 5, top + headH + 14);
+      ctx.restore();
+    }
     if (clip.disabled) {
       // turned off: dimmed and hatched
       ctx.fillStyle = "rgba(10,11,14,.6)"; ctx.fillRect(x0, top, w, h);
@@ -1154,6 +1165,7 @@ export class Timeline {
       M.select([h.clip.id]);
       return;
     }
+    if (h.area === "clip" && h.clip.block) { bus.emit("edit-block", h.clip.id); return; }
     if (h.area === "clip") bus.emit("open-panel", h.row.kind === "video" ? "inspector" : "inspector");
     if (h.area === "transition") bus.emit("open-panel", "inspector");
   }

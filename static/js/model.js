@@ -879,6 +879,43 @@ export function allTimelineClips() {
   return [...P().clips, ...(P().timelines || []).flatMap(t => t.data?.clips || [])];
 }
 
+// ---- blocks: shots waiting to be generated ----
+// A block is a title clip with a `block` field ({prompt, cont}): it holds a place and a length on a video track, shows
+// as a slate in the viewer, never exports, and is replaced by the generation made from it.
+function slate(prompt, n) {
+  const words = String(prompt || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  const first = words.slice(0, 140) + (words.length > 140 ? "…" : "");
+  return { ...defaultTitle(), text: `TO GENERATE${n ? ` · ${n}` : ""}\n${first || "(no prompt yet)"}`, size: Math.max(18, Math.round((P().settings.height || 720) * 0.035)),
+           bold: false, color: "#d8dbe2", align: "left", shadow: { ...defaultTitle().shadow, on: false },
+           box: { on: true, color: "#20242c", opacity: 0.85, padding: 18 } };
+}
+export function blocks() {
+  return P().clips.filter(c => c.block && trackKind(c.trackId) === "video").sort((a, b) => a.start - b.start || videoTracks().findIndex(t => t.id === a.trackId) - videoTracks().findIndex(t => t.id === b.trackId));
+}
+export function addBlock(trackId, start, { prompt = "", seconds = 5, cont = true } = {}) {
+  const [clip] = newClipsForMedia(P().media[TITLE_MEDIA.id] || TITLE_MEDIA, trackId, null, snapFrame(Math.max(0, start)));
+  clip.out = Math.max(frameDur(), snapFrame(seconds));
+  clip.block = { prompt, cont };
+  clip.name = "To generate";
+  clip.label = clip.label || "purple";
+  clip.title = slate(prompt);
+  P().clips.push(clip);
+  return clip;
+}
+export function updateBlock(id, { prompt, seconds, cont }) {
+  const c = getClip(id);
+  if (!c?.block) return;
+  if (prompt !== undefined) c.block.prompt = prompt;
+  if (cont !== undefined) c.block.cont = cont;
+  if (seconds !== undefined) c.out = c.in + Math.max(frameDur(), snapFrame(seconds));
+  c.title = slate(c.block.prompt);
+}
+// The clip a block would continue from: the real clip ending where the block starts, on its track.
+export function blockLead(block) {
+  // (a generation a few frames short of its block still counts)
+  return clipsOn(block.trackId).filter(c => !c.block && clipEnd(c) <= block.start + 1e-3 && clipEnd(c) > block.start - 0.25).pop() || null;
+}
+
 // ---- clip state ----
 // Clip colour labels (the timeline tints a labelled clip's header with its colour).
 export const CLIP_COLOURS = [["red", "#e5484d"], ["orange", "#f76b15"], ["yellow", "#e2b100"], ["green", "#30a46c"],
@@ -1436,7 +1473,7 @@ export function removeTake(clipId, index) {
 
 // The empty stretch of a track around time t: {start, end, prev, next}, or null when t is on a clip.
 export function gapAt(trackId, t) {
-  const list = clipsOn(trackId);
+  const list = clipsOn(trackId).filter(c => !c.block);   // blocks waiting to be generated hold their place, not a clip's
   if (list.some(c => c.start <= t + EPS && clipEnd(c) > t + EPS)) return null;
   const prev = list.filter(c => clipEnd(c) <= t + EPS).pop() || null;
   const next = list.find(c => c.start >= t - EPS) || null;

@@ -9,6 +9,7 @@ import { Docks, PLACE_NAMES } from "./docks.js";
 import { openNormalise, openDuck, audioClipsOf } from "./audiotools.js";
 import { CaptionsPanel } from "./captions.js";
 import { exportInterchange, collectProject, openCollected } from "./handoff.js";
+import { blockDialog, generateBlock, generateAll, stopAll, generatingAll, planFor } from "./blocks.js";
 import { MediaBin } from "./mediabin.js";
 import { Inspector } from "./inspector.js";
 import { ColourPanel } from "./colour.js";
@@ -467,6 +468,7 @@ function menuItems(name) {
     { label: "Add title at playhead", kbd: "Shift+T", action: () => app.effects.addGenerator(M.TITLE_MEDIA.id) },
     { label: "Detect shots in selected clip…", kbd: "Shift+D", action: detectShots },
     { label: "Captions…", action: () => app.docks.show("captions") },
+    generatingAll() ? { label: "Stop Generate all", action: stopAll } : { label: `Generate all blocks${M.blocks().length ? ` (${M.blocks().length})` : ""}`, disabled: !M.blocks().length, action: () => generateAll(app) },
     { label: "Normalise loudness of selected clips…", action: () => openNormalise(app) },
     { label: "Duck selected clips under dialogue…", action: () => openDuck(app) },
     { label: "Turn selected clips off / on", kbd: "Shift+E", action: toggleEnabled },
@@ -606,6 +608,22 @@ function contextMenu(x, y, hit) {
     ]);
     return;
   }
+  if (hit.area === "clip" && hit.clip.block) {
+    // a block waiting to be generated
+    const clip = hit.clip, plan = planFor(clip);
+    showMenu(x, y, [
+      { head: plan.mode === "extend" ? `Block: continues out of ${plan.lead.name || "the clip before"}`
+        : clip.block.cont !== false && M.clipsOn(clip.trackId).some(c => c.block && Math.abs(M.clipEnd(c) - clip.start) < 1e-3) ? "Block: continues out of the block before, once that's generated"
+        : "Block: a new shot" },
+      { label: "Generate this block…", action: () => generateBlock(app, clip) },
+      { label: "Edit block…", action: () => blockDialog(app, { block: clip }) },
+      "-",
+      generatingAll() ? { label: "Stop Generate all", action: stopAll } : { label: `Generate all blocks (${M.blocks().length})`, action: () => generateAll(app) },
+      "-",
+      { label: "Delete block", kbd: "Del", action: () => deleteSelection(false) },
+    ]);
+    return;
+  }
   if (hit.area === "clip") {
     const clip = hit.clip;
     showMenu(x, y, [
@@ -659,8 +677,9 @@ function contextMenu(x, y, hit) {
     const fill = gap && (gap.prev || gap.next) ? { label: gap.prev && gap.next ? "Fill gap with a generation, joining both clips…" : "Fill with a generation…",
       action: () => openGenerate(app, "fill", { trackId: hit.row.track.id, t: hit.t }) } : null;
     const fresh = hit.row && hit.row.kind === "video" && gap ? { label: "Generate a new shot here…", action: () => openGenerate(app, "new", { trackId: hit.row.track.id, t: hit.t }) } : null;
+    const block = hit.row && hit.row.kind === "video" && gap ? { label: "Add a block to generate here…", title: "Plan a shot here (a prompt and a length) and generate it later, or with all the others", action: () => blockDialog(app, { trackId: hit.row.track.id, t: hit.t }) } : null;
     showMenu(x, y, [
-      fresh, fill, fresh || fill ? "-" : null,
+      fresh, fill, block, fresh || fill || block ? "-" : null,
       { label: "Paste at playhead", disabled: !state.clipboard, action: paste },
       state.range ? { label: "Delete range", action: () => deleteSelection(false) } : null,
       state.range ? { label: "Ripple delete range", action: () => deleteSelection(true) } : null,
@@ -873,6 +892,7 @@ async function main() {
   $("tlSelect").onchange = (e) => openTimeline(e.target.value);
   $("btnTlMenu").onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); timelineMenu(r.left, r.bottom + 2); };
   for (const ev of ["project", "change"]) bus.on(ev, () => syncTimelines());
+  bus.on("edit-block", (id) => { const c = M.getClip(id); if (c?.block) blockDialog(app, { block: c }); });
   $("tglSnap").onclick = toggleSnap;
   $("tglMagnetic").onclick = toggleMagnetic;
   $("tglLink").onclick = toggleLinked;
