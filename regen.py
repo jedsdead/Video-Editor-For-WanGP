@@ -1152,6 +1152,11 @@ class RegenService:
         fps = float(item.get("fps") or 24)
         file_frames = int(round(float(item.get("duration") or 0) * fps))
         cuts, source = [], None
+        # each window's full render, when the add-on kept them: exact cuts, and a file per window
+        renders = self._window_renders(item, fps, file_frames)
+        if renders:
+            cuts = [r["endFrame"] for r in renders[:-1]]
+            return {"cuts": [c / fps for c in cuts], "frames": cuts, "windows": len(renders), "source": "renders", "renders": renders}
         try:
             with open(os.path.join(self.registry.item_dir(item["id"]), "windows.json"), encoding="utf-8") as handle:
                 saved = [float(t) for t in json.load(handle).get("cuts") or []]
@@ -1185,6 +1190,31 @@ class RegenService:
                 source = "settings"
         cuts = sorted({c for c in cuts if 2 <= c <= file_frames - 2})
         return {"cuts": [c / fps for c in cuts], "frames": cuts, "windows": len(cuts) + 1, "source": source}
+
+    def _window_renders(self, item, fps, file_frames):
+        """The add-on's full render of each sliding window of this file, in order: [{path, offset (seconds of the file
+        where the render's first frame falls), start / end (the part of the file that window makes), endFrame}]."""
+        try:
+            root = getattr(getattr(self.latents, "own", None), "root", None)
+            if not root:
+                return []
+            folder = os.path.join(root, "windows", self._sha(item))
+            with open(os.path.join(folder, "windows.json"), encoding="utf-8") as handle:
+                saved = json.load(handle)
+        except (OSError, ValueError, TypeError):
+            return []
+        wins = sorted(saved.get("windows") or [], key=lambda w: int(w["offset"]))
+        out, start = [], 0
+        for i, w in enumerate(wins):
+            path = os.path.join(folder, w["render"])
+            if not os.path.isfile(path):
+                return []
+            end = file_frames if i == len(wins) - 1 else int(w["offset"]) + int(w["valid"])
+            if end <= start:
+                return []
+            out.append({"path": path, "offset": int(w["offset"]) / fps, "start": start / fps, "end": end / fps, "endFrame": end, "frames": int(w.get("frames") or 0)})
+            start = end
+        return out if len(out) > 1 else []
 
     def compose_prepare(self, req):
         info, _, _ = self._compose(req)

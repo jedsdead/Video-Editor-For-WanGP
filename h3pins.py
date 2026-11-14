@@ -214,7 +214,11 @@ class LatentStore:
         for name in os.listdir(self.root):
             if name.endswith(".pt"):
                 path = os.path.join(self.root, name)
-                entries.append((os.path.getmtime(path), os.path.getsize(path), name[:-3]))
+                size = os.path.getsize(path)
+                wdir = os.path.join(self.root, "windows", name[:-3])      # its window renders count too
+                if os.path.isdir(wdir):
+                    size += sum(os.path.getsize(os.path.join(wdir, f)) for f in os.listdir(wdir))
+                entries.append((os.path.getmtime(path), size, name[:-3]))
         total = sum(e[1] for e in entries)
         for _, size, sha in sorted(entries):
             if total <= self.limit:
@@ -226,6 +230,9 @@ class LatentStore:
                     os.remove(p)
                 except OSError:
                     pass
+            # the generation's window renders go with its latents
+            import shutil
+            shutil.rmtree(os.path.join(self.root, "windows", sha), ignore_errors=True)
             total -= size
 
     def stats(self):
@@ -617,6 +624,115 @@ def _plan_pins(pipeline, spec, kwargs):
 
 # --------------------------------------------------------------------------- patched pipeline methods
 
+# ------------------------------------------------------------------ full window renders
+# Each sliding window's whole render (its overlap with the window before, its new frames and the frames WanGP discards
+# from its end), saved beside the generation's latents, so the timeline can give every window a clip of its own that
+# can be dragged out to everything that window made. The first window is only written once a second one comes (a
+# one-window run writes nothing); WanGP holds every window's frames until it joins them, so keeping hold of it costs
+# little.
+KEEP_WINDOW_RENDERS = True
+WINDOWS_ROOT = None          # <data>/latents/windows (set when the add-on is installed)
+
+
+def _encode_window(x, audio, rate, fps, path):
+    """Write a window's frames (C, T, H, W: -1..1 floats or uint8) and its sound to an mp4, a frame at a time."""
+    import torch
+    import wave
+    c, t, h, w = x.shape
+    wav = None
+    if audio is not None:
+        a = audio.detach().to("cpu").float().numpy() if hasattr(audio, "detach") else np.asarray(audio, dtype=np.float32)
+        if a.ndim == 1:
+            a = a[None]
+        a = np.clip(a[:, :int(round(t / fps * rate))], -1, 1)
+        wav = path + ".wav"
+        with wave.open(wav, "wb") as out:
+            out.setnchannels(a.shape[0]); out.setsampwidth(2); out.setframerate(int(rate))
+            out.writeframes((a.T * 32767).astype(np.int16).tobytes())
+    tmp = path + ".part.mp4"
+    args = [_ffmpeg(), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-framerate", f"{fps}", "-i", "-"]
+    if wav:
+        args += ["-i", wav]
+    args += ["-map", "0:v:0"] + (["-map", "1:a:0", "-c:a", "aac", "-b:a", "192k"] if wav else [])
+    args += ["-vf", f"crop={w - w % 2}:{h - h % 2}:0:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-pix_fmt", "yuv420p",
+             "-movflags", "+faststart", tmp]
+    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        for i in range(t):
+            f = x[:, i]
+            if f.dtype != torch.uint8:
+                f = f.float().clamp(-1, 1).add(1).mul(127.5).round().to(torch.uint8)
+            proc.stdin.write(f[:3].permute(1, 2, 0).contiguous().cpu().numpy().tobytes())
+        proc.stdin.close()
+        err = proc.stderr.read()
+        proc.wait()
+    finally:
+        if wav and os.path.isfile(wav):
+            os.remove(wav)
+    if proc.returncode != 0 or not os.path.isfile(tmp):
+        raise RuntimeError((err or b"").decode("utf-8", "replace").strip()[-200:])
+    os.replace(tmp, path)
+
+
+def _keep_window_render(job, record, result, window_no):
+    if not KEEP_WINDOW_RENDERS or WINDOWS_ROOT is None or not isinstance(result, dict):
+        return
+    x = result.get("x")
+    if not hasattr(x, "dim") or x.dim() != 4 or result.get("audio_sampling_rate") is None and x.shape[0] not in (3, 4):
+        return
+    full = job.setdefault("full", [])
+    full.append({"no": int(window_no or len(full) + 1), "x": x, "audio": result.get("audio"),
+                 "rate": int(result.get("audio_sampling_rate") or 48000), "fps": float(record.get("fps") or 24)})
+    if len(full) < 2:
+        return
+    folder = job.setdefault("full_dir", os.path.join(WINDOWS_ROOT, "_pending", f"{os.getpid()}_{id(job)}_{int(time.time())}"))
+    os.makedirs(folder, exist_ok=True)
+    for entry in full:
+        if entry.get("path") or entry.get("x") is None:
+            continue
+        path = os.path.join(folder, f"window_{entry['no']:02d}.mp4")
+        entry["fp"] = fingerprints(entry["x"])
+        entry["frames"] = int(entry["x"].shape[1])
+        _encode_window(entry["x"], entry["audio"], entry["rate"], entry["fps"], path)
+        entry.update(path=path, x=None, audio=None)
+        _count("window_render")
+
+
+def _finish_window_renders(job, path, file_fp, sha):
+    """File the windows' renders under the generation's file: windows/<sha>/window_NN.mp4 + windows.json with where
+    each window's first frame sits in the file and how many of its frames the file uses."""
+    import shutil
+    full = [e for e in job.get("full") or [] if e.get("path")]
+    folder = job.get("full_dir")
+    try:
+        if len(full) < 2 or file_fp is None:
+            return
+        target = os.path.join(WINDOWS_ROOT, sha)
+        os.makedirs(target, exist_ok=True)
+        windows = []
+        for e in full:
+            found = locate(e["fp"], file_fp)
+            if found is None:
+                continue
+            offset, valid = found
+            name = os.path.basename(e["path"])
+            shutil.move(e["path"], os.path.join(target, name))
+            windows.append({"no": e["no"], "render": name, "offset": int(offset), "valid": int(valid), "frames": e["frames"], "fps": e["fps"]})
+        if len(windows) < 2:
+            shutil.rmtree(target, ignore_errors=True)
+            return
+        with open(os.path.join(target, "windows.json"), "w", encoding="utf-8") as handle:
+            json.dump({"video_path": path, "sha": sha, "file_frames": int(len(file_fp)), "windows": windows, "created": time.time()}, handle, indent=1)
+        _log(f"kept the full render of each of its {len(windows)} sliding windows")
+    except Exception as error:
+        _log(f"window renders not kept: {error!r}")
+    finally:
+        if folder:
+            shutil.rmtree(folder, ignore_errors=True)
+        job["full"] = []
+
+
 def _impl_generate(self, original, *args, **kwargs):
     if args or kwargs.get("refinement_mode") or kwargs.get("image_mode"):
         return original(self, *args, **kwargs)
@@ -658,6 +774,11 @@ def _impl_generate(self, original, *args, **kwargs):
         _GEN.reset(token)
         if restore:
             restore()
+    if job is not None:
+        try:
+            _keep_window_render(job, record, result, window_no)
+        except Exception as error:
+            _log(f"window {window_no}: its full render wasn't kept ({error!r})")
     if job is not None and record["video"] is not None:
         with _LOCK:
             size = sum(t.numel() * t.element_size() for t in (record["video"], record["audio"], record["p1"]) if t is not None)
@@ -1301,6 +1422,17 @@ def _wrap_record_file_metadata(original):
 def _finish(job):
     """Write the sidecar for the job's final file (the last one recorded)."""
     _count("finish")
+    if len([e for e in job.get("full") or [] if e.get("path")]) >= 2 and job["saves"]:
+        try:
+            vpath, vfp, _ = job["saves"][-1]
+            if os.path.isfile(vpath):
+                _finish_window_renders(job, vpath, vfp if vfp is not None else file_fingerprints(vpath), sha256_file(vpath))
+        except Exception as error:
+            _log(f"window renders not kept: {error!r}")
+    elif job.get("full_dir"):
+        import shutil
+        shutil.rmtree(job["full_dir"], ignore_errors=True)
+    job["full"] = []
     if not job["saves"] or not job["windows"] or STORE is None:
         if job["windows"] and not job["saves"]:
             _log("latents not saved: the generation's video file was not seen being recorded")
@@ -1483,6 +1615,8 @@ def install(plugin, data_root):
         return _STATE["problems"]
     _STATE["problems"] = []
     STORE = open_store(data_root)
+    global WINDOWS_ROOT
+    WINDOWS_ROOT = os.path.join(data_root, "latents", "windows")
     if STORE.carry:
         _log(f"using H3 Latent Carry's saved latents too ({STORE.carry.root})")
     setter = getattr(plugin, "_set_wgp_global_func", None)

@@ -241,8 +241,35 @@ export class RegenJobs {
     if (!info.cuts.length) { if (!quiet) toast("This clip was made in one window", "warn"); return 0; }
     const live = M.getClip(clipId);
     if (!live) return 0;
-    const pieces = M.edit("Split at sliding windows", () => M.splitAtWindows(clipId, info.cuts));
-    if (!quiet) toast(pieces.length > 1 ? `Split into ${pieces.length} windows${info.source === "settings" ? " (worked out from its WanGP settings)" : ""}` : "No window boundary falls inside the clip", pieces.length > 1 ? "info" : "warn");
+    const name = (M.mediaOf(live)?.name || "clip").replace(/\.[^.]+$/, "");
+    const pieces = M.edit("Split at sliding windows", () => M.splitAtWindows(clipId, info.cuts), { coalesceKey: `split-${clipId}` });
+    // each window's own full render (kept by the add-on): every piece becomes a clip of its window's render, in the
+    // same place, which can be dragged out to everything that window made (its overlap and the frames WanGP dropped)
+    let own = 0;
+    if (pieces.length > 1 && info.renders?.length) {
+      try {
+        const res = await api("api/import", { method: "POST", body: { paths: info.renders.map(r => r.path) } });
+        const media = res.media || [];
+        if (media.length === info.renders.length) {
+          this.app.bin.register(media, null);
+          M.edit("Split at sliding windows", () => {
+            media.forEach((m, k) => { if (P().media[m.id]) P().media[m.id].name = `${name} · window ${k + 1}`; });
+            for (const piece of pieces) {
+              const c = M.getClip(piece.id);
+              if (!c) continue;
+              const mid = (Math.min(c.in, c.out) + Math.max(c.in, c.out)) / 2;
+              const k = info.renders.findIndex(r => mid >= r.start - 1e-6 && mid < r.end + 1e-6);
+              if (k < 0) continue;
+              const off = info.renders[k].offset;
+              M.replaceMedia(c.id, media[k].id, Math.min(c.in, c.out) - off, Math.max(c.in, c.out) - off);
+              c.window = { index: k + 1, of: info.renders.length };
+              own++;
+            }
+          }, { coalesceKey: `split-${clipId}` });
+        }
+      } catch (e) { console.warn("window renders", e); }
+    }
+    if (!quiet) toast(pieces.length > 1 ? `Split into ${pieces.length} windows${own ? ", each its own window's full render (drag an edge out for the rest of that window)" : info.source === "settings" ? " (worked out from its WanGP settings; the windows' full renders weren't kept for this one)" : " (the windows' full renders weren't kept for this one)"}` : "No window boundary falls inside the clip", pieces.length > 1 ? "info" : "warn");
     return pieces.length;
   }
 
