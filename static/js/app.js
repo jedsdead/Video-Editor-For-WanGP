@@ -1011,6 +1011,7 @@ async function main() {
   let page = "edit";
   try { page = localStorage.getItem("ve_page") || "edit"; } catch (_) { /* storage blocked */ }
   app.setPage(page);
+  window.veReady = true;
 }
 
-main().catch((e) => { console.error(e); toast(`Editor failed to start: ${e.message}`, "error", 10000); });
+main().catch((e) => { console.error(e); toast(`Editor failed to start: ${e.message}`, "error", 10000); throw e; });

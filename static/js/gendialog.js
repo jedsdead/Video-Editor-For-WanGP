@@ -33,7 +33,7 @@ export function applySound(prompt, o = {}) {
       const m = /<overall_soundscape>([\s\S]*?)<\/overall_soundscape>/i.exec(p);
       if (m && /music|song|score|melod/i.test(m[1])) {
         // the soundscape's sentences that mention music go; the rest stay
-        const kept = m[1].trim().split(/(?<=[.!?])\s+/).filter(x => !/music|song|score|melod/i.test(x));
+        const kept = (m[1].trim().match(/[^.!?]+[.!?]*/g) || []).map(x => x.trim()).filter(Boolean).filter(x => !/music|song|score|melod/i.test(x));
         section("overall_soundscape", `${kept.join(" ")}${kept.length ? " " : ""}No music.`);
       }
       else if (!had) lines.push("No music.");

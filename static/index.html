@@ -115,6 +115,22 @@
   <div id="modalLayer"></div>
   <div id="toasts"></div>
 </div>
+<script>
+// A module that fails to load or start leaves the editor blank: say what failed instead.
+(function () {
+  function show(msg) {
+    if (window.veReady || document.getElementById("ve-boot-error")) return;
+    var d = document.createElement("div");
+    d.id = "ve-boot-error";
+    d.style.cssText = "position:fixed;left:50%;top:40%;transform:translate(-50%,-50%);z-index:99999;max-width:720px;padding:16px 20px;border-radius:8px;background:#3a1d1d;color:#fff;font:13px/1.5 system-ui,sans-serif;white-space:pre-wrap;box-shadow:0 8px 30px #000a";
+    d.textContent = "The editor couldn't start:\n" + msg + "\n\nReload the page (Ctrl+Shift+R). If it keeps happening, send this message.";
+    document.body.appendChild(d);
+  }
+  window.addEventListener("error", function (e) { if (e.target !== window && !(e.target && e.target.tagName === "SCRIPT")) return; show((e.message || "a script failed to load") + (e.filename ? "\n" + e.filename.split("/").slice(-2).join("/") + ":" + e.lineno : "")); }, true);
+  window.addEventListener("unhandledrejection", function (e) { show(String(e.reason && (e.reason.stack || e.reason.message) || e.reason)); });
+  setTimeout(function () { show("It didn't finish loading within 60 seconds (the server may be busy, or a script didn't load)."); }, 60000);
+})();
+</script>
 <script type="module" src="static/js/app.js?v=__V__"></script>
 </body>
 </html>

@@ -31,7 +31,8 @@ class NoCacheStaticFiles(StaticFiles):
 
     async def get_response(self, path, scope):
         response = await super().get_response(path, scope)
-        response.headers["Cache-Control"] = "no-cache"
+        # scripts and styles are never kept: after an update, a page mixing old and new modules can't start
+        response.headers["Cache-Control"] = "no-store" if str(path).endswith((".js", ".css", ".html")) else "no-cache"
         return response
 
 
