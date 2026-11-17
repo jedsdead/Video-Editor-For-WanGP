@@ -278,13 +278,16 @@ export async function openRenderDialog(app, opts = {}) {
 // ---------------------------------------------------------------- generation size in the project inspector
 
 // WanGP's resolution groups: [name, the group's pixel cap, its 16:9 size, WanGP's own sizes by shape] (shared/resolutions.py).
-// A shape WanGP lists in the group is used as it is; the others are the closest size within the group's cap.
+// A shape WanGP lists in the group is used as it is. For the others: the largest size of exactly that shape on the grid
+// within the group's cap (2.40:1 → 768 × 320, 1536 × 640, 1920 × 800…), unless that falls well short of the group (under
+// 70% of its 16:9 size), then the closest size within the cap.
 export const GEN_BUDGETS = [
   ["320p", 448 * 448, [576, 320], { "16:9": [576, 320], "1:1": [448, 448] }],
   ["384p", 512 * 512, [672, 384], { "16:9": [672, 384], "1:1": [512, 512] }],
   ["480p", 832 * 624, [832, 480], { "16:9": [832, 480], "4:3": [832, 624], "1:1": [720, 720] }],
   ["540p", 960 * 544, [960, 544], { "16:9": [960, 544] }],
   ["720p", 1024 * 1024, [1280, 720], { "16:9": [1280, 720], "4:3": [1104, 832], "1:1": [1024, 1024], "21:9": [1280, 544] }],
+  ["768p (H3 native)", 1344 * 768, [1344, 768], { "16:9": [1344, 768] }],
   ["1080p", 1920 * 1088, [1920, 1088], { "16:9": [1920, 1088], "1:1": [1440, 1440], "3:2": [1536, 1024], "21:9": [1920, 832] }],
   ["1440p", 2560 * 1440, [2560, 1440], { "16:9": [2560, 1440], "4:3": [1920, 1440], "1:1": [1920, 1920], "3:2": [2160, 1440], "21:9": [2688, 1152] }]];
 export const GEN_SHAPES = [["16:9", 16 / 9], ["4:3", 4 / 3], ["1:1", 1], ["3:2", 3 / 2], ["21:9", 64 / 27], ["2.40:1", 2.4]];
@@ -297,7 +300,14 @@ export function presetSize(budgetName, shape) {
   const b = GEN_BUDGETS.find(x => x[0] === budgetName);
   const listed = b[3][shape];
   if (listed) return toGrid(listed);
-  return sizeFor(GEN_SHAPES.find(x => x[0] === shape)[1], b[1]);
+  const ratio = GEN_SHAPES.find(x => x[0] === shape)[1];
+  const floor = 0.7 * b[2][0] * b[2][1];
+  let exact = null;
+  for (let h = GRID; h * h * ratio <= b[1]; h += GRID) {
+    const w = Math.round(ratio * h / GRID) * GRID;
+    if (Math.abs(w / h / ratio - 1) < 0.001 && w * h <= b[1] && w * h >= floor) exact = [w, h];
+  }
+  return exact || sizeFor(ratio, b[1]);
 }
 
 // The size (multiples of 32) closest to a shape at a pixel budget: the shape matters most, then staying near the budget.
@@ -366,7 +376,9 @@ export function genSection(inspector) {
   {
     const v = g(), px = (v.width || 768) * (v.height || 320);
     // the smallest group the size fits in, as WanGP groups sizes
-    budget.value = (GEN_BUDGETS.find(b => px <= b[1] * 1.005) || GEN_BUDGETS[GEN_BUDGETS.length - 1])[0];
+    const lw = Math.max(v.width || 0, v.height || 0), lh = Math.min(v.width || 0, v.height || 0);
+    const hit = GEN_BUDGETS.find(b => GEN_SHAPES.some(([shape]) => { const [pw, ph] = presetSize(b[0], shape); return pw === lw && ph === lh; }));
+    budget.value = (hit || GEN_BUDGETS.find(b => px <= b[1] * 1.005) || GEN_BUDGETS[GEN_BUDGETS.length - 1])[0];
   }
   sync();
   inspector.refreshers.push(sync);
