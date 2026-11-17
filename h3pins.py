@@ -37,6 +37,7 @@ import inspect
 import json
 import math
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -46,7 +47,7 @@ import traceback
 
 import numpy as np
 
-VERSION = "3.1"
+VERSION = "3.1.2"
 PLUGIN_KEY = "video_editor"                 # plugin_data key the editor's tasks carry
 GRID = 17                                   # pixel frames per VAE clip
 LATENTS_PER_CLIP = 5
@@ -1342,6 +1343,9 @@ def _wrap_generate_media(original):
     return generate_media
 
 
+_CONTINUE_PART = re.compile(r"^tmp[0-9a-f]{8}_continue\d+\.")   # video_continuation.ContinuedVideo's working files
+
+
 def _wrap_save_video(original):
     @functools.wraps(original)
     def save_video(*args, **kwargs):
@@ -1354,6 +1358,15 @@ def _wrap_save_video(original):
         if job is not None and job["windows"]:
             try:
                 values = _bind(original, args, kwargs)
+                save_file = os.path.basename(str(values.get("save_file") or ""))
+                if job.get("continued") or _CONTINUE_PART.search(save_file):
+                    # WanGP 20+: each sliding window is encoded alone and joined onto the end of the file made so far
+                    # (after a Source Video copied as it is), so these frames are only the newest window's. The final
+                    # file's own frames are read for matching instead.
+                    job["continued"] = True
+                    job["final_fp"] = None
+                    _count("continued_segment")
+                    return original(*args, **kwargs)
                 tensor = values.get("tensor")
                 # WanGP passes the frames as one tensor, or as the list of per-window chunks it has gathered
                 # (CFHW each, joined along frames): fingerprint each piece and join the fingerprints

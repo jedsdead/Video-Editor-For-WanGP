@@ -7,7 +7,6 @@ import { state, P, bus } from "./model.js";
 import { api, el, modal, toast, clamp, debounce, timecode } from "./util.js";
 import { ensureGenSettings, genLabel, genOutput } from "./finalrender.js";
 import { ImagePick } from "./imagepick.js";
-import * as PC from "./promptcheck.js";
 
 const PREFS = "ve_gen_prefs";
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS) || "{}"); } catch (_) { return {}; } };
@@ -262,31 +261,12 @@ export async function openGenerate(app, mode, where, preset = {}) {
   if (preset.prompt) { promptBox.value = preset.prompt; promptEdited = true; }
   if (preset.auto) m.box.parentElement.style.display = "none";
   let autoTried = false;
-  // Join check: where the run continues a clip (or a window continues the one before), the prompt's first cut or line
-  // must come after the frames it can't change, and the clip it leaves shouldn't be cut in the middle of a word.
+  // Join check: the clip a run leaves shouldn't be cut in the middle of a word.
   const joinCheck = () => {
     joinBox.innerHTML = "";
     if (!info) { joinBox.hidden = true; return; }
-    const held = s.left ? (info.lengths?.trimHead || 0) : 0;
-    const problems = PC.check(promptBox.value, { continues: !!s.left, held });
     const rows = [];
-    if (problems.length) {
-      const say = (p) => {
-        const what = p.untimedCut ? "cuts to a new shot at 00:00" : `cuts or starts a line at ${PC.ts(p.at)}`;
-        return p.block === 0
-          ? `The prompt ${what}, but its first ${held.toFixed(2)}s are the held frames of ${s.left?.name ? `“${s.left.name}”` : "the previous clip"}, which can't change. The model makes the cut or the line straight after them instead: a jump at the join, and new speech over the end of the last line.`
-          : `Window ${p.block + 1} ${what}, inside the frames it shares with window ${p.block}: it will jump or talk over the end of window ${p.block}.`;
-      };
-      const need = Math.max(...problems.map(p => p.need));
-      const fixBtn = el("button.small", { onclick: () => {
-        const r = PC.fix(promptBox.value, problems);
-        promptBox.value = r.prompt; promptEdited = true;
-        toast(`Timings moved: the shot carries on and nobody speaks until ${PC.ts(need)}${r.lengthened.length ? `; ${r.lengthened.map(l => `window ${l.block + 1} lengthened from ${l.from}s to ${l.to}s`).join(", ")} to fit` : ""}`);
-        joinCheck();
-      } }, "Fix the timings");
-      rows.push(el("div.jc-row.warn", {}, el("div", {}, ...problems.map(p => el("div", {}, say(p))),
-        el("div.dim.small", {}, `Keep the shot going and nobody starting a line until ${PC.ts(need)}: Fix moves every timing later (and adds a first shot that carries straight on when the prompt opens on a cut).`)), fixBtn));
-    }
+    // (the prompt-timing check for continuations — Fix the timings — is switched off for now)
     const sp = info.speech;
     if (sp && sp.speaking) {
       const sg = sp.suggest;
