@@ -293,6 +293,15 @@ export const GEN_BUDGETS = [
   ["1440p", 2560 * 1440, [2560, 1440], { "16:9": [2560, 1440], "4:3": [1920, 1440], "1:1": [1920, 1920], "3:2": [2160, 1440], "21:9": [2688, 1152] }]];
 export const GEN_SHAPES = [["16:9", 16 / 9], ["4:3", 4 / 3], ["1:1", 1], ["3:2", 3 / 2], ["21:9", 64 / 27], ["2.40:1", 2.4]];
 const GRID = 32;
+// the named shape closest to a ratio (within 3%): 2.40:1 and 21:9 are only 1.3% apart, so the nearest one wins
+export function shapeOf(ratio) {
+  let best = null;
+  for (const shape of GEN_SHAPES) {
+    const d = Math.abs(Math.log(ratio / shape[1]));
+    if (d < 0.03 && (!best || d < best.d)) best = { shape, d };
+  }
+  return best ? best.shape : undefined;
+}
 // as WanGP fits a size to H3's 32-pixel blocks: each side rounded down
 const toGrid = ([w, h]) => [Math.max(GRID, Math.floor(w / GRID) * GRID), Math.max(GRID, Math.floor(h / GRID) * GRID)];
 
@@ -351,7 +360,7 @@ export function genSection(inspector) {
     const cur = g();
     if (!cur.width || !cur.height) return;
     const r = Math.max(cur.width, cur.height) / Math.min(cur.width, cur.height);
-    const named = GEN_SHAPES.find(([, x]) => Math.abs(Math.log(r / x)) < 0.03);
+    const named = shapeOf(r);
     let [nw, nh] = named ? presetSize(budget.value, named[0]) : sizeFor(r, GEN_BUDGETS.find(b => b[0] === budget.value)[1]);
     if (cur.height > cur.width) [nw, nh] = [nh, nw];
     change("Generation size", (v) => { v.width = nw; v.height = nh; });
@@ -371,7 +380,7 @@ export function genSection(inspector) {
     if (document.activeElement !== h) h.value = v.height ?? "";
     lock.checked = !!v.lockAspect;
     const r = v.width / v.height;
-    const named = GEN_SHAPES.find(([, x]) => Math.abs(Math.log(Math.max(r, 1 / r) / x)) < 0.03);
+    const named = shapeOf(Math.max(r, 1 / r));
     aspect.textContent = v.width && v.height ? `${named ? named[0] : `${Math.max(r, 1 / r).toFixed(2)}:1`}${r < 1 && named?.[0] !== "1:1" ? " portrait" : ""} · ${(v.width * v.height / 1e6).toFixed(2)} MP` : "";
   };
   {
