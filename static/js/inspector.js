@@ -12,7 +12,14 @@ import { openGenerate, rerollFor, sides, MODE_LABEL } from "./gendialog.js";
 import { genSection, isStale, finalIndex } from "./finalrender.js";
 import { FAMILIES, AUDIO_TRANSITIONS, DISSOLVE_STYLES, IRIS_SHAPES, ANGLE_PRESETS, DEFAULT_PARAMS, MAX_BORDER, isAudioTransition, hasEdge } from "./transitions.js";
 
-const RES_PRESETS = [[1280, 720], [1920, 1080], [3840, 2160], [832, 480], [480, 832], [720, 1280], [1080, 1920], [1024, 1024], [2560, 1080]];
+// Standard delivery sizes (not tied to WanGP's pixel budgets), grouped
+const RES_PRESETS = [
+  ["16:9", [[1280, 720], [1920, 1080], [2560, 1440], [3840, 2160]]],
+  ["DCI 4K", [[4096, 2160]]],
+  ["2.40:1 scope", [[1280, 534], [1920, 800], [2560, 1066], [3840, 1600], [4096, 1716]]],
+  ["21:9", [[2560, 1080], [3440, 1440]]],
+  ["9:16 vertical", [[720, 1280], [1080, 1920], [2160, 3840]]],
+  ["Square / other", [[1024, 1024], [1080, 1080], [832, 480], [480, 832]]]];
 const FPS_PRESETS = [16, 23.976, 24, 25, 30, 50, 60];
 
 export class Inspector {
@@ -881,7 +888,7 @@ export class Inspector {
       const [w, h] = e.target.value.split("x").map(Number);
       M.edit("Resolution", () => { s.width = w; s.height = h; s.auto = false; });
       bus.emit("settings");
-    } }, el("option", { value: "" }, "Presets…"), RES_PRESETS.map(([w, h]) => el("option", { value: `${w}x${h}` }, `${w} × ${h}`)));
+    } }, el("option", { value: "" }, "Presets…"), RES_PRESETS.map(([group, list]) => el("optgroup", { label: group }, list.map(([w, h]) => el("option", { value: `${w}x${h}` }, `${w} × ${h}${h >= 2160 || w >= 3840 ? " (4K)" : ""}`)))));
     const fpsSel = el("select", { onchange: (e) => { const v = parseFloat(e.target.value); if (v) { M.edit("Frame rate", () => { s.fps = v; s.auto = false; }); bus.emit("settings"); } } },
       el("option", { value: "" }, "Presets…"), FPS_PRESETS.map(f => el("option", { value: f }, `${f} fps`)));
     this.section("Project",

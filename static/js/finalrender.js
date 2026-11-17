@@ -277,17 +277,90 @@ export async function openRenderDialog(app, opts = {}) {
 
 // ---------------------------------------------------------------- generation size in the project inspector
 
+// WanGP's pixel budgets (its resolution groups, by their 16:9 size on H3's 32-pixel grid) and the shapes offered at each.
+export const GEN_BUDGETS = [["320p", 576, 320], ["384p", 672, 384], ["480p", 832, 480], ["540p", 960, 544], ["720p", 1280, 736], ["1080p", 1920, 1088], ["1440p", 2560, 1440]];
+export const GEN_SHAPES = [["16:9", 16 / 9], ["4:3", 4 / 3], ["1:1", 1], ["3:2", 3 / 2], ["21:9", 64 / 27], ["2.40:1", 2.4]];
+const GRID = 32;
+
+// The size (multiples of 32) closest to a shape at a pixel budget: the shape matters most, then staying near the budget.
+export function sizeFor(ratio, pixels) {
+  let best = null;
+  const h0 = Math.sqrt(pixels / ratio);
+  for (let h = Math.max(GRID, Math.floor(h0 / GRID - 3) * GRID); h <= h0 + 4 * GRID; h += GRID) {
+    for (const w of [Math.floor(ratio * h / GRID) * GRID, Math.ceil(ratio * h / GRID) * GRID]) {
+      if (w < GRID || w * h > pixels * 1.005) continue;
+      const cost = Math.abs(Math.log(w / h / ratio)) + 0.5 * Math.abs(Math.log(w * h / pixels));
+      if (!best || cost < best.cost) best = { w, h, cost };
+    }
+  }
+  return best ? [best.w, best.h] : [GRID * Math.round(ratio * h0 / GRID), GRID * Math.round(h0 / GRID)];
+}
+
 export function genSection(inspector) {
-  const g = P().settings.gen;
-  const set = (key, value) => { M.edit("Generation size", () => { P().settings.gen = { ...(P().settings.gen || { width: 768, height: 320, phases: 1, vaeX2: false }), [key]: value }; }); bus.emit("settings"); };
-  const w = el("input", { type: "number", min: 64, step: 32, value: g?.width ?? "", style: { width: "80px" }, onchange: (e) => set("width", Math.max(64, Math.round(+e.target.value / 32) * 32)) });
-  const h = el("input", { type: "number", min: 64, step: 32, value: g?.height ?? "", style: { width: "80px" }, onchange: (e) => set("height", Math.max(64, Math.round(+e.target.value / 32) * 32)) });
-  const phases = el("select", { onchange: (e) => set("phases", +e.target.value) }, el("option", { value: 1, selected: g?.phases !== 2 }, "One phase (fast drafts)"), el("option", { value: 2, selected: g?.phases === 2 }, "Two phases"));
-  const vae = el("input", { type: "checkbox", checked: !!g?.vaeX2, onchange: (e) => set("vaeX2", e.target.checked) });
+  const g = () => P().settings.gen || { width: 768, height: 320, phases: 1, vaeX2: false };
+  const change = (label, fn) => { M.edit(label, () => { const v = { ...g() }; fn(v); P().settings.gen = v; }); bus.emit("settings"); };
+  const snap = (v) => Math.max(64, Math.round(v / GRID) * GRID);
+  const w = el("input", { type: "number", min: 64, step: GRID, style: { width: "80px" } });
+  const h = el("input", { type: "number", min: 64, step: GRID, style: { width: "80px" } });
+  w.onchange = () => change("Generation size", (v) => {
+    const nw = snap(+w.value);
+    if (v.lockAspect && v.width) v.height = snap(v.height * nw / v.width);
+    v.width = nw;
+  });
+  h.onchange = () => change("Generation size", (v) => {
+    const nh = snap(+h.value);
+    if (v.lockAspect && v.height) v.width = snap(v.width * nh / v.height);
+    v.height = nh;
+  });
+  const lock = el("input", { type: "checkbox", onchange: (e) => change("Lock generation aspect ratio", (v) => { v.lockAspect = e.target.checked; }) });
+  const flip = el("button.small", { title: "Swap width and height (portrait ↔ landscape)", onclick: () => change("Flip generation size", (v) => { [v.width, v.height] = [v.height, v.width]; }) }, "⇄ Flip");
+  // the budget nearest the current size
+  const budget = el("select", { title: "WanGP's pixel budget for the shapes below" },
+    GEN_BUDGETS.map(([name, bw, bh]) => el("option", { value: name }, `${name} (${(bw * bh / 1e6).toFixed(2)} MP)`)));
+  budget.onchange = () => {
+    // the same shape at the new budget
+    const cur = g(), [, bw, bh] = GEN_BUDGETS.find(b => b[0] === budget.value);
+    if (!cur.width || !cur.height) return;
+    const r = Math.max(cur.width, cur.height) / Math.min(cur.width, cur.height);
+    let [nw, nh] = sizeFor(r, bw * bh);
+    if (cur.height > cur.width) [nw, nh] = [nh, nw];
+    change("Generation size", (v) => { v.width = nw; v.height = nh; });
+  };
+  const shapes = el("div.btnrow", { style: { flexWrap: "wrap" } }, GEN_SHAPES.map(([label, ratio]) => el("button.small", {
+    title: `${label} at the chosen budget`,
+    onclick: () => {
+      const [, bw, bh] = GEN_BUDGETS.find(b => b[0] === budget.value);
+      let [nw, nh] = sizeFor(ratio, bw * bh);
+      const cur = g();
+      if (cur.height > cur.width && ratio !== 1) [nw, nh] = [nh, nw];   // keep a portrait size portrait
+      change("Generation size", (v) => { v.width = nw; v.height = nh; });
+    } }, label)));
+  const aspect = el("span.dim");
+  const sync = () => {
+    const v = g();
+    if (document.activeElement !== w) w.value = v.width ?? "";
+    if (document.activeElement !== h) h.value = v.height ?? "";
+    lock.checked = !!v.lockAspect;
+    const r = v.width / v.height;
+    const named = GEN_SHAPES.find(([, x]) => Math.abs(Math.log(Math.max(r, 1 / r) / x)) < 0.03);
+    aspect.textContent = v.width && v.height ? `${named ? named[0] : `${Math.max(r, 1 / r).toFixed(2)}:1`}${r < 1 && named?.[0] !== "1:1" ? " portrait" : ""} · ${(v.width * v.height / 1e6).toFixed(2)} MP` : "";
+  };
+  {
+    const v = g(), px = (v.width || 768) * (v.height || 320);
+    budget.value = GEN_BUDGETS.reduce((a, b) => Math.abs(Math.log(b[1] * b[2] / px)) < Math.abs(Math.log(a[1] * a[2] / px)) ? b : a)[0];
+  }
+  sync();
+  inspector.refreshers.push(sync);
+  const phases = el("select", { onchange: (e) => change("Generation passes", (v) => { v.phases = +e.target.value; }) },
+    el("option", { value: 1, selected: g().phases !== 2 }, "One phase (fast drafts)"), el("option", { value: 2, selected: g().phases === 2 }, "Two phases"));
+  const vae = el("input", { type: "checkbox", checked: !!g().vaeX2, onchange: (e) => change("Generation VAE ×2", (v) => { v.vaeX2 = e.target.checked; }) });
   const reset = el("button.small", { onclick: async () => { M.edit("Generation size", () => { delete P().settings.gen; }); await ensureGenSettings(); inspector.render(); } }, "From the first clip");
   inspector.section("Generation",
-    el("div.dim", { style: { fontSize: "12px", marginBottom: "6px" } }, "The size the editor generates at (extend, prepend, new shots and so on). Keep it the same across a project so joins stay latent grade and stretches can be rendered final together. For 2.40:1 drafts, 768 × 320 renders final at 1536 × 640 and 3072 × 1280 with the VAE ×2."),
-    el("div.field.wide", {}, el("label", {}, "Size"), el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, w, el("span", {}, "×"), h)),
+    el("div.dim", { style: { fontSize: "12px", marginBottom: "6px" } }, "The size the editor generates at (extend, prepend, new shots and so on). Keep it the same across a project so joins stay latent grade and stretches can be rendered final together."),
+    el("div.field.wide", {}, el("label", {}, "Size"), el("div", { style: { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" } }, w, el("span", {}, "×"), h, flip)),
+    el("div.field.wide", {}, el("label", {}, ""), aspect),
+    el("label.rrow", {}, lock, el("span", {}, "Lock the aspect ratio (changing one side changes the other)")),
+    el("div.field.wide", {}, el("label", {}, "Presets"), el("div", { style: { display: "flex", flexDirection: "column", gap: "6px", flex: "1" } }, budget, shapes)),
     el("div.field.wide", {}, el("label", {}, "Passes"), phases),
     el("label.rrow", {}, vae, el("span", {}, "Decode drafts with the H3 VAE ×2")),
     el("div.btnrow", {}, reset, el("button.small.primary", { onclick: () => openRenderDialog(inspector.app) }, "Render final…")));

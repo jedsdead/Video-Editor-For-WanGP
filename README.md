@@ -32,7 +32,7 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - Position, scale, rotation and crop for every video clip, all keyframeable. **Scale X** and **Scale Y** stretch each axis on its own, with one-click **Fit**, **Fill**, **Stretch**, **Fill width**, **Fill height**, **Full size** (the clip's own pixels, one per project pixel) and **Anamorphic** desqueeze (1.25× to 2×). **Flip horizontal** and **Flip vertical** mirror a clip (after its effects, so crops stay on the sides you see).
 - The viewer shows the frame at **Fit** or at 25% to 400% of the project's resolution (scroll when it's bigger), from the menu under the frame. **Full screen** keeps the transport, so you can play and leave without the keyboard.
 - When the side panels are dragged wider, the viewer's controls shrink to fit (then wrap onto two rows) instead of disappearing behind them, and the viewer never gets narrower than 300 px.
-- **Lock the aspect ratio** in the project settings to change width and height together.
+- **Lock the aspect ratio** in the project settings to change width and height together. Its presets are standard delivery sizes: 16:9 up to 4K UHD, DCI 4K, 2.40:1 scope (1280 × 534 to 4096 × 1716), 21:9, vertical and square.
 - Handles on the viewer: drag to move, corners to scale, the knob to rotate (Shift snaps to 15°), and crop mode (C) for edge handles. Clicking in the viewer selects the clip under the pointer.
 
 **Effects panel**
@@ -155,7 +155,7 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
 - WanGP's H3 presets (*Vanilla 1 Phase*, *Original 2 Phases*, *Regenerate 2K 2 Phases*) work for editor generations too. When the project's generation size switches the number of phases, the editor fits **Custom Sigmas** and per-phase LoRA multipliers to it, and drops the phase-2-only Regenerate LoRA from one-phase drafts.
 - Each clip gets a **Final** take (its draft and its sound are kept); **View → Show final renders** switches between drafts and finals. A final goes out of date when its draft is trimmed.
 - Stretches longer than one window are refined in overlapping windows blended at every step. A clip rendered next to one that already has a final re-renders a little of that final and holds it, so the two flow into each other.
-- The project's **Generation** size (Inspector, with nothing selected) sets the draft size for editor generations; it defaults to the first clip's.
+- The project's **Generation** size (Inspector, with nothing selected) sets the draft size for editor generations; it defaults to the first clip's. Presets give 16:9, 4:3, 1:1, 3:2, 21:9 and 2.40:1 at one of WanGP's pixel budgets (320p to 1440p, on H3's 32-pixel grid: 2.40:1 at 384p is 768 × 320); picking another budget keeps the shape, **Flip** swaps width and height for portrait, and **Lock the aspect ratio** changes both sides together.
 
 **Inspector**
 - Click a section heading, or an effect's name, to fold it away. Alt+click folds or unfolds every section. Folded sections are remembered.
