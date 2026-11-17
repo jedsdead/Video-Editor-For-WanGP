@@ -14,6 +14,8 @@ const savePrefs = (p) => { try { localStorage.setItem(PREFS, JSON.stringify({ ..
 
 // The sound switches, written into the prompt: an H3 prompt's own sections are rewritten where it has them, otherwise
 // a line is added at the end.
+const JOIN_CHECKS_OFF = true;
+
 export function applySound(prompt, o = {}) {
   let p = String(prompt || "");
   const section = (tag, text) => {
@@ -261,10 +263,12 @@ export async function openGenerate(app, mode, where, preset = {}) {
   if (preset.prompt) { promptBox.value = preset.prompt; promptEdited = true; }
   if (preset.auto) m.box.parentElement.style.display = "none";
   let autoTried = false;
-  // Join check: the clip a run leaves shouldn't be cut in the middle of a word.
+  // Join check: the clip a run leaves shouldn't be cut in the middle of a word (off for now).
   const joinCheck = () => {
     joinBox.innerHTML = "";
-    if (!info) { joinBox.hidden = true; return; }
+    // switched off for now: the prompt-timing check and the move-the-cut-into-the-pause check
+    joinBox.hidden = true;
+    if (!info || JOIN_CHECKS_OFF) return;
     const rows = [];
     // (the prompt-timing check for continuations — Fix the timings — is switched off for now)
     const sp = info.speech;
