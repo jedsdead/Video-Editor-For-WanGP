@@ -81,6 +81,10 @@ class WanGPHost:
         from shared.api import WanGPSession
         session = WanGPSession(webui_state=service._state, console_output=False, console_isatty=False, webui_append=True)
         session._gradio_webui_context = {"load_queue": service.load_inline_queue}
+        if str(settings.get("mode", "") or "").startswith("edit_"):
+            # the Media Generator's settings still hold the mode of a post-processing / remux edit made there: WanGP
+            # would take this generation for that edit (and fail on its missing source)
+            settings = {**settings, "mode": ""}
         task = {"params": settings, "plugin_data": dict(plugin_data or {})}
         return session.submit_task(task, callbacks=callbacks)
 
