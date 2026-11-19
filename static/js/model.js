@@ -878,6 +878,10 @@ export function deleteTimeline(id) {
 export function allTimelineClips() {
   return [...P().clips, ...(P().timelines || []).flatMap(t => t.data?.clips || [])];
 }
+// Media a timeline needs besides its clips': the start / end images of its blocks.
+export function blockImageIds(clips = allTimelineClips()) {
+  return clips.filter(c => c.block).flatMap(c => [c.block.startImage?.mediaId, c.block.endImage?.mediaId]).filter(Boolean);
+}
 
 // ---- blocks: shots waiting to be generated ----
 // A block is a title clip with a `block` field ({prompt, cont}): it holds a place and a length on a video track, shows
@@ -892,21 +896,23 @@ function slate(prompt, n) {
 export function blocks() {
   return P().clips.filter(c => c.block && trackKind(c.trackId) === "video").sort((a, b) => a.start - b.start || videoTracks().findIndex(t => t.id === a.trackId) - videoTracks().findIndex(t => t.id === b.trackId));
 }
-export function addBlock(trackId, start, { prompt = "", seconds = 5, cont = true } = {}) {
+export function addBlock(trackId, start, { prompt = "", seconds = 5, cont = true, startImage = null, endImage = null } = {}) {
   const [clip] = newClipsForMedia(P().media[TITLE_MEDIA.id] || TITLE_MEDIA, trackId, null, snapFrame(Math.max(0, start)));
   clip.out = Math.max(frameDur(), snapFrame(seconds));
-  clip.block = { prompt, cont };
+  clip.block = { prompt, cont, startImage, endImage };
   clip.name = "To generate";
   clip.label = clip.label || "purple";
   clip.title = slate(prompt);
   P().clips.push(clip);
   return clip;
 }
-export function updateBlock(id, { prompt, seconds, cont }) {
+export function updateBlock(id, { prompt, seconds, cont, startImage, endImage }) {
   const c = getClip(id);
   if (!c?.block) return;
   if (prompt !== undefined) c.block.prompt = prompt;
   if (cont !== undefined) c.block.cont = cont;
+  if (startImage !== undefined) c.block.startImage = startImage;
+  if (endImage !== undefined) c.block.endImage = endImage;
   if (seconds !== undefined) c.out = c.in + Math.max(frameDur(), snapFrame(seconds));
   c.title = slate(c.block.prompt);
 }

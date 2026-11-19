@@ -61,6 +61,7 @@ export class ImagePick {
     if (videos.length) this.sel.append(el("optgroup", { label: "A video's first or last frame" },
       ...videos.flatMap(i => [opt(`first:${i.id}`, `${i.name}: first frame`), opt(`last:${i.id}`, `${i.name}: last frame`)])));
     if (this.picked && !images.find(i => i.id === this.picked.mediaId)) this.sel.append(opt(`img:${this.picked.mediaId}`, this.picked.label));
+    if (this.fixed && P().media[this.fixed.mediaId]) this.sel.append(opt("fixed", this.fixed.label || "The chosen frame"));
     this.sel.append(opt("file", "Choose an image file…"));
     this.sel.value = [...this.sel.options].some(o => o.value === want && !o.disabled) ? want : "none";
     this.last = this.sel.value;
@@ -70,6 +71,7 @@ export class ImagePick {
   get value() {
     const v = this.sel.value;
     if (v === "playhead") { const ph = playheadFrame(); return ph && { mediaId: ph.mediaId, t: ph.t }; }
+    if (v === "fixed") return this.fixed && P().media[this.fixed.mediaId] ? { mediaId: this.fixed.mediaId, t: this.fixed.t } : null;
     const [kind, id] = v.split(":");
     const item = id && P().media[id];
     if (!item) return null;
@@ -80,6 +82,24 @@ export class ImagePick {
   }
   // a choice to remember between dialogs (bin items by id; the playhead as "playhead")
   get choice() { return this.sel.value; }
+
+  // A frame chosen earlier ({mediaId, t, label}), as the choice: the matching bin choice when there is one.
+  setRef(ref) {
+    if (!ref?.mediaId || !P().media[ref.mediaId]) { this.fill("none"); return false; }
+    const item = P().media[ref.mediaId];
+    const lastT = Math.max(0, (item.duration || 0) - 1 / (item.fps || 24));
+    let want = item.kind === "image" ? `img:${ref.mediaId}` : !ref.t ? `first:${ref.mediaId}` : Math.abs(ref.t - lastT) < 1e-3 ? `last:${ref.mediaId}` : "fixed";
+    if (want === "fixed") this.fixed = { mediaId: ref.mediaId, t: ref.t, label: ref.label || `${item.name} at ${timecode(ref.t, item.fps || 24)}` };
+    this.fill(want);
+    return true;
+  }
+  // The choice as a frame to keep (the playhead becomes the frame it shows now), with a label.
+  get ref() {
+    const v = this.value;
+    if (!v) return null;
+    const label = this.sel.value === "playhead" ? playheadFrame()?.label : this.sel.selectedOptions[0]?.textContent;
+    return { mediaId: v.mediaId, t: v.t, label: label || "" };
+  }
 
   set disabled(off) { this.sel.disabled = off; this.node.classList.toggle("off", off); this.preview(); }
   get disabled() { return this.sel.disabled; }

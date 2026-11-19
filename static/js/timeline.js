@@ -510,6 +510,8 @@ export class Timeline {
     const badges = [];
     if (clip.disabled) badges.push("⊘ off");
     if (clip.block) badges.push("▶ to generate");
+    if (clip.block?.endImage) badges.push("⇥ end image");
+    if (clip.block?.startImage) badges.push("⇤ start image");
     if (clip.linkId) badges.push("🔗");
     if (M.hasSpeedKeys(clip)) badges.push(M.keysOf(clip, "speed").every(k => k.v <= 1e-6) ? "❄ freeze" : "⏱ ramp");
     else if (Math.abs((clip.speed || 1) - 1) > 1e-6 && !M.isStillKind(item.kind)) badges.push(`${Math.round(clip.speed * 100)}%`);

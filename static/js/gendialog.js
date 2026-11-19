@@ -205,6 +205,8 @@ export async function openGenerate(app, mode, where, preset = {}) {
   const wantStart = !s.left, wantEnd = !s.right;
   const startPick = wantStart ? new ImagePick(app, "start", { onChange: () => imagesNote() }) : null;
   const endPick = wantEnd ? new ImagePick(app, "end", { onChange: () => imagesNote() }) : null;
+  if (preset.startImage && startPick) startPick.setRef(preset.startImage);
+  if (preset.endImage && endPick) endPick.setRef(preset.endImage);
   const imagesNoteEl = el("div.dim.small");
   const imagesNote = () => {
     const caps = info?.capabilities || {};
@@ -354,7 +356,12 @@ export async function openGenerate(app, mode, where, preset = {}) {
     // a block run: queue straight away when it's ready, or show the dialog to say why not
     if (preset.auto && !autoTried) {
       autoTried = true;
-      if (info && !go.disabled) submit();
+      // a block's picture that this run can't use: show the dialog rather than generate without it
+      const caps = info?.capabilities || {};
+      const lost = [preset.endImage && (!endPick || !caps.end || !endPick.value) ? "end" : null,
+        preset.startImage && (!startPick || !caps.start || !startPick.value) ? "start" : null].filter(Boolean);
+      if (info && lost.length) error.textContent = `This block has a${lost.length > 1 ? " start and end" : `n ${lost[0]}`} image this run can't use: ${!info.capabilities?.[lost[0]] ? `the model (${info.model.name}) doesn't take ${lost[0]} images` : lost[0] === "end" ? "a clip follows it, so the run has to join that instead" : "the image is missing"}. Switch to H3 FL2VA or Ref2VA in the Media Generator, or change the block.`;
+      if (info && !go.disabled && !lost.length) submit();
       else { m.box.parentElement.style.display = ""; resolveAuto(null); }
     }
   }, 200);

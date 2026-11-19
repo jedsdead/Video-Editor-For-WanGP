@@ -263,9 +263,18 @@ def to_edl(project):
 
 # ---------------------------------------------------------------- collect
 def used_media_ids(project):
-    ids = {c.get("mediaId") for c in project.get("clips") or []}
+    def of(clips):
+        out = set()
+        for c in clips or []:
+            out.add(c.get("mediaId"))
+            for key in ("startImage", "endImage"):           # a block's start / end image
+                ref = (c.get("block") or {}).get(key) or {}
+                if ref.get("mediaId"):
+                    out.add(ref["mediaId"])
+        return out
+    ids = of(project.get("clips"))
     for t in project.get("timelines") or []:
-        ids |= {c.get("mediaId") for c in (t.get("data") or {}).get("clips") or []}
+        ids |= of((t.get("data") or {}).get("clips"))
     media = project.get("media") or {}
     return [i for i in ids if i in media and media[i].get("path") and not media[i].get("generator")]
 

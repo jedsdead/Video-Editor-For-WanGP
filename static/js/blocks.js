@@ -6,6 +6,7 @@ import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { el, modal, toast } from "./util.js";
 import { openGenerate, pinProblem } from "./gendialog.js";
+import { ImagePick } from "./imagepick.js";
 
 export function blockDialog(app, { trackId, t, block = null } = {}) {
   const b = block ? M.getClip(block.id) : null;
@@ -13,14 +14,24 @@ export function blockDialog(app, { trackId, t, block = null } = {}) {
   prompt.value = b?.block.prompt || "";
   const secs = el("input", { type: "number", min: 0.5, max: 120, step: 0.1, value: b ? M.clipDur(b).toFixed(2) : "5", style: { width: "80px" } });
   const cont = el("input", { type: "checkbox", checked: b ? b.block.cont !== false : true });
+  // the pictures it starts from / ends on (WanGP's image_start / image_end, on the models that take them)
+  const endPick = new ImagePick(app, "end");
+  const startPick = new ImagePick(app, "start");
+  endPick.setRef(b?.block.endImage);
+  startPick.setRef(b?.block.startImage);
+  const startRow = el("div.field.wide", {}, el("label", {}, "Start image"), el("div", {}, startPick.node, el("div.dim.small", {}, "Only when it's a new shot (an Extend starts from the clip before).")));
+  const syncStart = () => { startRow.style.opacity = cont.checked && b && M.blockLead(b) ? "0.5" : ""; };
+  cont.addEventListener("change", syncStart); syncStart();
   modal({ title: b ? "Block to generate" : "Add a block to generate", body: el("div", {},
       el("div.dim.small", { style: { marginBottom: "8px" } }, "A shot planned here and generated later (right-click it → Generate, or Generate all blocks). It shows as a slate in the viewer and isn't exported. The generation's settings come from the generate dialog as usual."),
       el("div.field.wide", {}, el("label", {}, "Length"), el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, secs, el("span.dim", {}, "seconds of new footage"))),
       el("div.field.wide", {}, el("label", {}, "Continue"), el("label", { style: { display: "flex", gap: "6px", alignItems: "center", color: "inherit" } }, cont,
         "Continue out of the clip before it, when it starts where that clip ends (otherwise a new shot)")),
+      el("div.field.wide", {}, el("label", {}, "End image"), el("div", {}, endPick.node, el("div.dim.small", {}, "The picture the shot lands on (its last frame). Needs a model that takes end images (H3 FL2VA or Ref2VA)."))),
+      startRow,
       el("div.field.wide", {}, el("label", {}, "Prompt"), prompt)),
     buttons: ["spacer", { label: "Cancel" }, { label: b ? "Save" : "Add block", primary: true, action: () => {
-      const v = { prompt: prompt.value, seconds: Math.max(0.5, +secs.value || 5), cont: cont.checked };
+      const v = { prompt: prompt.value, seconds: Math.max(0.5, +secs.value || 5), cont: cont.checked, endImage: endPick.ref, startImage: startPick.ref };
       if (b) M.edit("Edit block", () => M.updateBlock(b.id, v));
       else {
         const gap = M.gapAt(trackId, t);
@@ -44,7 +55,12 @@ export function generateBlock(app, block) {
   const b = M.getClip(block.id);
   if (!b?.block) return;
   const plan = planFor(b);
-  openGenerate(app, plan.mode, plan.where, { prompt: b.block.prompt, seconds: M.clipDur(b), blockId: b.id });
+  openGenerate(app, plan.mode, plan.where, { prompt: b.block.prompt, seconds: M.clipDur(b), blockId: b.id, ...blockImages(b, plan) });
+}
+
+// A block's pictures for its generation: the end image always, the start image only for a new shot.
+function blockImages(b, plan) {
+  return { endImage: b.block.endImage || null, startImage: plan.mode === "new" ? b.block.startImage || null : null };
 }
 
 let running = null;
@@ -67,7 +83,7 @@ export async function generateAll(app) {
       if (!b?.block) continue;           // removed or already generated
       const plan = planFor(b);
       toast(`Generate all: block ${i + 1} of ${ids.length} (${plan.mode === "extend" ? `continuing out of ${plan.lead.name || "the clip before"}` : "a new shot"})`);
-      const jobId = await openGenerate(app, plan.mode, plan.where, { prompt: b.block.prompt, seconds: M.clipDur(b), blockId: b.id, auto: true });
+      const jobId = await openGenerate(app, plan.mode, plan.where, { prompt: b.block.prompt, seconds: M.clipDur(b), blockId: b.id, auto: true, ...blockImages(b, plan) });
       if (!jobId) { toast(`Generate all stopped at block ${i + 1}: the generate dialog says why`, "warn", 8000); break; }
       // wait for it to land (the block is replaced by the new clip), or to fail
       const ok = await new Promise((resolve) => {

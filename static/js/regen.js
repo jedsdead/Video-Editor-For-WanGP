@@ -126,7 +126,9 @@ export class RegenJobs {
     const inT = onGrid(Math.min(job.trimHead || 0, Math.max(0, dur - 1 / ff)));
     let outT = Math.max(inT + 1 / ff, onGrid(dur - (job.trimTail || 0)));
     // made from a block: as long as the block (the rest of the footage is still there to drag out)
-    if (job.request?.blockSeconds) outT = Math.max(inT + 1 / ff, Math.min(outT, inT + onGrid(+job.request.blockSeconds)));
+    // (not one that ends on an end image: trimming would cut off the frame it lands on, so it keeps its few extra frames)
+    const landsOnImage = !!job.request?.endImage;
+    if (job.request?.blockSeconds && !landsOnImage) outT = Math.max(inT + 1 / ff, Math.min(outT, inT + onGrid(+job.request.blockSeconds)));
     const length = outT - inT;
     const left = job.left && M.getClip(job.left.clipId), right = job.right && M.getClip(job.right.clipId);
     const joins = (job.left?.cut != null || job.right?.cut != null) ? {
@@ -184,7 +186,7 @@ export class RegenJobs {
           return;
         }
         const L = left && M.getClip(left.id), R = right && M.getClip(right.id);
-        let at, room = blockRoom;
+        let at, room = blockRoom && landsOnImage ? Math.max(blockRoom, length) : blockRoom;
         if (job.mode === "new") {
           at = Math.max(0, +job.request?.at || 0);
           const gap = M.gapAt(job.trackId, at);
