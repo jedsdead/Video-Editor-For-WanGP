@@ -331,6 +331,15 @@ export class Renderer {
     return entry.ready ? entry.tex : null;
   }
 
+  // Free an element's texture now (rather than whenever the browser collects it): the GPU's memory is shared with
+  // WanGP's generations.
+  release(source) {
+    const entry = this.textures.get(source);
+    if (!entry) return;
+    try { this.gl.deleteTexture(entry.tex); } catch (_) { /* context gone */ }
+    this.textures.delete(source);
+  }
+
   drawLayer(item, size = null) {
     const gl = this.gl;
     const tex = item.tex || this.texture(item.source);

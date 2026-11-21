@@ -47,7 +47,9 @@ export class RegenJobs {
     try { data = await api(`api/regen/jobs?project=${encodeURIComponent(P().name || "")}`); }
     catch (_) { this.schedule(5000); return; }
     const before = JSON.stringify(this.jobs.map(j => [j.id, j.status, Math.round((j.progress || 0) * 100)]));
+    const wasRunning = new Set(this.jobs.filter(j => ["queued", "running"].includes(j.status)).map(j => j.id));
     this.jobs = data.jobs || [];
+    if (this.jobs.some(j => wasRunning.has(j.id) && !["queued", "running"].includes(j.status)) || [...wasRunning].some(id => !this.jobs.find(j => j.id === id))) bus.emit("generation-finished");
     for (const job of this.jobs) {
       if (job.status === "done" && job.media && !this.applying.has(job.id)) this.apply(job);
       else if (job.kind === "compose" && job.liveMedia && !this.applying.has(job.id)) {

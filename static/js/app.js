@@ -3,7 +3,7 @@ import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { api, el, toast, showMenu, closeMenu, modal, prompt_, confirm_, debounce, isTyping, timecode, uid } from "./util.js";
 import { Renderer } from "./renderer.js";
-import { Playback } from "./playback.js";
+import { Playback, diag } from "./playback.js";
 import { Timeline } from "./timeline.js";
 import { Docks, PLACE_NAMES } from "./docks.js";
 import { openNormalise, openDuck, audioClipsOf } from "./audiotools.js";
@@ -488,6 +488,7 @@ function menuItems(name) {
   if (name === "view") return [
     ...app.docks.menuItems(),
     "-",
+    { label: "Reload the viewer", title: "Start every video and audio player afresh (for a clip that shows black or has gone silent)", action: () => { app.playback.reloadViewer("menu"); toast("Viewer reloaded"); } },
     { label: "Audio scrubbing", check: app.playback.scrubAudio, action: () => { app.playback.scrubAudio = !app.playback.scrubAudio; localStorage.setItem("ve_scrub", app.playback.scrubAudio ? "1" : "0"); } },
     { label: "Crop handles on the viewer", kbd: "C", check: app.overlay.cropMode, action: () => app.overlay.setCropMode(!app.overlay.cropMode) },
     { label: "Show final renders", check: !!P()?.settings?.showFinal, action: () => { showFinals(!P().settings.showFinal); toast(P().settings.showFinal ? "Showing final renders (clips whose final is out of date stay on their draft)" : "Showing drafts"); } },
@@ -825,6 +826,7 @@ async function main() {
   }
   // the viewer's WebGL dropped (a heavy GPU job): it normally comes back by itself; say so if it doesn't
   app.renderer.onLost = () => setTimeout(() => {
+    diag("webgl context lost", { restored: !app.renderer.lost });
     if (app.renderer.lost) toast("The viewer lost its GPU context and hasn't got it back (the GPU may be busy with a generation). Reload the editor if it stays black.", "warn", 12000);
   }, 5000);
   app.bin = new MediaBin(app);

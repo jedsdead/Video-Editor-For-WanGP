@@ -16,6 +16,12 @@ import { ensureLut } from "./lut.js";
 import { dbToGain, clamp } from "./util.js";
 import { buildChain, PITCH_WORKLET, WORKLET_EFFECTS } from "./audiofx.js";
 
+// Playback troubles, written to the editor's diagnostics log (data folder, diag.log) so they can be looked at later.
+export function diag(event, data = {}) {
+  try {
+    fetch("api/diag", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ event, data, at: new Date().toISOString() }), keepalive: true }).catch(() => {});
+  } catch (_) { /* ignore */ }
+}
 const LOOKAHEAD = 2.5;
 const IDLE_MS = 4000;          // a media element not used for this long is let go
 const MAX_IDLE_MEDIA = 6;      // media elements kept for later at most (each holds a connection to the server while it loads)
@@ -50,7 +56,10 @@ export class Playback {
     bus.on("media-updated", (id) => this.dropMedia(id));
     // the WebGL context came back after the GPU was reset: every video element is rebuilt too (their decoders were
     // reset with it), then the frame is drawn again
-    this.renderer.onRestore = () => { this.resetPool(); this.layout(); this.dirty = true; };
+    this.renderer.onRestore = () => { diag("webgl context restored"); this.resetPool(); this.layout(); this.dirty = true; };
+    // A generation can leave some of the viewer's video and audio players dead (black, or silent) once WanGP has had
+    // the GPU: start them afresh when one finishes.
+    bus.on("generation-finished", () => setTimeout(() => this.reloadViewer("a generation finished"), 500));
     new ResizeObserver(() => this.layout()).observe(stage);
     document.addEventListener("visibilitychange", () => { if (document.hidden) this.pause(); });
     requestAnimationFrame((t) => this.tick(t));
@@ -428,6 +437,7 @@ export class Playback {
     try { entry.el.pause && entry.el.pause(); } catch (_) { /* ignore */ }
     try { entry.gain && entry.gain.disconnect(); entry.node && entry.node.disconnect(); } catch (_) { /* ignore */ }
     try { entry.chain && entry.chain.stop?.(); } catch (_) { /* ignore */ }
+    try { this.renderer.release(entry.el); } catch (_) { /* ignore */ }
     if (entry.el.tagName !== "CANVAS") {
       entry.el.removeAttribute("src");
       if (entry.el.load) try { entry.el.load(); } catch (_) { /* ignore */ }
@@ -435,6 +445,15 @@ export class Playback {
     this.pool.delete(clipId);
   }
   resetPool() { for (const id of [...this.pool.keys()]) this.dispose(id); }
+  // every player built again (what a page reload did for a black or silent clip)
+  reloadViewer(why = "") {
+    diag("viewer reloaded", { why, pool: this.pool.size });
+    const playing = this.playing;
+    if (playing) this.pause();
+    this.resetPool();
+    this.dirty = true;
+    if (playing) this.play();
+  }
   dropMedia(mediaId) { for (const [id, e] of [...this.pool]) if (e.mediaId === mediaId) this.dispose(id); this.dirty = true; }
 
   // Element time for a clip time: forward proxies use source time; reversed proxies run backwards from the end.
@@ -493,6 +512,18 @@ export class Playback {
     this.recover(clip.id, entry, isAudio ? "audio" : "video");
   }
 
+  // A parked video (the playhead resting on its clip) that never gets its picture: no frame after 1.5 s, a seek
+  // that never lands, or a decoder error. Rebuilt (at most every 3 s per clip).
+  watchParked(entry, clip) {
+    const el = entry.el, now = performance.now();
+    const bad = el.error || el.readyState < 2 || el.seeking;
+    if (!bad) { entry.parkBad = null; return; }
+    entry.parkBad ??= now;
+    this.pending = true;   // keep looking while it isn't right
+    if (now - entry.parkBad < (el.error ? 500 : 1500) || now - (entry.created || 0) < 2500) return;
+    this.recover(clip.id, entry, "video (parked)");
+  }
+
   recover(clipId, entry, what) {
     const el = entry.el;
     const note = { at: new Date().toISOString(), what, clip: clipId, media: entry.mediaId, readyState: el.readyState, networkState: el.networkState,
@@ -501,6 +532,7 @@ export class Playback {
     (window.__vePlaybackLog ||= []).push(note);
     if (window.__vePlaybackLog.length > 200) window.__vePlaybackLog.shift();
     console.warn("[Video Editor] playback: rebuilt a stalled", what, "element", note);
+    diag("rebuilt a stalled player", note);
     this.dispose(clipId);
     // several in a short time: the browser's connections to the server may be used up by elements kept for later;
     // let those go too
@@ -582,6 +614,7 @@ export class Playback {
     let hold = false;
     if (kind === "video") {
       this.syncElement(entry, clip, t, false);
+      if (!this.playing) this.watchParked(entry, clip);
       // just after a cut, the element may still be getting to its first frame: say so, so the viewer keeps the frame
       // before rather than drawing a picture from the wrong place
       if (this.playing && t - clip.start < 0.25) {

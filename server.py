@@ -462,6 +462,19 @@ def create_app(get_config, host=None):
         except ValueError as error:
             raise HTTPException(400, str(error))
 
+    @app.post("/api/diag")
+    def diag_log(payload: dict = Body(...)):
+        """The editor's playback troubles, appended to diag.log in the data folder (trimmed at 2 MB)."""
+        path = os.path.join(service.data_root, "diag.log")
+        try:
+            if os.path.isfile(path) and os.path.getsize(path) > 2_000_000:
+                os.replace(path, path + ".1")
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, default=str)[:4000] + "\n")
+        except OSError:
+            pass
+        return {"ok": True}
+
     @app.get("/api/gen/refimage")
     def gen_refimage(path: str):
         """A reference image the generate dialog lists (only those: not any file)."""
