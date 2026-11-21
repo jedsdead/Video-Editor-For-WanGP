@@ -462,6 +462,14 @@ def create_app(get_config, host=None):
         except ValueError as error:
             raise HTTPException(400, str(error))
 
+    @app.get("/api/gen/refimage")
+    def gen_refimage(path: str):
+        """A reference image the generate dialog lists (only those: not any file)."""
+        found = service.regen.ref_file(path)
+        if not found:
+            raise HTTPException(404, "Not a reference image of this run")
+        return FileResponse(found)
+
     @app.post("/api/gen/submit")
     def gen_submit(payload: dict = Body(...)):
         try:

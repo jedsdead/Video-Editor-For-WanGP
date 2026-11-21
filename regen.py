@@ -12,6 +12,7 @@ import math
 import os
 import random
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -423,7 +424,7 @@ def capabilities(model_def):
     images = str(model_def.get("image_prompt_types_allowed", "") or "")
     audio_sources = ((model_def.get("audio_prompt_type_sources") or {}).get("selection")) or []
     return {"start": "S" in images, "end": "E" in images, "extend": "V" in images and bool(model_def.get("video_continuation", True)),
-            "keepAudio": "AS" in audio_sources, "fps": float(model_def.get("fps", 16) or 16),
+            "keepAudio": "AS" in audio_sources, "refs": bool(model_def.get("image_ref_choices")), "fps": float(model_def.get("fps", 16) or 16),
             "framesMinimum": int(model_def.get("frames_minimum", 5) or 5), "framesSteps": int(model_def.get("frames_steps", 4) or 4)}
 
 
@@ -475,6 +476,41 @@ def build_task(base, *, prompt, seed, frames, fps, start_image=None, end_image=N
     elif "S" in str(settings.get("audio_prompt_type") or ""):
         settings["audio_prompt_type"] = ""
     return settings
+
+
+# --------------------------------------------------------------------------- reference images
+
+IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff")
+
+
+def ref_path(entry):
+    """A reference image's file from WanGP's settings: a path, a gallery pair [path, caption], a file dict, or None."""
+    if isinstance(entry, (list, tuple)):
+        return ref_path(entry[0]) if entry else None
+    if isinstance(entry, dict):
+        return ref_path(entry.get("path") or entry.get("name") or entry.get("orig_name"))
+    if isinstance(entry, (str, os.PathLike)):
+        return os.fspath(entry) or None
+    return None
+
+
+def ref_list(settings):
+    """The reference images in settings, as [{name, path, exists, image}] (image: a picture object kept in memory)."""
+    refs = (settings or {}).get("image_refs")
+    if refs is None:
+        return []
+    if not isinstance(refs, (list, tuple)):
+        refs = [refs]
+    out = []
+    for entry in refs:
+        path = ref_path(entry)
+        if path:
+            out.append({"name": os.path.basename(path), "path": path, "exists": os.path.isfile(path)})
+        elif hasattr(entry, "save"):                   # a PIL image
+            out.append({"name": "picture", "path": None, "exists": True, "image": entry})
+        elif isinstance(entry, (list, tuple)) and entry and hasattr(entry[0], "save"):
+            out.append({"name": "picture", "path": None, "exists": True, "image": entry[0]})
+    return out
 
 
 # --------------------------------------------------------------------------- RefMods
@@ -688,7 +724,100 @@ class RegenService:
         meta = self._meta(item)
         if not meta or not meta.get("model_type"):
             raise ValueError("This clip has no WanGP generation settings")
-        return meta
+        return self._with_embedded_refs(meta, item)
+
+    def _with_embedded_refs(self, meta, item):
+        """A clip's settings with its reference images: WanGP leaves them out of the settings it writes into a file but
+        embeds the pictures themselves (as it does when you load a video's settings back in its page)."""
+        if meta.get("image_refs") or not item:
+            return meta
+        refs = self._embedded_refs(item)
+        return {**meta, "image_refs": refs} if refs else meta
+
+    def _embedded_refs(self, item):
+        cache = os.path.join(self.root, "refcache", item["id"])
+        listing = os.path.join(cache, "refs.json")
+        try:
+            with open(listing, "r", encoding="utf-8") as handle:
+                cached = json.load(handle)
+            if cached.get("mtime") == os.path.getmtime(item["path"]) and all(os.path.isfile(p) for p in cached["refs"]):
+                return cached["refs"]
+        except (OSError, ValueError, KeyError):
+            pass
+        try:
+            from shared.utils.video_metadata import extract_source_images
+            found = extract_source_images(item["path"], cache) or {}
+        except Exception:                                          # noqa: BLE001 (outside WanGP, or no pictures)
+            return []
+        refs = [ref_path(x) for x in (found.get("image_refs") or [])]
+        refs = [p for p in refs if p and os.path.isfile(p)]
+        try:
+            os.makedirs(cache, exist_ok=True)
+            with open(listing, "w", encoding="utf-8") as handle:
+                json.dump({"mtime": os.path.getmtime(item["path"]), "refs": refs}, handle)
+        except OSError:
+            pass
+        return refs
+
+    # ---- reference images
+    def _public_refs(self, settings):
+        """The run's reference images for the dialog (paths it may show)."""
+        refs = ref_list(settings)
+        allowed = getattr(self, "_ref_paths", set())
+        allowed.update(r["path"] for r in refs if r["path"])
+        self._ref_paths = allowed
+        return [{"name": r["name"], "path": r["path"], "exists": r["exists"]} for r in refs]
+
+    def ref_file(self, path):
+        if path in getattr(self, "_ref_paths", set()) and os.path.isfile(path) and path.lower().endswith(IMAGE_EXT):
+            return path
+        return None
+
+    def _apply_refs(self, task, req, folder):
+        """WanGP's image_refs for a run, as plain file paths it can read: the settings' own references (WanGP's
+        gallery hands them over as [path, caption] pairs, which a queued task can't use, and they live in Gradio's
+        temp folder) or, when the dialog changed them, its list ({mediaId, t} frames or {path}). Copied into the job's
+        folder so they last."""
+        override = req.get("refImages")
+        entries = []
+        if override is not None:
+            for ref in override:
+                if ref.get("mediaId"):
+                    item = self._item(ref["mediaId"])
+                    entries.append({"name": item.get("name") or "reference", "path": item["path"], "exists": True,
+                                    "frame": item.get("kind") == "video", "t": float(ref.get("t") or 0)})
+                elif ref.get("path"):
+                    entries.append({"name": os.path.basename(ref["path"]), "path": ref["path"], "exists": os.path.isfile(ref["path"])})
+        else:
+            entries = ref_list(task)
+        if not entries:
+            task["image_refs"] = None
+            if override is not None:     # all removed: nothing asks for them
+                task["video_prompt_type"] = str(task.get("video_prompt_type") or "").replace("I", "")
+            return
+        missing = [e["name"] for e in entries if not e["exists"]]
+        if missing:
+            raise ValueError(f"Reference image{'s' if len(missing) > 1 else ''} not found: {', '.join(missing)}. WanGP keeps the "
+                             "references loaded in its page in a temporary folder that's cleared on restart: load them again there, "
+                             "or add them in the generate dialog's References.")
+        folder_refs = os.path.join(folder, "refs")
+        os.makedirs(folder_refs, exist_ok=True)
+        paths = []
+        for n, e in enumerate(entries, 1):
+            stem = os.path.splitext(os.path.basename(e["path"] or e["name"]))[0] or "reference"
+            if e.get("image") is not None:
+                out = os.path.join(folder_refs, f"{n:02d}_{stem}.png")
+                e["image"].save(out)
+            elif e.get("frame"):
+                out = extract_frame(e["path"], e.get("t", 0), os.path.join(folder_refs, f"{n:02d}_{stem}.png"))
+            else:
+                out = os.path.join(folder_refs, f"{n:02d}_{os.path.basename(e['path'])}")
+                shutil.copyfile(e["path"], out)
+            paths.append(out)
+        task["image_refs"] = paths
+        vpt = str(task.get("video_prompt_type") or "")
+        if "I" not in vpt:
+            task["video_prompt_type"] = vpt + "I"
 
     def _meta(self, item):
         path = self.registry.cached_file(item["id"], "metadata.json")
@@ -711,7 +840,7 @@ class RegenService:
         prompt, shots = shot_prompt(meta.get("prompt") or settings.get("prompt") or "", prompt_fps, a, b, meta.get("sliding_window_overlap") or 0)
         return {"model": {"type": model_type, "name": self.host.model_name(model_type)}, "capabilities": caps,
                 "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "range": [a, b], "sourceFps": source_fps,
-                "minSeconds": caps["framesMinimum"] / caps["fps"], "refmods": refmods}
+                "minSeconds": caps["framesMinimum"] / caps["fps"], "refmods": refmods, "refs": self._public_refs(settings)}
 
     def _item(self, media_id):
         item = self.registry.get(media_id)
@@ -772,6 +901,7 @@ class RegenService:
             raise ValueError(f"Could not prepare the inputs: {error}")
         prompt = str(req.get("prompt") or "").strip() or shot_prompt(meta.get("prompt") or "", caps["fps"], a, b)[0]
         task = build_task(settings, prompt=prompt, seed=seed, frames=frames, fps=caps["fps"], model_def=model_def, **inputs)
+        self._apply_refs(task, req, folder)
         with open(os.path.join(folder, "task.json"), "w", encoding="utf-8") as handle:
             json.dump(task, handle, indent=1, default=str)
         job = {"id": job_id, "status": "queued", "progress": 0.0, "message": "Queued in WanGP…", "created": time.time(),
@@ -1159,6 +1289,7 @@ class RegenService:
                                                           "note": step_note},
                 "windows": sliding["count"], "windowFrames": sliding["window"],
                 "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "refmods": refmods, "speech": speech,
+                "refs": self._public_refs(settings),
                 "available": ok, "reason": reason, "h3": self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}}
         return info, settings, model_def
 
@@ -1329,6 +1460,7 @@ class RegenService:
                 raise ValueError("the settings have no resolution for the masked join's control video")
             guide, mask = write_masked_guides(folder, info["pins"], lengths["total"], info["fps"], width, height)
             masked_task(task, guide, mask)
+        self._apply_refs(task, req, folder)
         with open(os.path.join(folder, "task.json"), "w", encoding="utf-8") as handle:
             json.dump({"settings": task, "plugin_data": {"video_editor": spec}}, handle, indent=1, default=str)
         job = {"id": job_id, "status": "queued", "progress": 0.0, "message": "Queued in WanGP…", "created": time.time(),
@@ -1355,7 +1487,7 @@ class RegenService:
         meta = self._meta(first) or {}
         if not meta.get("model_type"):
             raise ValueError("The stretch's first clip has no WanGP settings to render with")
-        settings, refmods = relink_refmods(dict(meta))
+        settings, refmods = relink_refmods(self._with_embedded_refs(dict(meta), first))
         model_def = self.host.model_def(settings.get("model_type")) or {}
         if "minimax_h3" not in str(settings.get("model_type") or ""):
             raise ValueError("Final renders need a MiniMax H3 model")
@@ -1482,6 +1614,7 @@ class RegenService:
             # the same stretch at the refine size, for encoding the held frames at full detail
             spec["pinvideo"] = os.path.join(folder, "pins.mp4")
             write_draft(spec["pinvideo"], plan["parts"], plan["total"], plan["fps"], plan["width"], plan["height"])
+        self._apply_refs(task, {}, folder)
         with open(os.path.join(folder, "task.json"), "w", encoding="utf-8") as handle:
             json.dump({"settings": task, "plugin_data": {"video_editor": spec}}, handle, indent=1, default=str)
         job = {"id": job_id, "status": "queued", "progress": 0.0, "message": "Queued in WanGP…", "created": time.time(),

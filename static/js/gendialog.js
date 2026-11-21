@@ -6,7 +6,7 @@ import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { api, el, modal, toast, clamp, debounce, timecode } from "./util.js";
 import { ensureGenSettings, genLabel, genOutput } from "./finalrender.js";
-import { ImagePick } from "./imagepick.js";
+import { ImagePick, RefsField } from "./imagepick.js";
 
 const PREFS = "ve_gen_prefs";
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS) || "{}"); } catch (_) { return {}; } };
@@ -208,6 +208,9 @@ export async function openGenerate(app, mode, where, preset = {}) {
   if (preset.startImage && startPick) startPick.setRef(preset.startImage);
   if (preset.endImage && endPick) endPick.setRef(preset.endImage);
   const imagesNoteEl = el("div.dim.small");
+  // reference images (WanGP's image_refs): the settings' own, or a list made here
+  const refsField = new RefsField(app);
+  let refsRow = null;
   const imagesNote = () => {
     const caps = info?.capabilities || {};
     const lines = [];
@@ -252,11 +255,13 @@ export async function openGenerate(app, mode, where, preset = {}) {
     field(fresh ? "Length" : "New footage", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seconds, el("span.dim", {}, "seconds")), lengthNote, slidingRow),
     imagesField ? field(fresh ? "Start / end images" : wantStart ? "Start image" : "End image", imagesField) : null,
     field("Settings", srcClip.row, srcCurrent.row, modelNote),
+    refsRow = field("References", refsField.node),
     field("Size", sizeSel, sizeNote),
     field("Seed", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seedSel, seedInput)),
     field("Prompt", promptBox, promptNote, joinBox),
     field("Sound", soundRow),
     error);
+  refsRow.hidden = true;   // until the run's model and settings are known
   const m = modal({ title: `${MODE_LABEL[mode]}: generate in WanGP`, body, buttons: ["spacer", { label: "Cancel" }, { label: "Queue in WanGP", primary: true, id: "btnGenGo", action: () => { submit(); return false; } }] });
   m.box.classList.add("wide");
   const go = m.box.querySelector("#btnGenGo");
@@ -315,6 +320,7 @@ export async function openGenerate(app, mode, where, preset = {}) {
     gen: sizeSel.value === "project" ? gen : null,
     startImage: startPick && !startPick.disabled ? startPick.value : null,
     endImage: endPick && !endPick.disabled ? endPick.value : null,
+    refImages: refsField.value,
   });
 
   const describePin = (p) => {
@@ -342,6 +348,8 @@ export async function openGenerate(app, mode, where, preset = {}) {
       if (slidingAllowed && !slidingTouched && windows > 1 && !sliding.checked) { sliding.checked = true; syncSliding(); }
       if (!fresh) lengthNote.textContent = `${windows > 1 ? `${windows} sliding windows` : "One run"} of ${L.totalSeconds.toFixed(2)}s (${L.total} frames): ${motionPin ? "the join frame + " : L.before ? `${(L.before / info.fps).toFixed(2)}s pinned + ` : ""}${L.newSeconds.toFixed(2)}s new${L.after ? ` + ${(L.after / info.fps).toFixed(2)}s pinned` : ""}. ${L.note}`;
       modelNote.textContent = `Model: ${info.model.name}`;
+      refsField.setSource(info.refs, srcCurrent.input.checked || !(settingsItem || s.left || s.right) ? "the Media Generator" : "the clip's settings");
+      refsRow.hidden = !(info.capabilities?.refs || (info.refs || []).length || refsField.edited);
       for (const r of info.refmods || []) modelNote.append(el(r.status === "relinked" ? "div" : "div.warn", {},
         r.status === "relinked" ? `RefMod '${r.mod}' has moved: using ${r.now}.` : `RefMod '${r.mod}' can't be found, so it will be skipped.`));
       if (!promptEdited) promptBox.value = info.prompt || "";

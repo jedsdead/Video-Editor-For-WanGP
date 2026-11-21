@@ -120,3 +120,92 @@ export class ImagePick {
     this.changed();
   }
 }
+
+// Reference images for a run (WanGP's image_refs): the ones in the settings it uses (the Media Generator's, or the
+// ones embedded in the clip it continues), which you can remove, add to (an image in the media bin, a video's frame
+// at the playhead, or an image file) or put back. Its value is null while unchanged (the settings' own references are
+// used), otherwise the list: [{mediaId, t} | {path}].
+export class RefsField {
+  constructor(app, { onChange = () => {} } = {}) {
+    this.app = app;
+    this.onChange = onChange;
+    this.items = [];
+    this.source = [];
+    this.edited = false;
+    this.list = el("div.refs-list");
+    this.add = el("select.refs-add", { title: "Add a reference image" });
+    this.file = el("input", { type: "file", accept: "image/*", multiple: true, style: { display: "none" }, onchange: () => { const fs = [...this.file.files]; this.file.value = ""; this.upload(fs); } });
+    this.reset = el("button.small", { hidden: true, title: "Use the references in the settings again", onclick: () => { this.edited = false; this.items = this.source.slice(); this.render(); this.onChange(); } }, "Put back the settings' references");
+    this.note = el("div.dim.small");
+    this.node = el("div.refs", { title: "Drop image files here to add them" }, this.list, el("div.refs-row", {}, this.add, this.reset, this.file), this.note);
+    this.add.addEventListener("change", () => {
+      const v = this.add.value; this.add.value = "";
+      if (!v) return;
+      if (v === "file") { this.file.click(); return; }
+      if (v === "playhead") { const ph = playheadFrame(); if (ph) this.push({ mediaId: ph.mediaId, t: ph.t, name: ph.label }); return; }
+      const item = P().media[v.slice(4)];
+      if (item) this.push({ mediaId: item.id, t: 0, name: item.name });
+    });
+    for (const ev of ["dragenter", "dragover"]) this.node.addEventListener(ev, (e) => {
+      if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+      e.preventDefault(); e.stopPropagation(); this.node.classList.add("over");
+    });
+    this.node.addEventListener("dragleave", () => this.node.classList.remove("over"));
+    this.node.addEventListener("drop", (e) => {
+      const fs = [...(e.dataTransfer?.files || [])].filter(x => /^image\//.test(x.type) || /\.(png|jpe?g|webp|bmp|gif|tiff?)$/i.test(x.name));
+      this.node.classList.remove("over");
+      if (!fs.length) return;
+      e.preventDefault(); e.stopPropagation();
+      this.upload(fs);
+    });
+    this.render();
+  }
+
+  // the references of the settings the run uses ([{name, path, exists}]); kept unless you've changed the list
+  setSource(refs, from) {
+    this.source = (refs || []).map(r => ({ path: r.path, name: r.name, missing: !r.exists }));
+    this.from = from;
+    if (!this.edited) this.items = this.source.slice();
+    this.render();
+  }
+
+  push(ref) { this.items.push(ref); this.edited = true; this.render(); this.onChange(); }
+
+  async upload(files) {
+    const media = await this.app.bin.importFiles(files);
+    for (const item of (media || []).filter(m => m.kind === "image")) this.items.push({ mediaId: item.id, t: 0, name: item.name });
+    this.edited = true; this.render(); this.onChange();
+  }
+
+  get value() {
+    if (!this.edited) return null;
+    return this.items.map(i => i.mediaId ? { mediaId: i.mediaId, t: i.t || 0 } : { path: i.path });
+  }
+  get count() { return this.items.length; }
+  get missing() { return this.items.filter(i => i.missing).map(i => i.name); }
+
+  render() {
+    this.list.innerHTML = "";
+    this.items.forEach((r, n) => {
+      const src = r.mediaId ? `api/media/${r.mediaId}/frame?t=${(r.t || 0).toFixed(3)}` : r.path && !r.missing ? `api/gen/refimage?path=${encodeURIComponent(r.path)}` : "";
+      this.list.append(el("div.refs-item" + (r.missing ? ".missing" : ""), { title: r.missing ? `${r.name}: the file is gone (WanGP's temporary copy was cleared). Remove it and add the picture again.` : r.name },
+        src ? el("img", { src }) : el("div.refs-gone", {}, "missing"),
+        el("span.refs-name", {}, `${n + 1}. ${r.name}`),
+        el("button.refs-x", { title: "Remove", onclick: () => { this.items.splice(n, 1); this.edited = true; this.render(); this.onChange(); } }, "✕")));
+    });
+    if (!this.items.length) this.list.append(el("span.dim.small", {}, "None"));
+    // the add menu
+    const opt = (v, l) => el("option", { value: v }, l);
+    this.add.innerHTML = "";
+    this.add.append(opt("", "Add a reference…"));
+    const ph = playheadFrame();
+    this.add.append(opt("playhead", ph ? `Picture at the playhead (${ph.label})` : "Picture at the playhead (nothing there)"));
+    if (!ph) this.add.lastChild.disabled = true;
+    const images = Object.values(P().media || {}).filter(i => i.kind === "image");
+    if (images.length) this.add.append(el("optgroup", { label: "Images in the media bin" }, ...images.map(i => opt(`img:${i.id}`, i.name))));
+    this.add.append(opt("file", "Choose image files…"));
+    this.add.value = "";
+    this.reset.hidden = !this.edited;
+    this.note.textContent = this.edited ? "Your list is used for this run." : this.items.length ? `From ${this.from || "the settings"}, in the order WanGP numbers them.` : `${this.from ? `None in ${this.from}. ` : ""}Add pictures here for models that take reference images (H3 Ref2VA).`;
+  }
+}

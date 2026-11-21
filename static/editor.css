@@ -514,3 +514,15 @@ body.picking #viewerStage, body.picking #previewCanvas { cursor: crosshair !impo
 .drift-item { display: grid; grid-template-columns: 180px 1fr; gap: 10px; padding: 6px 8px; border-radius: 6px; background: var(--bg); font-size: 12px; }
 .drift-name { cursor: pointer; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .drift-name:hover { color: var(--accent); }
+/* reference images in the generate dialog */
+.refs { border-radius: 6px; padding: 2px; }
+.refs.over { outline: 2px dashed var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.refs-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.refs-item { position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; width: 96px; padding: 4px; border-radius: 6px; background: var(--bg); }
+.refs-item img, .refs-gone { width: 88px; height: 66px; object-fit: contain; border-radius: 4px; background: #0008; }
+.refs-gone { display: flex; align-items: center; justify-content: center; color: var(--danger, #e66); font-size: 11px; }
+.refs-item.missing { outline: 1px solid var(--danger, #e66); }
+.refs-name { font-size: 11px; max-width: 88px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.refs-x { position: absolute; top: 2px; right: 2px; padding: 0 5px; font-size: 11px; line-height: 16px; border-radius: 8px; background: #000a; border: none; color: #fff; cursor: pointer; }
+.refs-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.refs-add { max-width: 300px; }
