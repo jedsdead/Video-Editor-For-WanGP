@@ -108,13 +108,23 @@ export function closeMenu() {
   if (openMenuNode) { openMenuNode.remove(); openMenuNode = null; document.querySelectorAll(".menu-btn.open").forEach(b => b.classList.remove("open")); }
 }
 
-// Fit a menu inside the window: below/right of (x, y) when there is room, otherwise moved in; tall menus scroll.
-function placeMenu(menu, x, y, alignRight = null) {
-  const rect = menu.getBoundingClientRect();
+// Opens below y when it fits; otherwise on the side with more room, scrolling when it's taller than that room (so a
+// long menu never slides up over the button that opened it).
+function placeMenu(menu, x, y, alignRight = null, above = null) {
+  let rect = menu.getBoundingClientRect();
   let left = x;
   if (alignRight !== null && left + rect.width > window.innerWidth - 6) left = alignRight - rect.width;
   menu.style.left = `${Math.max(6, Math.min(left, window.innerWidth - rect.width - 6))}px`;
-  menu.style.top = `${Math.max(6, Math.min(y, window.innerHeight - rect.height - 6))}px`;
+  const below = window.innerHeight - y - 6;
+  const roomAbove = (above ?? y) - 6;
+  if (rect.height <= below || below >= roomAbove || below >= 240) {
+    if (rect.height > below) menu.style.maxHeight = `${Math.max(120, below)}px`;
+    menu.style.top = `${y}px`;
+  } else {
+    if (rect.height > roomAbove) menu.style.maxHeight = `${roomAbove}px`;
+    rect = menu.getBoundingClientRect();
+    menu.style.top = `${Math.max(6, (above ?? y) - rect.height)}px`;
+  }
 }
 
 function buildMenu(items, level) {
@@ -156,7 +166,7 @@ function openSubmenu(row, items, level) {
   document.getElementById("menuLayer").append(menu);
   subMenus.push(menu);
   const r = row.getBoundingClientRect();
-  placeMenu(menu, r.right - 2, r.top - 5, r.left + 2);
+  placeMenu(menu, r.right - 2, r.top - 5, r.left + 2, r.bottom + 5);
 }
 
 // items: [{label, kbd, action, disabled, check, submenu: [...]}, "-", {head}]
@@ -168,6 +178,7 @@ export function showMenu(x, y, items) {
   openMenuNode = menu;
   return menu;
 }
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openMenuNode) { closeMenu(); e.stopPropagation(); } }, true);
 document.addEventListener("pointerdown", (e) => {
   if (openMenuNode && !openMenuNode.contains(e.target) && !subMenus.some(m => m.contains(e.target)) && !e.target.closest(".menu-btn")) closeMenu();
 });

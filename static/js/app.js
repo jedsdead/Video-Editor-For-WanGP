@@ -510,6 +510,8 @@ function menuItems(name) {
 }
 
 function openMenu(btn) {
+  // clicking the open menu's button again closes it
+  if (btn.classList.contains("open") && document.querySelector("#menuLayer .menu")) { closeMenu(); return; }
   const r = btn.getBoundingClientRect();
   showMenu(r.left, r.bottom + 2, menuItems(btn.dataset.menu));
   btn.classList.add("open");
