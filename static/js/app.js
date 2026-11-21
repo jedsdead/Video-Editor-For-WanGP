@@ -819,6 +819,14 @@ async function main() {
   try { app.renderer = new Renderer($("previewCanvas")); }
   catch (e) { $("viewerMsg").textContent = `Preview unavailable: ${e.message}`; throw e; }
   app.playback = new Playback(app.renderer, $("viewerStage"));
+  if (app.renderer.software) {
+    console.warn("[Video Editor] the viewer is drawn without a GPU:", app.renderer.gpu);
+    toast(`This window has no GPU acceleration (drawing with ${app.renderer.gpu || "a software renderer"}), so playback will stutter, go black and drop sound. If it's the WanGP Manager, check its GPU / hardware acceleration setting, or open the editor in a browser.`, "warn", 20000);
+  }
+  // the viewer's WebGL dropped (a heavy GPU job): it normally comes back by itself; say so if it doesn't
+  app.renderer.onLost = () => setTimeout(() => {
+    if (app.renderer.lost) toast("The viewer lost its GPU context and hasn't got it back (the GPU may be busy with a generation). Reload the editor if it stays black.", "warn", 12000);
+  }, 5000);
   app.bin = new MediaBin(app);
   app.inspector = new Inspector(app);
   app.colour = new ColourPanel(app);

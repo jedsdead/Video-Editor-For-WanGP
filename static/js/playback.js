@@ -17,6 +17,8 @@ import { dbToGain, clamp } from "./util.js";
 import { buildChain, PITCH_WORKLET, WORKLET_EFFECTS } from "./audiofx.js";
 
 const LOOKAHEAD = 2.5;
+const IDLE_MS = 4000;          // a media element not used for this long is let go
+const MAX_IDLE_MEDIA = 6;      // media elements kept for later at most (each holds a connection to the server while it loads)
 
 // A clip's mask in source picture coordinates (the mask is set as seen, so a flip mirrors where it sits).
 export function maskFor(clip) {
@@ -473,6 +475,46 @@ export class Playback {
     } else if (Math.abs(el.currentTime - desired) > (isAudio ? 0.12 : 0.3) * Math.max(1, Math.abs(this.rate))) {
       el.currentTime = desired;
     }
+    this.watch(entry, clip, isAudio);
+  }
+
+  // Watchdog: an element that should be playing but hasn't moved for 1.5 s (its download stalled, or its decoder
+  // stopped) shows black or goes silent until the page is reloaded. Rebuild it instead.
+  watch(entry, clip, isAudio) {
+    const el = entry.el, now = performance.now();
+    // moving: playing, with data ahead, and its time going forward (our own seeks don't count)
+    const moving = !el.paused && el.readyState >= 3 && entry.wdT !== undefined && Math.abs(el.currentTime - entry.wdT) > 0.005;
+    entry.wdT = el.currentTime;
+    // (a pause in watching — playback stopped, or the clip was off screen — starts the count again)
+    const fresh = entry.wdSeen === undefined || now - entry.wdSeen > 300;
+    entry.wdSeen = now;
+    if (moving || fresh) { entry.wdAt = now; return; }
+    if (now - entry.wdAt < 1500 || now - (entry.created || 0) < 2500) return;
+    this.recover(clip.id, entry, isAudio ? "audio" : "video");
+  }
+
+  recover(clipId, entry, what) {
+    const el = entry.el;
+    const note = { at: new Date().toISOString(), what, clip: clipId, media: entry.mediaId, readyState: el.readyState, networkState: el.networkState,
+      error: el.error?.code || null, paused: el.paused, time: +el.currentTime.toFixed(3), pool: this.pool.size,
+      buffered: el.buffered?.length ? +el.buffered.end(el.buffered.length - 1).toFixed(2) : 0 };
+    (window.__vePlaybackLog ||= []).push(note);
+    if (window.__vePlaybackLog.length > 200) window.__vePlaybackLog.shift();
+    console.warn("[Video Editor] playback: rebuilt a stalled", what, "element", note);
+    this.dispose(clipId);
+    // several in a short time: the browser's connections to the server may be used up by elements kept for later;
+    // let those go too
+    this.recoveries = (this.recoveries || []).filter(t => performance.now() - t < 10000).concat(performance.now());
+    if (this.recoveries.length >= 3) this.trimPool(new Set(), 0);
+    this.dirty = true;
+  }
+
+  // Let idle media elements go (each keeps a connection to the server while it loads): all but the newest `keep`
+  // that aren't in use right now.
+  trimPool(needed, keep = MAX_IDLE_MEDIA) {
+    const idle = [...this.pool].filter(([id, e]) => !needed.has(id) && (e.kind === "video" || e.kind === "audio"))
+      .sort((a, b) => b[1].used - a[1].used);
+    for (const [id] of idle.slice(keep)) this.dispose(id);
   }
 
   // ---------------------------------------------------------------- per frame
@@ -799,8 +841,9 @@ export class Playback {
       if (needed.has(id)) continue;
       if (entry.el.pause && !entry.el.paused && !this.scrubbing) entry.el.pause();
       if (entry.gain && this.ctx && !this.scrubbing) entry.gain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.01);
-      if (!getClip(id) || now - entry.used > 8000) this.dispose(id);
+      if (!getClip(id) || now - entry.used > IDLE_MS) this.dispose(id);
     }
+    this.trimPool(needed);
     if (this.playing || this.lastEmit !== t) { this.lastEmit = t; bus.emit("time", t); }
     if (drawn) bus.emit("rendered");
   }

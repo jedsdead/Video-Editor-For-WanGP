@@ -193,13 +193,20 @@ export class Renderer {
     this.onRestore = null;
     // A heavy GPU job (WanGP decoding a generation) can make the browser drop the WebGL context, which leaves the
     // viewer black until it is rebuilt: keep the context restorable and rebuild everything on restore.
-    canvas.addEventListener("webglcontextlost", (e) => { e.preventDefault(); this.lost = true; });
+    canvas.addEventListener("webglcontextlost", (e) => { e.preventDefault(); this.lost = true; this.lostAt = performance.now(); if (this.onLost) this.onLost(); });
     canvas.addEventListener("webglcontextrestored", () => {
       this.lost = false;
       this.init();
       if (this.onRestore) this.onRestore();
     });
     this.init();
+    // which GPU draws it: a software one (the browser or its host window started without GPU acceleration) can't
+    // keep up with video, so playback stutters, goes black and drops sound
+    try {
+      const info = gl.getExtension("WEBGL_debug_renderer_info");
+      this.gpu = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER) || "");
+    } catch (_) { this.gpu = ""; }
+    this.software = /swiftshader|llvmpipe|softpipe|software|basic render/i.test(this.gpu);
   }
 
   init() {
