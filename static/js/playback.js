@@ -22,6 +22,12 @@ export function diag(event, data = {}) {
     fetch("api/diag", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ event, data, at: new Date().toISOString() }), keepalive: true }).catch(() => {});
   } catch (_) { /* ignore */ }
 }
+// a short, stable tag for a string (for addresses)
+function hashText(text) {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
 const LOOKAHEAD = 2.5;
 const IDLE_MS = 4000;          // a media element not used for this long is let go
 const MAX_IDLE_MEDIA = 6;      // media elements kept for later at most (each holds a connection to the server while it loads)
@@ -368,11 +374,16 @@ export class Playback {
   }
 
   // ---------------------------------------------------------------- element pool
+  // Each address names the file it serves: the proxy address serves the original until the proxy is built, and a
+  // relinked item serves another file. The browser keeps what it loaded per address (across players, until the page
+  // reloads), so the same address handing out a different file leaves a new player waiting forever (black, silent).
   url(item, reversed, kind) {
-    if (item.kind === "image") return `api/media/${item.id}/original`;
+    const file = `f=${hashText(`${item.path || ""}|${item.duration || ""}|${item.size || ""}`)}`;
+    if (item.kind === "image") return `api/media/${item.id}/original?${file}`;
     // the viewer's Full res: the original file's picture (sound stays on the light proxy); reversed clips keep their proxy
-    if (kind === "video" && !reversed && this.fullRes()) return `api/media/${item.id}/original`;
-    return reversed ? `api/media/${item.id}/proxy_rev` : `api/media/${item.id}/proxy`;
+    if (kind === "video" && !reversed && this.fullRes()) return `api/media/${item.id}/original?${file}`;
+    if (reversed) return `api/media/${item.id}/proxy_rev?${file}&s=${item.proxy_rev === "ready" ? "p" : "o"}`;
+    return `api/media/${item.id}/proxy?${file}&s=${item.proxy === "ready" ? "p" : "o"}`;
   }
 
   fullRes() { return state.viewerQuality === "full"; }
@@ -393,6 +404,8 @@ export class Playback {
     const rev = kind === "video" && this.reversedReady(clip);
     const full = kind === "video" && !rev && this.fullRes();
     if (entry && (entry.mediaId !== clip.mediaId || entry.kind !== kind || entry.rev !== rev || !!entry.full !== full)) { this.dispose(clip.id); entry = null; }
+    // the file behind it changed (its proxy got built, or it was relinked): a new player on the new address
+    if (entry && entry.url && kind !== "title" && kind !== "solid" && kind !== "gradient" && entry.url !== this.url(item, rev, kind)) { this.dispose(clip.id); entry = null; }
     // a media element whose decoder failed (it happens after a GPU reset) never recovers by itself: rebuild it,
     // at most every 2 s so a file that really is broken doesn't thrash
     if (entry && entry.el.error && performance.now() - (entry.created || 0) > 2000) { this.dispose(clip.id); entry = null; }
@@ -410,8 +423,9 @@ export class Playback {
         el.addEventListener("loadeddata", () => { this.dirty = true; });
         el.addEventListener("error", () => { this.dirty = true; });
       }
-      if (el.tagName !== "CANVAS") el.src = this.url(item, rev, kind);
-      entry = { el, kind, rev, full, mediaId: clip.mediaId, used: performance.now(), created: performance.now(), trackId: null };
+      const src = el.tagName !== "CANVAS" ? this.url(item, rev, kind) : null;
+      if (src) el.src = src;
+      entry = { el, url: src, kind, rev, full, mediaId: clip.mediaId, used: performance.now(), created: performance.now(), trackId: null };
       this.pool.set(clip.id, entry);
       // the frame the video is really showing (its reported time jumps the moment a seek is asked for; the picture
       // follows later), so a cut can wait for the picture rather than draw a stale one
@@ -517,10 +531,14 @@ export class Playback {
   watchParked(entry, clip) {
     const el = entry.el, now = performance.now();
     const bad = el.error || el.readyState < 2 || el.seeking;
-    if (!bad) { entry.parkBad = null; return; }
+    if (!bad) { entry.parkBad = null; this.parkTries?.delete(clip.id); return; }
     entry.parkBad ??= now;
     this.pending = true;   // keep looking while it isn't right
-    if (now - entry.parkBad < (el.error ? 500 : 1500) || now - (entry.created || 0) < 2500) return;
+    // a clip that keeps failing is tried less and less often (2.5 s, 5 s, 10 s… up to 30 s)
+    const tries = (this.parkTries ||= new Map()).get(clip.id) || 0;
+    const wait = Math.min(30000, 2500 * 2 ** Math.max(0, tries - 1));
+    if (now - entry.parkBad < (el.error ? 500 : 1500) || now - (entry.created || 0) < wait) return;
+    this.parkTries.set(clip.id, tries + 1);
     this.recover(clip.id, entry, "video (parked)");
   }
 
