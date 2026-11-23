@@ -6,6 +6,8 @@ import { api, el, toast, clamp } from "./util.js";
 import { ColorWheel, ZONES } from "./grade.js";
 import { CURVES } from "./keys.js";
 import { CurvesEditor } from "./curveseditor.js";
+import { LOOKS } from "./effects.js";
+import { lookTile } from "./effectspanel.js";
 
 const WHEELS = [["lift", "Lift", -0.5, 0.5], ["gamma", "Gamma", -0.8, 0.8], ["gain", "Gain", -0.8, 0.8]];
 const ZONE_LABELS = { master: "Master", shadows: "Shadows", mids: "Midtones", highs: "Highlights" };
@@ -105,7 +107,7 @@ export class ColourPanel {
       el("div.field.wide", { style: { marginBottom: "8px" } }, el("label", {}, "Wheels"), this.styleSelect)),
       el("div.c-wheels", {}, this.lggBox, this.zonesBox), el("div.c-gap", { style: { height: "10px" } }), el("div.c-sliders", {}, sliderBox, this.wbSection()),
       el("div.c-curves", {}, this.curvesSection()),
-      el("div.c-side", {}, this.matchSection(),
+      el("div.c-side", {}, this.looksSection(), this.matchSection(),
       el("div.insp-section", { style: { marginTop: "8px" } }, el("h4", {}, "LUT"),
         el("div.field.wide", {}, el("label", {}, "LUT"), this.lutSelect),
         el("div.field", {}, el("label", {}, "Mix"), this.lutMix, this.lutMixVal),
@@ -118,6 +120,20 @@ export class ColourPanel {
     bus.on("time", () => { const now = performance.now(); if (now - last > 100) { last = now; this.sync(); } });
     this.refreshLuts();
     this.sync();
+  }
+
+  // Colour looks: one-click styles added as a "Colour look" effect on top of the grade (the wheels and curves stay as they
+  // are); its amount and keyframes are in the Inspector.
+  looksSection() {
+    const remove = () => {
+      const ids = this.targets().filter(c => (c.effects || []).some(f => f.type === "look")).map(c => c.id);
+      if (!ids.length) { toast("The selected clips have no look"); return; }
+      M.edit("Remove look", () => { for (const id of ids) { const c = M.getClip(id); c.effects = c.effects.filter(f => f.type !== "look"); } });
+    };
+    return el("div.insp-section", { style: { marginTop: "8px" } }, el("h4", {}, "Looks"),
+      el("div.tgrid.looks-grid", {}, LOOKS.map(l => lookTile(this.app, l, { small: true }))),
+      el("div.btnrow", { style: { marginTop: "6px" } }, el("span.dim.small", { style: { flex: "1" } }, "Added as a Colour look effect on top of the grade: set its amount in the Inspector."),
+        el("button.small", { title: "Take the look off the selected clips", onclick: remove }, "Remove look")));
   }
 
   curvesSection() {

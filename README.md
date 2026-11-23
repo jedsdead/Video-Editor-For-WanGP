@@ -41,6 +41,7 @@ A multi-track video editor that runs as a plugin inside [WanGP](https://github.c
   - **Solid colour** and **Gradient** (two colours at any angle)
   - **Adjustment layer:** its colour grade and effects apply to everything on the tracks below it for as long as it lasts, with opacity and fades to mix it in.
 - **Video effects:** Blur, Sharpen, Vignette, Film grain, Black & white, Chroma key (with spill removal), Flip, Pixelate, Chromatic aberration and Letterbox (2.76, 2.39, 2, 1.85, 16:9, 4:3 or 1:1, any bar colour).
+- **Colour looks:** Teal & orange, Day for night, Matrix, Sepia, Bleach bypass, Noir, Warm, Cool, Faded film and Cross process, in the Effects panel and the Colour page's Looks section. A look is an effect on top of the clip's grade (the wheels and curves stay as they are): click one to give it to the selected clips (a clip with a look gets the new one instead), drag it onto a clip, and set its amount (keyframable) in the Inspector. The export applies exactly the same maths as the viewer.
   - Drag an effect onto a clip, or click it to add it to the selected clips.
   - In the Inspector, effects stack in order after the colour grade: switch each on or off, move it up or down, reset or remove it. Every slider keyframes with ◆.
   - Right-click a clip to copy, paste or remove its effects.

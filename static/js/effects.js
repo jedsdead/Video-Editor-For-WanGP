@@ -1,6 +1,45 @@
 // Effect catalogue and shader maths. Effects run in the clip's own image space, in order, on premultiplied colour.
 // fx.py implements the same effects for export; parameter units are the ones shown in the Inspector.
 
+// Colour looks (the "look" effect): one-click styles applied on top of the clip's grade. ids are fixed (projects keep them).
+export const LOOKS = [
+  { id: 1, label: "Teal & orange" },
+  { id: 2, label: "Day for night" },
+  { id: 3, label: "Matrix" },
+  { id: 4, label: "Sepia" },
+  { id: 5, label: "Bleach bypass" },
+  { id: 6, label: "Noir" },
+  { id: 7, label: "Warm" },
+  { id: 8, label: "Cool" },
+  { id: 9, label: "Faded film" },
+  { id: 10, label: "Cross process" },
+];
+
+// The same look on one straight RGB colour (0..1), for previews; must match the shader (uType 10) and fx.py.
+export function lookRGB(style, s, amount = 1) {
+  const luma = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  const sm = (e0, e1, x) => { const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+  const sat = (c, k) => { const l = luma(c); return c.map(v => l + (v - l) * k); };
+  const cl = (c) => c.map(v => Math.min(1, Math.max(0, v)));
+  s = cl(s);
+  const l = luma(s);
+  let r = s;
+  if (style === 1) {
+    const t = sm(0.15, 0.85, l), tint = [0 + 1 * t, 0.45 + 0.1 * t, 0.55 - 0.3 * t], lt = luma(tint);
+    r = sat(cl(s.map((v, i) => v + (tint[i] - lt) * 0.35)), 1.15);
+  } else if (style === 2) { r = sat(s.map(v => v * 0.38), 0.35); r = cl(r.map((v, i) => v * [0.75, 0.9, 1.35][i])).map(v => v ** 1.15); }
+  else if (style === 3) { const m = [l * 0.65, l * 1.05 + 0.03, l * 0.6]; r = s.map((v, i) => (v + (m[i] - v) * 0.85 - 0.5) * 1.2 + 0.5); }
+  else if (style === 4) r = [[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.272, 0.534, 0.131]].map(k => k[0] * s[0] + k[1] * s[1] + k[2] * s[2]);
+  else if (style === 5) { const ov = s.map(v => l >= 0.5 ? 1 - 2 * (1 - v) * (1 - l) : 2 * v * l); r = sat(ov, 0.55); }
+  else if (style === 6) { const v = sm(0.05, 0.95, l); r = [v, v, v]; }
+  else if (style === 7) r = [s[0] * 1.08 + 0.02, s[1] + 0.01, s[2] * 0.86];
+  else if (style === 8) r = [s[0] * 0.88, s[1] * 0.98, s[2] * 1.1];
+  else if (style === 9) { r = sat(s.map(v => v * 0.82 + 0.1), 0.75); r = r.map((v, i) => v + [0.03, 0.01, -0.02][i] * l); }
+  else if (style === 10) r = [sm(0, 1, s[0]), s[1] ** 0.85, s[2] * 0.7 + 0.12];
+  r = cl(r);
+  return s.map((v, i) => v + (r[i] - v) * amount);
+}
+
 export const EFFECTS = {
   blur: { label: "Blur", params: [{ key: "amount", label: "Amount", min: 0, max: 100, step: 0.5, def: 20, unit: "%" }] },
   sharpen: { label: "Sharpen", params: [{ key: "amount", label: "Amount", min: 0, max: 300, step: 1, def: 60, unit: "%" }] },
@@ -25,8 +64,11 @@ export const EFFECTS = {
   letterbox: { label: "Letterbox", params: [
     { key: "ratio", label: "Aspect ratio", type: "select", def: 2.39, options: [[2.76, "2.76 : 1 (Ultra Panavision)"], [2.39, "2.39 : 1 (Scope)"], [2.0, "2 : 1"], [1.85, "1.85 : 1 (Flat)"], [1.78, "16 : 9"], [1.33, "4 : 3"], [1.0, "1 : 1"]] },
     { key: "color", label: "Bar colour", type: "color", def: "#000000" }] },
+  look: { label: "Colour look", params: [
+    { key: "style", label: "Look", type: "select", def: 1, options: LOOKS.map(l => [l.id, l.label]) },
+    { key: "amount", label: "Amount", min: 0, max: 100, step: 0.5, def: 100, unit: "%" }] },
 };
-export const EFFECT_ORDER = ["blur", "sharpen", "vignette", "grain", "bw", "chroma", "flip", "pixelate", "aberration", "letterbox"];
+export const EFFECT_ORDER = ["blur", "sharpen", "vignette", "grain", "bw", "chroma", "flip", "pixelate", "aberration", "letterbox", "look"];
 export const EFFECT_TYPE_INDEX = Object.fromEntries(EFFECT_ORDER.map((id, i) => [id, i]));
 
 export const GENERATORS = [
@@ -66,6 +108,7 @@ export function effectPasses(type, p, w, h, frame = 0) {
     case "pixelate": return p.size > 0 ? [{ type: t, a: [Math.max(1, p.size / 100 * 0.1 * h), 0, 0, 0] }] : [];
     case "aberration": return p.amount > 0 ? [{ type: t, a: [p.amount / 100 * 0.01, 0, 0, 0] }] : [];
     case "letterbox": return [{ type: t, a: [Number(p.ratio) || 2.39, aspect, 0, 0], col: hexRgb(p.color) }];
+    case "look": return p.amount > 0 ? [{ type: t, a: [Math.round(Number(p.style) || 1), p.amount / 100, 0, 0] }] : [];
     default: return [];
   }
 }
@@ -137,6 +180,35 @@ void main() {
     float ratio = uA.x, aspect = uA.y;
     bool bar = aspect < ratio ? abs(vUv.y - 0.5) > 0.5 * aspect / ratio : abs(vUv.x - 0.5) > 0.5 * ratio / aspect;
     o = bar ? vec4(uCol, 1.0) : c; return;
+  }
+  if (uType == 10) {                      // colour look on straight colour: style, amount (fx.py Effects._look)
+    vec3 s = c.a > 0.0 ? clamp(c.rgb / c.a, 0.0, 1.0) : vec3(0.0);
+    float l = luma(s); int st = int(uA.x + 0.5); vec3 r = s;
+    if (st == 1) {                        // teal shadows, orange highlights, a little more saturation
+      vec3 tint = mix(vec3(0.0, 0.45, 0.55), vec3(1.0, 0.55, 0.25), smoothstep(0.15, 0.85, l));
+      r = clamp(s + (tint - luma(tint)) * 0.35, 0.0, 1.0);
+      r = mix(vec3(luma(r)), r, 1.15);
+    } else if (st == 2) {                 // day for night: much darker, desaturated, blue
+      r = s * 0.38; r = mix(vec3(luma(r)), r, 0.35); r *= vec3(0.75, 0.9, 1.35); r = pow(clamp(r, 0.0, 1.0), vec3(1.15));
+    } else if (st == 3) {                 // matrix: green monochrome with more contrast
+      r = mix(s, vec3(l * 0.65, l * 1.05 + 0.03, l * 0.6), 0.85); r = (r - 0.5) * 1.2 + 0.5;
+    } else if (st == 4) {
+      r = vec3(dot(s, vec3(0.393, 0.769, 0.189)), dot(s, vec3(0.349, 0.686, 0.168)), dot(s, vec3(0.272, 0.534, 0.131)));
+    } else if (st == 5) {                 // bleach bypass: overlaid with its own luminance, half desaturated
+      vec3 ov = mix(2.0 * s * l, 1.0 - 2.0 * (1.0 - s) * (1.0 - l), step(0.5, l)); r = mix(ov, vec3(luma(ov)), 0.45);
+    } else if (st == 6) {
+      r = vec3(smoothstep(0.05, 0.95, l));
+    } else if (st == 7) {
+      r = s * vec3(1.08, 1.0, 0.86) + vec3(0.02, 0.01, 0.0);
+    } else if (st == 8) {
+      r = s * vec3(0.88, 0.98, 1.1);
+    } else if (st == 9) {                 // faded film: lifted blacks, softer contrast, warm highlights
+      r = s * 0.82 + 0.1; r = mix(vec3(luma(r)), r, 0.75); r += vec3(0.03, 0.01, -0.02) * l;
+    } else if (st == 10) {                // cross process: per-channel curves
+      r = vec3(smoothstep(0.0, 1.0, s.r), pow(s.g, 0.85), s.b * 0.7 + 0.12);
+    }
+    r = clamp(r, 0.0, 1.0);
+    o = vec4(mix(s, r, uA.y) * c.a, c.a); return;
   }
   o = c;
 }`;

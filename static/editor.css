@@ -534,3 +534,8 @@ body.picking #viewerStage, body.picking #previewCanvas { cursor: crosshair !impo
 .arefs-item.over { opacity: .45; }
 .arefs-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arefs-item .refs-x { top: 50%; transform: translateY(-50%); }
+/* colour looks in the Colour panel: compact */
+.looks-grid { grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)) !important; gap: 6px !important; }
+.looks-grid .ttile { padding: 4px; }
+.looks-grid .ttile canvas { width: 100%; height: auto; }
+.looks-grid .ttile span { font-size: 11px; }

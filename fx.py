@@ -20,6 +20,7 @@ DEFAULTS = {
     "pixelate": {"size": 20},
     "aberration": {"amount": 20},
     "letterbox": {"ratio": 2.39, "color": "#000000"},
+    "look": {"style": 1, "amount": 100},
 }
 
 
@@ -228,4 +229,54 @@ class Effects:
                 bar = (u - 0.5).abs() > 0.5 * ratio / aspect
             col = torch.tensor([*T.hex_to_rgb(p.get("color") or "#000000"), 1.0], device=self.device).view(4, 1, 1)
             return torch.where(bar.unsqueeze(0), col.expand_as(img), img)
+        if kind == "look":
+            amount = num("amount") / 100
+            return self._look(img, int(round(num("style") or 1)), amount) if amount > 0 else img
         return img
+
+    def _look(self, img, style, amount):
+        """Colour looks (mirrors effects.js uType 10): on straight colour, mixed in by amount."""
+        torch = self.torch
+        rgb, a = img[:3], img[3:4]
+        s = torch.where(a > 0, rgb / a.clamp(min=1e-6), torch.zeros_like(rgb)).clamp(0, 1)
+        lum = lambda x: (x * self.luma).sum(0, keepdim=True)
+        vec = lambda *v: torch.tensor(v, device=s.device, dtype=s.dtype).view(3, 1, 1)
+        l = lum(s)
+        r = s
+        if style == 1:
+            t = self._smooth(0.15, 0.85, l)
+            tint = vec(0.0, 0.45, 0.55) + (vec(1.0, 0.55, 0.25) - vec(0.0, 0.45, 0.55)) * t
+            r = (s + (tint - lum(tint)) * 0.35).clamp(0, 1)
+            lr = lum(r)
+            r = lr + (r - lr) * 1.15
+        elif style == 2:
+            r = s * 0.38
+            lr = lum(r)
+            r = lr + (r - lr) * 0.35
+            r = (r * vec(0.75, 0.9, 1.35)).clamp(0, 1) ** 1.15
+        elif style == 3:
+            m = torch.cat([l * 0.65, l * 1.05 + 0.03, l * 0.6], 0)
+            r = s + (m - s) * 0.85
+            r = (r - 0.5) * 1.2 + 0.5
+        elif style == 4:
+            r = torch.cat([(s * vec(0.393, 0.769, 0.189)).sum(0, keepdim=True), (s * vec(0.349, 0.686, 0.168)).sum(0, keepdim=True),
+                           (s * vec(0.272, 0.534, 0.131)).sum(0, keepdim=True)], 0)
+        elif style == 5:
+            ov = torch.where(l >= 0.5, 1.0 - 2.0 * (1.0 - s) * (1.0 - l), 2.0 * s * l)
+            lo = lum(ov)
+            r = ov + (lo - ov) * 0.45
+        elif style == 6:
+            r = self._smooth(0.05, 0.95, l).expand_as(s)
+        elif style == 7:
+            r = s * vec(1.08, 1.0, 0.86) + vec(0.02, 0.01, 0.0)
+        elif style == 8:
+            r = s * vec(0.88, 0.98, 1.1)
+        elif style == 9:
+            r = s * 0.82 + 0.1
+            lr = lum(r)
+            r = lr + (r - lr) * 0.75
+            r = r + vec(0.03, 0.01, -0.02) * l
+        elif style == 10:
+            r = torch.cat([self._smooth(0.0, 1.0, s[0:1]), s[1:2].clamp(min=0) ** 0.85, s[2:3] * 0.7 + 0.12], 0)
+        r = r.clamp(0, 1)
+        return torch.cat([(s + (r - s) * amount) * a, a], 0)

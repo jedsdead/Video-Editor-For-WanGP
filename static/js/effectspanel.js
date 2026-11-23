@@ -3,7 +3,7 @@
 import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { el, toast } from "./util.js";
-import { EFFECTS, EFFECT_ORDER, GENERATORS, defaultEffectParams } from "./effects.js";
+import { EFFECTS, EFFECT_ORDER, GENERATORS, LOOKS, lookRGB, defaultEffectParams } from "./effects.js";
 import { AUDIO_EFFECTS, AUDIO_EFFECT_GROUPS, defaultAudioParams } from "./audiofx.js";
 
 // A small picture for an audio effect: a waveform, shaped by what the effect does.
@@ -97,7 +97,7 @@ function paintAudioEffect(canvas, type) {
 const BLURB = {
   blur: "Gaussian blur", sharpen: "Crisper detail", vignette: "Darken the edges", grain: "Animated film grain",
   bw: "Black and white", chroma: "Key out green or blue", flip: "Mirror the picture", pixelate: "Mosaic blocks",
-  aberration: "Colour fringing", letterbox: "Cinema bars",
+  aberration: "Colour fringing", letterbox: "Cinema bars", look: "Colour looks: teal & orange, day for night, matrix, sepia…",
   __title__: "Text with font, outline and shadow", __solid__: "A full-frame colour", __gradient__: "Two-colour linear gradient",
   __adjust__: "Grade and effects for everything below",
 };
@@ -164,6 +164,52 @@ function paintEffect(canvas, type) {
   ctx.restore();
 }
 
+// A colour look's preview: the scene with the look worked out pixel by pixel (the same maths as the viewer).
+export function paintLook(canvas, style) {
+  const ctx = canvas.getContext("2d");
+  const { width: w, height: h } = canvas;
+  scene(ctx, w, h);
+  const img = ctx.getImageData(0, 0, w, h);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const r = lookRGB(style, [img.data[i] / 255, img.data[i + 1] / 255, img.data[i + 2] / 255]);
+    img.data[i] = r[0] * 255; img.data[i + 1] = r[1] * 255; img.data[i + 2] = r[2] * 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// A tile for a colour look: click adds it to the selected video clips (or changes the look they have), drag onto a clip.
+export function lookTile(app, look, { small = false } = {}) {
+  const canvas = el("canvas", { width: small ? 72 : 96, height: small ? 40 : 54 });
+  paintLook(canvas, look.id);
+  return el("div.ttile.fxtile", {
+    draggable: true, title: `${look.label}: a colour look on top of the clip's grade. Click to give it to the selected clips (it replaces a look they already have), or drag onto a clip. Set how much in the Inspector.`,
+    ondragstart: (e) => { e.dataTransfer.setData("text/x-ve-effect", `look:${look.id}`); e.dataTransfer.effectAllowed = "copy"; },
+    onclick: () => {
+      const ids = M.editTargets().filter(c => M.trackKind(c.trackId) === "video").map(c => c.id);
+      if (!ids.length) { toast("Select a video clip first, or drag the look onto one", "warn"); return; }
+      applyLook(app, look.id, ids);
+    },
+  }, canvas, el("span", {}, look.label));
+}
+
+// Give clips a look: changes the look effect a clip already has (keeping its amount and keyframes), else adds one.
+export function applyLook(app, style, ids) {
+  const look = LOOKS.find(l => l.id === style);
+  let n = 0;
+  M.edit(`Look: ${look?.label || style}`, () => {
+    for (const id of ids) {
+      const c = M.getClip(id);
+      if (!c || M.trackKind(c.trackId) !== "video") continue;
+      const fx = (c.effects || []).find(f => f.type === "look");
+      if (fx) fx.params = { ...fx.params, style };
+      else M.addEffect([id], "look", { ...defaultEffectParams("look"), style });
+      n++;
+    }
+  });
+  if (n) toast(`${look?.label || "Look"} on ${n} clip${n > 1 ? "s" : ""}`);
+  bus.emit("selection");
+}
+
 function paintGenerator(canvas, kind) {
   const ctx = canvas.getContext("2d");
   const { width: w, height: h } = canvas;
@@ -204,7 +250,8 @@ export class EffectsPanel {
     // the Audio page lists only audio effects
     const audioPage = document.body.dataset.page === "audio";
     const gens = audioPage ? [] : GENERATORS.filter(g => this.match(g.label, g.id));
-    const fx = audioPage ? [] : EFFECT_ORDER.filter(id => this.match(EFFECTS[id].label, id));
+    const fx = audioPage ? [] : EFFECT_ORDER.filter(id => id !== "look" && this.match(EFFECTS[id].label, id));
+    const looks = audioPage ? [] : LOOKS.filter(l => this.match(l.label, "look"));
     const afxMatch = (id) => !this.filter || AUDIO_EFFECTS[id].label.toLowerCase().includes(this.filter) || AUDIO_EFFECTS[id].blurb.toLowerCase().includes(this.filter);
     const afxGroups = AUDIO_EFFECT_GROUPS.map(([group, ids]) => [group, ids.filter(afxMatch)]).filter(([, ids]) => ids.length);
     const afx = afxGroups.flatMap(([, ids]) => ids);
@@ -212,8 +259,9 @@ export class EffectsPanel {
     this.grid.classList.toggle("filtering", !!this.filter);
     if (gens.length) this.grid.append(head("Generators", gens.length), el("div.tgrid", {}, gens.map(g => this.generatorTile(g))));
     if (fx.length) this.grid.append(head("Video effects", fx.length), el("div.tgrid", {}, fx.map(id => this.effectTile(id))));
+    if (looks.length) this.grid.append(head("Colour looks", looks.length), el("div.tgrid", {}, looks.map(l => lookTile(this.app, l))));
     for (const [group, ids] of afxGroups) this.grid.append(head(`Audio · ${group}`, ids.length), el("div.tgrid", {}, ids.map(id => this.audioTile(id))));
-    if (!gens.length && !fx.length && !afx.length) this.grid.append(el("div.empty-note", {}, "Nothing matches."));
+    if (!gens.length && !fx.length && !looks.length && !afx.length) this.grid.append(el("div.empty-note", {}, "Nothing matches."));
     this.grid.append(el("div.dim", { style: { fontSize: "11px", marginTop: "8px", lineHeight: "1.45" } },
       "Generators: drag onto a video track, or double-click to add at the playhead on the top track. Effects: drag onto a clip, or click to add to the selected clips (audio effects go on audio clips). Edit, reorder and keyframe effects in the Inspector."));
   }
@@ -299,6 +347,7 @@ export class EffectsPanel {
     if (!state.selection.has(hit.clip.id)) M.select([hit.clip.id]);
     // onto a closed compound clip: the compound's own effects (on top of its clips')
     const ids = M.editTargets().filter(c => M.trackKind(c.trackId) === "video").map(c => c.id);
+    if (type.startsWith("look:")) { applyLook(this.app, +type.slice(5), ids); return; }
     this.apply(type, ids);
   }
 }
