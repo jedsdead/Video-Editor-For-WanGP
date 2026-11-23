@@ -210,6 +210,8 @@ export async function openGenerate(app, mode, where, preset = {}) {
   const imagesNoteEl = el("div.dim.small");
   // reference images (WanGP's image_refs): the settings' own, or a list made here
   const refsField = new RefsField(app);
+  const audioNote = el("div.dim.small", { style: { marginTop: "4px" } });
+  refsField.node.append(audioNote);
   let refsRow = null;
   const imagesNote = () => {
     const caps = info?.capabilities || {};
@@ -350,6 +352,10 @@ export async function openGenerate(app, mode, where, preset = {}) {
       modelNote.textContent = `Model: ${info.model.name}`;
       refsField.setSource(info.refs, srcCurrent.input.checked || !(settingsItem || s.left || s.right) ? "the Media Generator" : "the clip's settings");
       refsRow.hidden = !(info.capabilities?.refs || (info.refs || []).length || refsField.edited);
+      // audio the settings bring (loaded in the Media Generator): shown, used as it is
+      const aud = info.audioInputs || [];
+      audioNote.textContent = aud.length ? `Audio: ${aud.map(x => `${x.name} (${x.role}${x.exists ? "" : ", missing: load it again in the Media Generator"})`).join(", ")}, from the settings.` : "";
+      if (aud.length) refsRow.hidden = false;
       for (const r of info.refmods || []) modelNote.append(el(r.status === "relinked" ? "div" : "div.warn", {},
         r.status === "relinked" ? `RefMod '${r.mod}' has moved: using ${r.now}.` : `RefMod '${r.mod}' can't be found, so it will be skipped.`));
       if (!promptEdited) promptBox.value = info.prompt || "";
