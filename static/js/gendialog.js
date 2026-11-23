@@ -6,7 +6,7 @@ import * as M from "./model.js";
 import { state, P, bus } from "./model.js";
 import { api, el, modal, toast, clamp, debounce, timecode } from "./util.js";
 import { ensureGenSettings, genLabel, genOutput } from "./finalrender.js";
-import { ImagePick, RefsField } from "./imagepick.js";
+import { ImagePick, RefsField, AudioRefsField } from "./imagepick.js";
 
 const PREFS = "ve_gen_prefs";
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(PREFS) || "{}"); } catch (_) { return {}; } };
@@ -210,8 +210,8 @@ export async function openGenerate(app, mode, where, preset = {}) {
   const imagesNoteEl = el("div.dim.small");
   // reference images (WanGP's image_refs): the settings' own, or a list made here
   const refsField = new RefsField(app);
-  const audioNote = el("div.dim.small", { style: { marginTop: "4px" } });
-  refsField.node.append(audioNote);
+  const audioField = new AudioRefsField(app);
+  let audioRow = null;
   let refsRow = null;
   const imagesNote = () => {
     const caps = info?.capabilities || {};
@@ -258,12 +258,14 @@ export async function openGenerate(app, mode, where, preset = {}) {
     imagesField ? field(fresh ? "Start / end images" : wantStart ? "Start image" : "End image", imagesField) : null,
     field("Settings", srcClip.row, srcCurrent.row, modelNote),
     refsRow = field("References", refsField.node),
+    audioRow = field("Audio", audioField.node),
     field("Size", sizeSel, sizeNote),
     field("Seed", el("div", { style: { display: "flex", gap: "6px", alignItems: "center" } }, seedSel, seedInput)),
     field("Prompt", promptBox, promptNote, joinBox),
     field("Sound", soundRow),
     error);
   refsRow.hidden = true;   // until the run's model and settings are known
+  audioRow.hidden = true;
   const m = modal({ title: `${MODE_LABEL[mode]}: generate in WanGP`, body, buttons: ["spacer", { label: "Cancel" }, { label: "Queue in WanGP", primary: true, id: "btnGenGo", action: () => { submit(); return false; } }] });
   m.box.classList.add("wide");
   const go = m.box.querySelector("#btnGenGo");
@@ -323,6 +325,7 @@ export async function openGenerate(app, mode, where, preset = {}) {
     startImage: startPick && !startPick.disabled ? startPick.value : null,
     endImage: endPick && !endPick.disabled ? endPick.value : null,
     refImages: refsField.value,
+    audioRefs: audioField.value,
   });
 
   const describePin = (p) => {
@@ -352,10 +355,11 @@ export async function openGenerate(app, mode, where, preset = {}) {
       modelNote.textContent = `Model: ${info.model.name}`;
       refsField.setSource(info.refs, srcCurrent.input.checked || !(settingsItem || s.left || s.right) ? "the Media Generator" : "the clip's settings");
       refsRow.hidden = !(info.capabilities?.refs || (info.refs || []).length || refsField.edited);
-      // audio the settings bring (loaded in the Media Generator): shown, used as it is
-      const aud = info.audioInputs || [];
-      audioNote.textContent = aud.length ? `Audio: ${aud.map(x => `${x.name} (${x.role}${x.exists ? "" : ", missing: load it again in the Media Generator"})`).join(", ")}, from the settings.` : "";
-      if (aud.length) refsRow.hidden = false;
+      // audio references / soundtrack: what the settings bring, or a list made here
+      const caps = info.capabilities || {};
+      audioField.setCaps({ max: caps.audioRefsMax || 0, soundtrack: !!caps.keepAudio });
+      audioField.setSource(info.audioInputs || []);
+      audioRow.hidden = !(caps.audioRefs || (info.audioInputs || []).length || audioField.edited);
       for (const r of info.refmods || []) modelNote.append(el(r.status === "relinked" ? "div" : "div.warn", {},
         r.status === "relinked" ? `RefMod '${r.mod}' has moved: using ${r.now}.` : `RefMod '${r.mod}' can't be found, so it will be skipped.`));
       if (!promptEdited) promptBox.value = info.prompt || "";

@@ -476,9 +476,9 @@ def create_app(get_config, host=None):
         return {"ok": True}
 
     @app.get("/api/gen/refimage")
-    def gen_refimage(path: str):
-        """A reference image the generate dialog lists (only those: not any file)."""
-        found = service.regen.ref_file(path)
+    def gen_refimage(path: str, audio: int = 0):
+        """A reference image (or audio file) the generate dialog lists (only those: not any file)."""
+        found = service.regen.ref_file(path, audio=bool(audio))
         if not found:
             raise HTTPException(404, "Not a reference image of this run")
         return FileResponse(found)

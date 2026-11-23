@@ -209,3 +209,110 @@ export class RefsField {
     this.note.textContent = this.edited ? "Your list is used for this run." : this.items.length ? `From ${this.from || "the settings"}, in the order WanGP numbers them.` : `${this.from ? `None in ${this.from}. ` : ""}Add pictures here for models that take reference images (H3 Ref2VA).`;
   }
 }
+
+// Audio for a run (WanGP's audio_guide / 2 / 3): up to three voice / audio references, or one soundtrack the video
+// follows and keeps. Starts from what the settings bring (loaded in the Media Generator); you can remove, add (audio
+// or a video's sound from the media bin, or audio files) and switch between references and a soundtrack. Its value is
+// null while unchanged, otherwise {mode, items: [{mediaId} | {path}]}.
+export class AudioRefsField {
+  constructor(app, { onChange = () => {} } = {}) {
+    this.app = app;
+    this.onChange = onChange;
+    this.items = [];
+    this.source = [];
+    this.mode = "reference";
+    this.sourceMode = "reference";
+    this.edited = false;
+    this.max = 3;
+    this.soundtrackOk = true;
+    this.list = el("div.arefs-list");
+    this.modeSel = el("select", { title: "How the run uses the audio" },
+      el("option", { value: "reference" }, "References (the voice / sound is reused in new audio)"),
+      el("option", { value: "soundtrack" }, "Soundtrack (kept as the run's sound; the video follows it)"));
+    this.modeSel.addEventListener("change", () => { this.mode = this.modeSel.value; this.edited = true; this.render(); this.onChange(); });
+    this.add = el("select", { title: "Add audio" });
+    this.file = el("input", { type: "file", accept: "audio/*,video/*", multiple: true, style: { display: "none" }, onchange: () => { const fs = [...this.file.files]; this.file.value = ""; this.upload(fs); } });
+    this.reset = el("button.small", { hidden: true, onclick: () => { this.edited = false; this.items = this.source.slice(); this.mode = this.sourceMode; this.render(); this.onChange(); } }, "Put back the settings' audio");
+    this.note = el("div.dim.small");
+    this.node = el("div.arefs", { title: "Drop audio files here to add them" }, this.list, el("div.refs-row", {}, this.modeSel, this.add, this.reset, this.file), this.note);
+    this.add.addEventListener("change", () => {
+      const v = this.add.value; this.add.value = "";
+      if (!v) return;
+      if (v === "file") { this.file.click(); return; }
+      const item = P().media[v.slice(4)];
+      if (item) this.push({ mediaId: item.id, name: item.name + (item.kind === "video" ? " (its sound)" : "") });
+    });
+    for (const ev of ["dragenter", "dragover"]) this.node.addEventListener(ev, (e) => {
+      if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+      e.preventDefault(); e.stopPropagation(); this.node.classList.add("over");
+    });
+    this.node.addEventListener("dragleave", () => this.node.classList.remove("over"));
+    this.node.addEventListener("drop", (e) => {
+      const fs = [...(e.dataTransfer?.files || [])].filter(x => /^(audio|video)\//.test(x.type) || /\.(wav|mp3|flac|ogg|m4a|aac|opus)$/i.test(x.name));
+      this.node.classList.remove("over");
+      if (!fs.length) return;
+      e.preventDefault(); e.stopPropagation();
+      this.upload(fs);
+    });
+    this.render();
+  }
+
+  // the model's limits: how many references, whether it takes a soundtrack
+  setCaps({ max = 3, soundtrack = true } = {}) { this.max = max; this.soundtrackOk = soundtrack; this.render(); }
+
+  setSource(inputs) {
+    this.source = (inputs || []).filter(a => a.path).map(a => ({ path: a.path, name: a.name, missing: !a.exists }));
+    this.sourceMode = (inputs || []).some(a => a.role === "soundtrack") ? "soundtrack" : "reference";
+    if (!this.edited) { this.items = this.source.slice(); this.mode = this.sourceMode; }
+    this.render();
+  }
+
+  push(ref) { this.items.push(ref); this.edited = true; this.render(); this.onChange(); }
+
+  async upload(files) {
+    const media = await this.app.bin.importFiles(files);
+    for (const item of (media || []).filter(m => m.kind === "audio" || m.kind === "video")) this.items.push({ mediaId: item.id, name: item.name });
+    this.edited = true; this.render(); this.onChange();
+  }
+
+  limit() { return this.mode === "soundtrack" ? 1 : this.max; }
+  get value() {
+    if (!this.edited) return null;
+    return { mode: this.mode, items: this.items.slice(0, this.limit()).map(i => i.mediaId ? { mediaId: i.mediaId } : { path: i.path }) };
+  }
+  get count() { return this.items.length; }
+
+  render() {
+    this.list.innerHTML = "";
+    let playing = null;
+    this.items.forEach((r, n) => {
+      const over = n >= this.limit();
+      const src = r.mediaId ? `api/media/${r.mediaId}/proxy` : r.path && !r.missing ? `api/gen/refimage?audio=1&path=${encodeURIComponent(r.path)}` : "";
+      const play = el("button.small", { title: "Listen", disabled: !src, onclick: () => {
+        if (playing && !playing.paused) { playing.pause(); playing = null; return; }
+        playing = new Audio(src); playing.play().catch(() => {});
+      } }, "▶");
+      const label = this.mode === "soundtrack" ? "Soundtrack" : `<Audio ${n + 1}>`;
+      this.list.append(el("div.arefs-item" + (r.missing ? ".missing" : "") + (over ? ".over" : ""), { title: r.missing ? `${r.name}: the file is gone (WanGP's temporary copy was cleared). Remove it and add it again.` : over ? "Not used: the model takes fewer" : r.name },
+        play, el("span.dim", {}, label), el("span.arefs-name", {}, r.name), r.missing ? el("span.warn", {}, " missing") : null,
+        el("button.refs-x", { title: "Remove", onclick: () => { this.items.splice(n, 1); this.edited = true; this.render(); this.onChange(); } }, "✕")));
+    });
+    if (!this.items.length) this.list.append(el("span.dim.small", {}, "None"));
+    this.modeSel.value = this.mode;
+    this.modeSel.querySelector('option[value="soundtrack"]').disabled = !this.soundtrackOk;
+    const opt = (v, l) => el("option", { value: v }, l);
+    this.add.innerHTML = "";
+    this.add.append(opt("", "Add audio…"));
+    const media = Object.values(P().media || {});
+    const audio = media.filter(i => i.kind === "audio"), video = media.filter(i => i.kind === "video" && i.has_audio);
+    if (audio.length) this.add.append(el("optgroup", { label: "Audio in the media bin" }, ...audio.map(i => opt(`med:${i.id}`, i.name))));
+    if (video.length) this.add.append(el("optgroup", { label: "A video's sound" }, ...video.map(i => opt(`med:${i.id}`, i.name))));
+    this.add.append(opt("file", "Choose audio files…"));
+    this.add.value = "";
+    this.add.disabled = this.items.length >= this.limit();
+    this.reset.hidden = !this.edited;
+    this.note.textContent = this.mode === "soundtrack"
+      ? "The run keeps this as its sound and the picture follows it (for speech, ask for lip movements synchronized in the prompt)."
+      : `Voices or sounds the run reuses in its new audio (up to ${this.max}); name each one's role in the prompt with <Audio 1>…`;
+  }
+}

@@ -526,3 +526,11 @@ body.picking #viewerStage, body.picking #previewCanvas { cursor: crosshair !impo
 .refs-x { position: absolute; top: 2px; right: 2px; padding: 0 5px; font-size: 11px; line-height: 16px; border-radius: 8px; background: #000a; border: none; color: #fff; cursor: pointer; }
 .refs-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .refs-add { max-width: 300px; }
+.arefs { border-radius: 6px; padding: 2px; }
+.arefs.over { outline: 2px dashed var(--accent); }
+.arefs-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.arefs-item { position: relative; display: flex; align-items: center; gap: 8px; padding: 4px 28px 4px 6px; border-radius: 6px; background: var(--bg); font-size: 12px; }
+.arefs-item.missing { outline: 1px solid var(--danger, #e66); }
+.arefs-item.over { opacity: .45; }
+.arefs-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arefs-item .refs-x { top: 50%; transform: translateY(-50%); }

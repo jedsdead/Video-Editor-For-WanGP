@@ -424,7 +424,8 @@ def capabilities(model_def):
     images = str(model_def.get("image_prompt_types_allowed", "") or "")
     audio_sources = ((model_def.get("audio_prompt_type_sources") or {}).get("selection")) or []
     return {"start": "S" in images, "end": "E" in images, "extend": "V" in images and bool(model_def.get("video_continuation", True)),
-            "keepAudio": "AS" in audio_sources, "refs": bool(model_def.get("image_ref_choices")), "fps": float(model_def.get("fps", 16) or 16),
+            "keepAudio": "AS" in audio_sources, "refs": bool(model_def.get("image_ref_choices")),
+            "audioRefs": "A" in audio_sources, "audioRefsMax": 3 if "ABD" in audio_sources else 2 if "AB" in audio_sources else 1 if "A" in audio_sources else 0, "fps": float(model_def.get("fps", 16) or 16),
             "framesMinimum": int(model_def.get("frames_minimum", 5) or 5), "framesSteps": int(model_def.get("frames_steps", 4) or 4)}
 
 
@@ -508,7 +509,7 @@ def audio_inputs(settings):
             continue
         path = ref_path(value)
         out.append({"name": os.path.basename(path) if path else "recorded audio", "role": "soundtrack" if key == "audio_guide" and "S" in apt else "reference",
-                    "exists": bool(path is None or os.path.isfile(path))})
+                    "exists": bool(path is None or os.path.isfile(path)), "path": path, "key": key})
     return out
 
 
@@ -528,6 +529,7 @@ def write_wav(path, rate, samples):
         handle.writeframes(data.tobytes())
 
 
+AUDIO_EXT = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".mp4", ".mkv", ".mov", ".webm")
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff")
 
 
@@ -816,14 +818,28 @@ class RegenService:
         self._ref_paths = allowed
         return [{"name": r["name"], "path": r["path"], "exists": r["exists"]} for r in refs]
 
-    def ref_file(self, path):
-        if path in getattr(self, "_ref_paths", set()) and os.path.isfile(path) and path.lower().endswith(IMAGE_EXT):
+    def _public_audio(self, settings):
+        found = audio_inputs(settings)
+        allowed = getattr(self, "_ref_paths", set())
+        allowed.update(a["path"] for a in found if a["path"])
+        self._ref_paths = allowed
+        return found
+
+    def ref_file(self, path, audio=False):
+        ok = IMAGE_EXT + (AUDIO_EXT if audio else ())
+        if path in getattr(self, "_ref_paths", set()) and os.path.isfile(path) and path.lower().endswith(ok):
             return path
         return None
 
-    def _apply_audio(self, task, folder):
+    def _apply_audio(self, task, folder, override=None):
         """The audio files the settings bring (a voice reference, a soundtrack): WanGP's audio boxes hand them over as a
-        path, a file dict or (rate, samples); a queued task needs a file it can read, kept in the job's folder."""
+        path, a file dict or (rate, samples); a queued task needs a file it can read, kept in the job's folder.
+        override: the generate dialog's list ({mode: "reference" | "soundtrack", items: [{mediaId} | {path}]}), unless
+        the run keeps its clip's own sound (that takes the same input)."""
+        keeping = os.path.dirname(str(task.get("audio_guide") or "")) == folder and "S" in str(task.get("audio_prompt_type") or "")
+        if override is not None and not keeping:
+            self._audio_override(task, folder, override)
+            return
         apt = str(task.get("audio_prompt_type") or "")
         for letter, key in AUDIO_INPUTS:
             value = task.get(key)
@@ -842,12 +858,43 @@ class RegenService:
                 shutil.copyfile(path, out)
             task[key] = out
 
+    def _audio_override(self, task, folder, override):
+        items = list(override.get("items") or [])[:3]
+        soundtrack = override.get("mode") == "soundtrack"
+        if soundtrack:
+            items = items[:1]
+        apt = "".join(ch for ch in str(task.get("audio_prompt_type") or "") if ch not in "ABDS")
+        for _, key in AUDIO_INPUTS:
+            task.pop(key, None)
+        os.makedirs(os.path.join(folder, "audio_refs"), exist_ok=True)
+        for n, ref in enumerate(items):
+            key = AUDIO_INPUTS[n][1]
+            if ref.get("mediaId"):
+                item = self._item(ref["mediaId"])
+                if not os.path.isfile(item["path"]):
+                    raise ValueError(f"{item.get('name') or 'An audio file'} is missing: relink it first")
+                if item.get("kind") == "audio":
+                    out = os.path.join(folder, "audio_refs", f"{key}_{os.path.basename(item['path'])}")
+                    shutil.copyfile(item["path"], out)
+                else:                                   # a video's sound
+                    out = extract_audio(item["path"], 0.0, float(item.get("duration") or 0) or 3600.0, os.path.join(folder, "audio_refs", f"{key}.wav"))
+            else:
+                path = ref.get("path")
+                if not path or path not in getattr(self, "_ref_paths", set()) or not os.path.isfile(path):
+                    raise ValueError(f"The audio file {os.path.basename(str(path))} is gone: add it again")
+                out = os.path.join(folder, "audio_refs", f"{key}_{os.path.basename(path)}")
+                shutil.copyfile(path, out)
+            task[key] = out
+        if items:
+            apt += "AS" if soundtrack else "ABD"[:len(items)]
+        task["audio_prompt_type"] = apt
+
     def _apply_refs(self, task, req, folder):
         """WanGP's image_refs for a run, as plain file paths it can read: the settings' own references (WanGP's
         gallery hands them over as [path, caption] pairs, which a queued task can't use, and they live in Gradio's
         temp folder) or, when the dialog changed them, its list ({mediaId, t} frames or {path}). Copied into the job's
         folder so they last."""
-        self._apply_audio(task, folder)
+        self._apply_audio(task, folder, req.get("audioRefs"))
         override = req.get("refImages")
         entries = []
         if override is not None:
@@ -910,7 +957,7 @@ class RegenService:
         prompt, shots = shot_prompt(meta.get("prompt") or settings.get("prompt") or "", prompt_fps, a, b, meta.get("sliding_window_overlap") or 0)
         return {"model": {"type": model_type, "name": self.host.model_name(model_type)}, "capabilities": caps,
                 "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "range": [a, b], "sourceFps": source_fps,
-                "minSeconds": caps["framesMinimum"] / caps["fps"], "refmods": refmods, "refs": self._public_refs(settings), "audioInputs": audio_inputs(settings)}
+                "minSeconds": caps["framesMinimum"] / caps["fps"], "refmods": refmods, "refs": self._public_refs(settings), "audioInputs": self._public_audio(settings)}
 
     def _item(self, media_id):
         item = self.registry.get(media_id)
@@ -1359,7 +1406,7 @@ class RegenService:
                                                           "note": step_note},
                 "windows": sliding["count"], "windowFrames": sliding["window"],
                 "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "refmods": refmods, "speech": speech,
-                "refs": self._public_refs(settings), "audioInputs": audio_inputs(settings),
+                "refs": self._public_refs(settings), "audioInputs": self._public_audio(settings),
                 "available": ok, "reason": reason, "h3": self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}}
         return info, settings, model_def
 
