@@ -47,7 +47,7 @@ import traceback
 
 import numpy as np
 
-VERSION = "3.7"
+VERSION = "3.7.1"
 PLUGIN_KEY = "video_editor"                 # plugin_data key the editor's tasks carry
 GRID = 17                                   # pixel frames per VAE clip
 LATENTS_PER_CLIP = 5
@@ -572,12 +572,12 @@ def _plan_pins(pipeline, spec, kwargs):
                     pixels = read_frames(path, start / src_fps, frames, fps, target_w, target_h)
                 video = pixels if (h, w) == (target_h, target_w) else pm._resize_video(pixels, h, w)
                 if motion:
-                    lat = torch.cat([pipeline._encode_video(video[:, :frames - 1], keep_all_latents=True),
-                                     pipeline._encode_video(video[:, frames - 1:])], dim=2)
+                    lat = torch.cat([_encode_pin(pipeline, video[:, :frames - 1], keep_all_latents=True),
+                                     _encode_pin(pipeline, video[:, frames - 1:])], dim=2)
                 elif history_only:
-                    lat = pipeline._encode_video(video, keep_all_latents=True)
+                    lat = _encode_pin(pipeline, video, keep_all_latents=True)
                 else:
-                    lat = pipeline._encode_video(video, keep_all_latents=True)
+                    lat = _encode_pin(pipeline, video, keep_all_latents=True)
             if lat.shape[2] != n:
                 raise ValueError(f"a {frames}-frame pin encoded to {lat.shape[2]} latents instead of {n}")
             if motion:
@@ -804,6 +804,8 @@ def _impl_generate(self, original, *args, **kwargs):
             record["plan"] = _plan_pins(self, spec, kwargs)
         except ValueError as error:
             raise ValueError(f"Video Editor pins: {error}")
+        except PinMemoryError:
+            raise
         except Exception as error:
             traceback.print_exc()
             raise RuntimeError(f"Video Editor pins could not be prepared: {error!r}")
@@ -844,6 +846,55 @@ def _impl_generate(self, original, *args, **kwargs):
                 _log("this generation is too long to keep all its latents; later windows are not saved")
     record["plan"] = None
     return result
+
+
+class PinMemoryError(RuntimeError):
+    """The GPU had no room to encode a pin's frames, even after freeing what it could."""
+
+
+def last_pin_error():
+    """The last pin failure ({at, message}), so the editor can say why a run stopped (WanGP reports only "not enough VRAM")."""
+    return _STATE.get("pin_error")
+
+
+def _encode_pin(pipeline, video, **kwargs):
+    """Encode a pin's frames with H3's VAE. Out of GPU memory: free what PyTorch holds and try once more; still out,
+    a clear error (most often something else is holding the GPU, such as a WanGP process left over from a restart)."""
+    import torch
+
+    def oom(error):
+        return isinstance(error, getattr(torch, "OutOfMemoryError", ())) or "out of memory" in str(error).lower()
+    try:
+        return pipeline._encode_video(video, **kwargs)
+    except Exception as error:
+        if not oom(error):
+            raise
+        _log("out of GPU memory encoding a pin: freeing memory and trying again")
+    import gc
+    gc.collect()
+    try:
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+    except Exception:                                              # noqa: BLE001
+        pass
+    try:
+        return pipeline._encode_video(video, **kwargs)
+    except Exception as error:
+        if not oom(error):
+            raise
+        free = total = None
+        try:
+            free, total = torch.cuda.mem_get_info()
+        except Exception:                                          # noqa: BLE001
+            pass
+        held = ""
+        if free is not None:
+            used_here = torch.cuda.memory_reserved() / 2**30
+            held = (f" The card had {free / 2**30:.1f} of {total / 2**30:.1f} GB free and WanGP held {used_here:.1f} GB"
+                    + (", so something else is using the GPU (often a WanGP process left over from a restart: check Task Manager)" if (total - free) / 2**30 - used_here > 2 else "") + ".")
+        message = f"Out of GPU memory encoding the frames this run continues from.{held}"
+        _STATE["pin_error"] = {"at": time.time(), "message": message}
+        raise PinMemoryError(message) from None
 
 
 _SHOT1 = re.compile(r"\[Shot\s+1\]\s*(?:at\s+\d+:\d+(?:\.\d+)?\s*,\s*)?(?:the camera (?:cuts|hard[- ]cuts|smash[- ]cuts|jump[- ]cuts)(?: back)? to|(?:hard |smash |jump )?cuts? to)\b", re.I)

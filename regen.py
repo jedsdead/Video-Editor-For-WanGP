@@ -1100,6 +1100,14 @@ class RegenService:
             if not getattr(result, "success", False) or not files:
                 errors = getattr(result, "errors", None) or []
                 message = "; ".join(str(getattr(e, "message", e)) for e in errors) or "WanGP produced no video"
+                # WanGP reports a pin's out-of-memory as a generic "not enough VRAM": say what actually happened
+                try:
+                    from .h3pins import last_pin_error
+                    pin_error = last_pin_error()
+                    if pin_error and time.time() - pin_error["at"] < 600 and "vram" in message.lower():
+                        message = pin_error["message"]
+                except Exception:                                  # noqa: BLE001
+                    pass
                 self._update(job_id, status="error", error=message, message=message)
                 return
             videos = [f for f in files if os.path.splitext(f)[1].lower() in (".mp4", ".mkv", ".mov", ".webm")]
