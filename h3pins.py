@@ -47,7 +47,7 @@ import traceback
 
 import numpy as np
 
-VERSION = "3.7.2"
+VERSION = "3.7.3"
 PLUGIN_KEY = "video_editor"                 # plugin_data key the editor's tasks carry
 GRID = 17                                   # pixel frames per VAE clip
 LATENTS_PER_CLIP = 5
@@ -479,9 +479,12 @@ def _phase_1_scale(pm, kwargs):
     """Phase 1's size as output / scale. WanGP's own is 2; the 2 Phases Plus plugin can make it 1.5 (from the task's
     settings, else its Media Generator option), but only sets it once its own wrapper runs, after the editor plans the
     pins: work it out the same way, or the pins would be drawn at the wrong size (random colours in two-phase runs)."""
+    if _SCALE_OVERRIDE.get() is not None:
+        return float(_SCALE_OVERRIDE.get())
     scale = float(getattr(pm, "H3_TWO_PHASE_SCALE", 2.0))
-    for module in list(sys.modules.values()):
-        if not (hasattr(module, "parse_phase_1_scale") and hasattr(module, "PHASE_1_SCALE_KEY")):
+    modules = sorted(list(sys.modules.items()), key=lambda kv: "h3_phase2_patch" not in str(kv[0]))
+    for _name, module in modules:
+        if not (hasattr(module, "parse_phase_1_scale") and hasattr(module, "PHASE_1_SCALE_KEY") and hasattr(module, "UI_VALUES")):
             continue
         try:
             custom = kwargs.get("custom_settings") if isinstance(kwargs.get("custom_settings"), dict) else {}
@@ -494,6 +497,30 @@ def _phase_1_scale(pm, kwargs):
             pass
         break
     return scale
+
+
+_SCALE_OVERRIDE = contextvars.ContextVar("ve_h3_phase1_scale", default=None)
+
+
+def _sync_phase_1(pipeline, record):
+    """Called from the first hook inside H3's own generate, once every plugin wrapper has set phase 1's scale: if the
+    pins were drawn for another scale, draw phase 1's again at the real one (rather than wreck the picture)."""
+    plan = record.get("plan") if record else None
+    if plan is None or plan.phase_1_scale is None or record.get("phase_1_checked"):
+        return
+    record["phase_1_checked"] = True
+    now = float(getattr(_pipeline_module(), "H3_TWO_PHASE_SCALE", plan.phase_1_scale))
+    if abs(now - plan.phase_1_scale) < 1e-6:
+        return
+    _log(f"phase 1 is at output / {now:g}, not / {plan.phase_1_scale:g}: preparing the pins again at that size")
+    token = _SCALE_OVERRIDE.set(now)
+    try:
+        fresh = _plan_pins(pipeline, record["spec"], record["kwargs"])
+    except ValueError as error:
+        raise ValueError(f"Video Editor pins: {error}")
+    finally:
+        _SCALE_OVERRIDE.reset(token)
+    plan.stages, plan.video, plan.masked, plan.phase_1_scale = fresh.stages, fresh.video, fresh.masked, fresh.phase_1_scale
 
 
 def _plan_pins(pipeline, spec, kwargs):
@@ -829,6 +856,7 @@ def _impl_generate(self, original, *args, **kwargs):
     if spec and (window_no is None or int(window_no) <= 1):
         try:
             record["plan"] = _plan_pins(self, spec, kwargs)
+            record["spec"], record["kwargs"] = spec, dict(kwargs)
         except ValueError as error:
             raise ValueError(f"Video Editor pins: {error}")
         except PinMemoryError:
@@ -1042,14 +1070,9 @@ def _impl_prepare_condition_rows(self, inner, visual_latents, audio_latents, gen
     if plan is not None and plan.video and isinstance(keyframes, list) and isinstance(visual_latents, list):
         stage = plan.calls
         plan.calls += 1
+        if stage == 0:
+            _sync_phase_1(self, record)
         pins = plan.video.get(stage)
-        if pins and stage == 0 and len(plan.stages) > 1:
-            # by now every plugin has set phase 1's scale: pins drawn at another size would wreck the picture
-            pm = _pipeline_module()
-            now = float(getattr(pm, "H3_TWO_PHASE_SCALE", plan.phase_1_scale or 2.0))
-            if plan.phase_1_scale and abs(now - plan.phase_1_scale) > 1e-6:
-                raise ValueError(f"Video Editor pins: phase 1 is at output / {now:g} but the pins were prepared for / {plan.phase_1_scale:g} "
-                                 "(another plugin changed it): generate again, or use one phase")
         if pins:
             lh, lw = plan.stages[stage]
             insert_at = len(keyframes)
@@ -1082,6 +1105,8 @@ def _impl_encode_source(vae, inner, source, *args, **kwargs):
     pins over the windows they hold, so the held frames are the neighbour's own latents, not a re-encode."""
     latents = inner(vae, source, *args, **kwargs)
     record = _GEN.get()
+    if record and record.get("plan") is not None and record.get("pipeline") is not None:
+        _sync_phase_1(record["pipeline"], record)
     plan = record.get("plan") if record else None
     if plan is None or not plan.masked or not hasattr(latents, "shape"):
         return latents
