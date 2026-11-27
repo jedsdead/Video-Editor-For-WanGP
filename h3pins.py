@@ -47,7 +47,7 @@ import traceback
 
 import numpy as np
 
-VERSION = "3.7.1"
+VERSION = "3.7.2"
 PLUGIN_KEY = "video_editor"                 # plugin_data key the editor's tasks carry
 GRID = 17                                   # pixel frames per VAE clip
 LATENTS_PER_CLIP = 5
@@ -461,6 +461,7 @@ class PinPlan:
         self.audio = []           # [(anchor dict, latents)]
         self.masked = {}          # stage index -> [(place, latents)] held by WanGP's mask (latent grade only)
         self.calls = 0
+        self.phase_1_scale = None # output / phase 1 size the pins of stage 0 were drawn for (two-phase runs)
         self.audio_rows = None    # id of the cond_audio_rows tensor that holds our audio pins
         self.hold_audio = None    # (samples (S, 2), rate, seconds): the sound under the held frames at the run's start
         self.notes = []
@@ -468,6 +469,31 @@ class PinPlan:
 
 def _pipeline_module():
     return sys.modules.get("models.minimax_h3.pipeline")
+
+
+def _phase_1_size(target_h, target_w, scale):
+    return max(32, round(target_h / scale / 32) * 32), max(32, round(target_w / scale / 32) * 32)
+
+
+def _phase_1_scale(pm, kwargs):
+    """Phase 1's size as output / scale. WanGP's own is 2; the 2 Phases Plus plugin can make it 1.5 (from the task's
+    settings, else its Media Generator option), but only sets it once its own wrapper runs, after the editor plans the
+    pins: work it out the same way, or the pins would be drawn at the wrong size (random colours in two-phase runs)."""
+    scale = float(getattr(pm, "H3_TWO_PHASE_SCALE", 2.0))
+    for module in list(sys.modules.values()):
+        if not (hasattr(module, "parse_phase_1_scale") and hasattr(module, "PHASE_1_SCALE_KEY")):
+            continue
+        try:
+            custom = kwargs.get("custom_settings") if isinstance(kwargs.get("custom_settings"), dict) else {}
+            keys = getattr(module, "SETTING_KEYS", (module.PHASE_1_SCALE_KEY,))
+            source = custom if any(k in custom for k in keys) else (getattr(module, "UI_VALUES", None) or {})
+            if (custom.get(getattr(module, "UPSCALE_SOURCE_KEY", "")) if custom else None):
+                break                                       # its upscaler tab: not an editor run
+            scale = float(module.parse_phase_1_scale(source.get(module.PHASE_1_SCALE_KEY, getattr(module, "PHASE_1_SCALE_DEFAULT", 2.0))))
+        except Exception:                                  # noqa: BLE001
+            pass
+        break
+    return scale
 
 
 def _plan_pins(pipeline, spec, kwargs):
@@ -489,8 +515,9 @@ def _plan_pins(pipeline, spec, kwargs):
         raise ValueError("pins can't be used with tiled phase 2; turn off phase 2 tiling for this generation")
     stages = []
     if phases > 1:
-        scale = float(getattr(pm, "H3_TWO_PHASE_SCALE", 2.0))
-        stages.append((max(32, round(target_h / scale / 32) * 32), max(32, round(target_w / scale / 32) * 32)))
+        scale = _phase_1_scale(pm, kwargs)
+        plan.phase_1_scale = scale
+        stages.append(_phase_1_size(target_h, target_w, scale))
     stages.append((target_h, target_w))
     plan.stages = [(math.ceil(h / 16), math.ceil(w / 16)) for h, w in stages]
     total_latents = latent_count(frame_num)
@@ -1016,6 +1043,13 @@ def _impl_prepare_condition_rows(self, inner, visual_latents, audio_latents, gen
         stage = plan.calls
         plan.calls += 1
         pins = plan.video.get(stage)
+        if pins and stage == 0 and len(plan.stages) > 1:
+            # by now every plugin has set phase 1's scale: pins drawn at another size would wreck the picture
+            pm = _pipeline_module()
+            now = float(getattr(pm, "H3_TWO_PHASE_SCALE", plan.phase_1_scale or 2.0))
+            if plan.phase_1_scale and abs(now - plan.phase_1_scale) > 1e-6:
+                raise ValueError(f"Video Editor pins: phase 1 is at output / {now:g} but the pins were prepared for / {plan.phase_1_scale:g} "
+                                 "(another plugin changed it): generate again, or use one phase")
         if pins:
             lh, lw = plan.stages[stage]
             insert_at = len(keyframes)
