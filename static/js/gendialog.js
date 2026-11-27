@@ -250,7 +250,7 @@ export async function openGenerate(app, mode, where, preset = {}) {
     fresh ? null : field("Pinned frames", el("div", { style: { display: "flex", gap: "8px", alignItems: "center" } }, windowSel, el("span.dim.small", {}, "of each neighbour held as fixed context")),
       s.left ? modeRow("Leaving a clip", leaveSel) : null, s.right ? modeRow("Arriving at one", arriveSel) : null, s.left || s.right ? modeNote : null,
       pinsBox,
-      el("label.rrow", {}, keepCut, el("span", {}, "Keep my exact cuts (pixel grade instead of moving a cut onto H3's grid)")),
+      el("label.rrow", {}, keepCut, el("span", {}, "Keep every frame (no seamless join: the clip's last 4 frames aren't handed to the new footage)")),
       el("label.rrow", {}, carryAudio, el("span", {}, "Carry the pinned audio too")),
       el("label.rrow", {}, joinMatch, el("span", {}, "Join match: correct the new footage's exposure and colour where it meets the clip it joins, fading out over about half a second")),
       el("label.rrow", {}, crossfade, el("span", {}, "Blend the joins: crossfade across the frames both sides rendered (pinned frames inside the run only)"))),
@@ -306,6 +306,7 @@ export async function openGenerate(app, mode, where, preset = {}) {
   promptBox.addEventListener("input", () => {
     promptEdited = true;
     joinCheckSoon();
+    prepareForPrompt();
     if (slidingAllowed && !slidingTouched && /\[\s*\/\s*duration/i.test(promptBox.value) && !sliding.checked) { sliding.checked = true; syncSliding(); }
   });
 
@@ -326,6 +327,8 @@ export async function openGenerate(app, mode, where, preset = {}) {
     endImage: endPick && !endPick.disabled ? endPick.value : null,
     refImages: refsField.value,
     audioRefs: audioField.value,
+    // the prompt as typed: its first shot (a camera cut, or not) decides how the join is made
+    prompt: promptEdited ? promptBox.value : null,
   });
 
   const describePin = (p) => {
@@ -339,12 +342,22 @@ export async function openGenerate(app, mode, where, preset = {}) {
     return el("div.gpin", {}, el("b", {}, `${who}: `), `${p.frames} frames ${how}, `, grade, extra, hand);
   };
 
+  // re-plan when the prompt's opening changes between a camera cut and a continuation
+  let lastCut = null;
+  const cutRe = /\[Shot\s+1\]\s*(?:at\s+\d+:\d+(?:\.\d+)?\s*,\s*)?(?:the camera (?:cuts|hard[- ]cuts|smash[- ]cuts|jump[- ]cuts)(?: back)? to|(?:hard |smash |jump )?cuts? to)\b/i;
+  const prepareForPrompt = debounce(() => {
+    const cut = cutRe.test(promptBox.value);
+    if (cut !== lastCut) { lastCut = cut; prepare(); }
+  }, 400);
   const prepare = debounce(async () => {
     error.textContent = "";
     try {
       info = await api("api/gen/prepare", { method: "POST", body: request() });
       pinsBox.innerHTML = "";
       for (const p of info.pins) pinsBox.append(describePin(p));
+      if (!fresh && info.pins.length) pinsBox.append(el("div.gpin.dim", {}, info.joinCut
+        ? "Join: a camera cut (the prompt's first shot cuts), so the clip is kept whole and the new footage starts after it."
+        : "Join: a continuation. The clip keeps its end; only its very last 4 frames go to the new footage when it ends at its file's end (seamless join)."));
       const L = info.lengths;
       if (fresh) lengthNote.textContent = `${L.totalSeconds.toFixed(2)}s (${L.total} frames)${(info.windows || 1) > 1 ? `, ${info.windows} sliding windows` : ""}. ${L.note}`;
       const motionPin = info.pins.some(p => p.kind === "motion");

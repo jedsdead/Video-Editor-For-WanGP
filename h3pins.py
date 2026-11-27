@@ -47,7 +47,7 @@ import traceback
 
 import numpy as np
 
-VERSION = "3.1.2"
+VERSION = "3.7"
 PLUGIN_KEY = "video_editor"                 # plugin_data key the editor's tasks carry
 GRID = 17                                   # pixel frames per VAE clip
 LATENTS_PER_CLIP = 5
@@ -700,6 +700,58 @@ def _keep_window_render(job, record, result, window_no):
         _count("window_render")
 
 
+def _segments_in_file(job, file_frames):
+    """WanGP 20+ joins each window onto the end of the file: the windows' added frames, in order, with where each
+    starts in the file (after any Source Video copied as it is at the start). None when they don't add up."""
+    segments = job.get("segments") or []
+    total = sum(s["frames"] for s in segments)
+    if not segments or total > file_frames:
+        return None
+    at, out = file_frames - total, []
+    for s in segments:
+        out.append({**s, "offset": at})
+        at += s["frames"]
+    return out
+
+
+def _place_window(window_fp, segment, probe=6, accept=0.06):
+    """Where a window's own frames sit in the file, given the frames it added (segment): it added them from its frame
+    h on (the frames before are the overlap WanGP drops; the file shows the previous window there). Matched on the
+    frames themselves before encoding, so it's exact. Returns {offset, from, valid} or None."""
+    n = len(window_fp)
+    k = min(probe, segment["frames"], n)
+    if k == 0:
+        return None
+    head = segment["fp"][:k]
+    best, best_err = None, None
+    for h in range(0, n - k + 1):
+        err = float(np.abs(window_fp[h:h + k] - head).mean())
+        if best_err is None or err < best_err:
+            best, best_err = h, err
+    if best is None or best_err > accept:
+        return None
+    return {"offset": int(segment["offset"] - best), "from": int(segment["offset"]), "valid": int(min(n, best + segment["frames"]))}
+
+
+def _window_places(job, records, file_fp, number):
+    """Each record's place in the file: from the windows' added frames when WanGP joined them (exact), otherwise by
+    comparing pictures with the file (older WanGP, which re-encoded the whole video). number(record) -> window number."""
+    segments = _segments_in_file(job, len(file_fp)) if job.get("continued") else None
+    places = []
+    for i, r in enumerate(records):
+        place = None
+        if segments is not None:
+            no = number(r) or (i + 1)
+            if 1 <= no <= len(segments):
+                place = _place_window(r["fp"], segments[no - 1])
+        elif r.get("fp") is not None:
+            found = locate(r["fp"], file_fp)
+            if found is not None:
+                place = {"offset": int(found[0]), "valid": int(found[1])}
+        places.append(place)
+    return places
+
+
 def _finish_window_renders(job, path, file_fp, sha):
     """File the windows' renders under the generation's file: windows/<sha>/window_NN.mp4 + windows.json with where
     each window's first frame sits in the file and how many of its frames the file uses."""
@@ -712,14 +764,12 @@ def _finish_window_renders(job, path, file_fp, sha):
         target = os.path.join(WINDOWS_ROOT, sha)
         os.makedirs(target, exist_ok=True)
         windows = []
-        for e in full:
-            found = locate(e["fp"], file_fp)
-            if found is None:
+        for e, place in zip(full, _window_places(job, full, file_fp, lambda e: e["no"])):
+            if place is None:
                 continue
-            offset, valid = found
             name = os.path.basename(e["path"])
             shutil.move(e["path"], os.path.join(target, name))
-            windows.append({"no": e["no"], "render": name, "offset": int(offset), "valid": int(valid), "frames": e["frames"], "fps": e["fps"]})
+            windows.append({"no": e["no"], "render": name, **place, "frames": e["frames"], "fps": e["fps"]})
         if len(windows) < 2:
             shutil.rmtree(target, ignore_errors=True)
             return
@@ -763,7 +813,10 @@ def _impl_generate(self, original, *args, **kwargs):
         _STATE["pinned"] += 1
     _hook_upscaler(self)
     restore = None
-    if spec and spec.get("windowJoin") == "motion_masked" and window_no is not None and int(window_no) > 1:
+    if (spec and spec.get("windowJoin") == "motion_masked" and window_no is not None and int(window_no) > 1
+            and not _opens_on_cut(kwargs.get("input_prompt"))):
+        # (a window whose first shot is a camera cut keeps WanGP's own overlap, for its sound, but holds nothing:
+        # the picture cuts anyway)
         try:
             restore = _window_join(self, kwargs)
         except Exception as error:
@@ -791,6 +844,14 @@ def _impl_generate(self, original, *args, **kwargs):
                 _log("this generation is too long to keep all its latents; later windows are not saved")
     record["plan"] = None
     return result
+
+
+_SHOT1 = re.compile(r"\[Shot\s+1\]\s*(?:at\s+\d+:\d+(?:\.\d+)?\s*,\s*)?(?:the camera (?:cuts|hard[- ]cuts|smash[- ]cuts|jump[- ]cuts)(?: back)? to|(?:hard |smash |jump )?cuts? to)\b", re.I)
+
+
+def _opens_on_cut(prompt):
+    """A window's prompt whose [Shot 1] is a camera cut ("The camera cuts to …"): that window starts a new shot."""
+    return bool(prompt) and bool(_SHOT1.search(str(prompt)))
 
 
 WINDOW_HELD_FRAMES = 18      # the previous window's last frames held inside the next one (the rest of the overlap is history)
@@ -1366,6 +1427,13 @@ def _wrap_save_video(original):
                     job["continued"] = True
                     job["final_fp"] = None
                     _count("continued_segment")
+                    # what this window adds to the file, in order: where each window lands is then exact arithmetic
+                    tensor = values.get("tensor")
+                    parts = tensor if isinstance(tensor, (list, tuple)) else [tensor]
+                    parts = [t for t in parts if t is not None and hasattr(t, "dim") and t.dim() in (4, 5)]
+                    if parts:
+                        fp = np.concatenate([fingerprints(t) for t in parts], 0)
+                        job.setdefault("segments", []).append({"frames": int(len(fp)), "fp": fp})
                     return original(*args, **kwargs)
                 tensor = values.get("tensor")
                 # WanGP passes the frames as one tensor, or as the list of per-window chunks it has gathered
@@ -1463,14 +1531,11 @@ def _finish(job):
             return
     try:
         windows, tensors = [], []
-        for w in job["windows"]:
-            if w["fp"] is None or w["video"] is None:
+        usable = [w for w in job["windows"] if w["fp"] is not None and w["video"] is not None]
+        for w, place in zip(usable, _window_places(job, usable, file_fp, lambda w: int(w["window_no"] or 0))):
+            if place is None:
                 continue
-            found = locate(w["fp"], file_fp)
-            if found is None:
-                continue
-            offset, valid = found
-            windows.append({"offset": int(offset), "valid": int(valid), "frames": int(len(w["fp"])),
+            windows.append({**place, "frames": int(len(w["fp"])),
                             "latents": int(w["video"].shape[1]), "latent_hw": list(w["video"].shape[-2:]),
                             "p1_hw": list(w["p1"].shape[-2:]) if w["p1"] is not None else None,
                             "audio_ok": bool(w["audio"] is not None and not w["continuation"] and (w["window_no"] or 1) <= 1)})

@@ -40,6 +40,23 @@ _CUT_LEAD = re.compile(r"^\s*At\s+\d+:\d+(?:\.\d+)?\s*,\s*", re.I)
 _CAMERA_CUT = re.compile(r"^the camera (?:cuts|hard-cuts|smash-cuts)(?: back)? to ", re.I)
 
 
+_CUT_START = re.compile(r"^(?:at\s+\d+:\d+(?:\.\d+)?\s*,\s*)?(?:the camera (?:cuts|hard-cuts|hard cuts|smash-cuts|smash cuts|jump-cuts|jump cuts)(?: back)? to|(?:hard |smash |jump )?cut(?:s)? to)\b", re.I)
+
+
+def starts_with_cut(prompt):
+    """Whether a run's prompt opens on a camera cut: its first [Shot 1] reads "The camera cuts to …" (or "Cut to …").
+    A continuation ("The camera continues …", or no shot list) is not a cut. Sliding windows keep their overlap either
+    way (the sound carries); this only decides whether the join is seamless or the earlier footage is kept whole."""
+    text = strip_window_commands(prompt) if prompt else ""
+    shots = find_shots(text)
+    if not shots:
+        return False
+    first = shots[0]
+    end = shots[1].start() if len(shots) > 1 else len(text)
+    body = text[first.end():end].strip()
+    return bool(_CUT_START.match(body))
+
+
 def shot_region_start(text):
     """Where a window's shot list can start: after its detailed-description heading when it has one, so mentions such as
     "(appears in [Shot 1], [Shot 2])" in other sections are not taken for shots."""
@@ -1170,22 +1187,31 @@ class RegenService:
             self._sha_cache[key] = sha256_file(path)
         return self._sha_cache[key]
 
-    def _pin(self, side, place, window, gen_fps, kind="pinned", size=None):
-        """Plan one pin from {mediaId, cut (seconds in its file)}: which frames, at what grade, and how far the cut moves."""
+    def _pin(self, side, place, window, gen_fps, kind="pinned", size=None, seamless=True):
+        """Plan one pin from {mediaId, cut (seconds in its file)}: which frames and at what grade. The cut stays where it
+        is, except the seamless join: a cut at the file's very end hands its last 4 frames (first 5 at a start) to the
+        new run, as Latent Carry's Discard Last Frames 4 does."""
         item = self._item(side["mediaId"])
         src_fps = float(item.get("fps") or gen_fps)
         file_frames = int(round(float(item.get("duration") or 0) * src_fps))
         cut = int(round(float(side["cut"]) * src_fps))
         # A file's last latent step (and first two) decode slightly differently from the same latents mid-file: the
-        # VAE has nothing after (or before) them. A cut right at the file's edge would join on those frames, so pull it
-        # off the edge and let the new footage cover them, as Latent Carry's Discard Last Frames 4 does between
-        # windows. Masked joins do this inside the held window instead; "keep my exact cuts" leaves the cut alone.
+        # VAE has nothing after (or before) them. A cut right at the file's edge would join on those frames, so the new
+        # footage covers them (the seamless join). Motion / pinned joins end the pin before them; masked joins keep the
+        # clip's true frames as context and hand over inside the held window (below, "handover"). "Keep my exact cuts",
+        # or a join that's a camera cut anyway, leaves every frame.
         edge = 0
-        if kind in ("motion", "pinned") and not side.get("pixel"):
+        seamless = seamless and not side.get("pixel")
+        if seamless:
             if place == "before" and cut > file_frames - HANDOVER_BEFORE:
-                edge, cut = cut - (file_frames - HANDOVER_BEFORE), file_frames - HANDOVER_BEFORE
+                edge = cut - (file_frames - HANDOVER_BEFORE)
             elif place == "after" and cut < HANDOVER_AFTER:
-                edge, cut = HANDOVER_AFTER - cut, HANDOVER_AFTER
+                edge = HANDOVER_AFTER - cut
+        handover = 0
+        if kind in ("motion", "pinned"):
+            cut = cut - edge if place == "before" else cut + edge
+        else:
+            handover = edge
         available = cut if place == "before" else max(0, file_frames - cut)
         motion = kind == "motion" and place == "before"
         kind = "pinned" if kind == "motion" and not motion else kind
@@ -1204,23 +1230,26 @@ class RegenService:
         aligned = (C.align_before_pin if place == "before" else C.align_after_pin)(manifest, cut, frames)
         if aligned["grade"] == "latent" and aligned.get("source") == "latent_carry":
             aligned["reason"] = "saved by Latent Carry"
-        if side.get("pixel") and aligned["grade"] == "latent" and aligned["shift"]:
-            aligned = {"start": cut - frames if place == "before" else cut, "cut": cut, "grade": "pixel", "shift": 0, "reason": "kept your cut"}
         if aligned["grade"] != "latent" and abs(src_fps - gen_fps) >= 1e-3:
             aligned["reason"] = f"the clip is {src_fps:g} fps; pins are re-encoded at {gen_fps:g} fps"
         if edge:
-            note = f"cut kept {edge} frame{'s' if edge > 1 else ''} off the file's {'end' if place == 'before' else 'start'} (the VAE's edge frames)"
+            note = f"seamless join: the new footage takes over the clip's {'last' if place == 'before' else 'first'} {edge} frame{'s' if edge > 1 else ''}"
             aligned["reason"] = f"{aligned['reason']}; {note}" if aligned["reason"] else note
-            aligned["shift"] = int(aligned["shift"]) + edge
-        return {"place": place, "mediaId": item["id"], "file": item["path"], "fps": src_fps, "frames": frames,
+        out_cut = int(aligned["cut"]) + (-handover if place == "before" else handover)
+        pin = {"place": place, "mediaId": item["id"], "file": item["path"], "fps": src_fps, "frames": frames,
                 "start_frame": int(aligned["start"]), "cut_frame": int(aligned["cut"]), "cut": aligned["cut"] / src_fps,
                 "shift": int(aligned["shift"]), "grade": aligned["grade"], "reason": aligned["reason"],
                 "sha": sha if aligned["grade"] == "latent" else None, "audio": bool(side.get("audio", True)),
                 "kind": kind,
                 # frames of this pin that are part of the generated run (and trimmed off it)
                 "inRun": 1 if motion else frames}
+        if handover:
+            # the held frames end at the clip's true cut; the clip stops `handover` frames earlier and the run's own
+            # rendering of those frames carries on from there
+            pin.update(handover=handover, cut_frame=out_cut, cut=out_cut / src_fps, trim=frames - handover)
+        return pin
 
-    def _motion_masked_pins(self, side, window, gen_fps):
+    def _motion_masked_pins(self, side, window, gen_fps, seamless=True):
         """Leaving a clip with motion context and a masked hold together: the neighbour's tail split in two, the
         earlier 17k frames as H3 history (clean, before the run: the motion carries on) and the last 22 frames held
         inside the run by the denoise mask (the cut falls inside one rendering: seamless). Planned as one block, so
@@ -1230,7 +1259,7 @@ class RegenService:
         block = None
         while k >= 1:
             try:
-                block = self._pin(side, "before", held_frames + k * C.GRID, gen_fps, kind="both", size=held_frames + k * C.GRID)
+                block = self._pin(side, "before", held_frames + k * C.GRID, gen_fps, kind="both", size=held_frames + k * C.GRID, seamless=seamless)
             except ValueError:
                 block = None
             if block and block["frames"] == held_frames + k * C.GRID:
@@ -1238,7 +1267,7 @@ class RegenService:
             k -= 1
             block = None
         if block is None:
-            held = self._pin(side, "before", window, gen_fps, kind="both")
+            held = self._pin(side, "before", window, gen_fps, kind="both", seamless=seamless)
             held["reason"] = "too little of the clip before the cut for motion context too; masked only" + (f"; {held['reason']}" if held["reason"] else "")
             return [held]
         history_frames = k * C.GRID
@@ -1246,6 +1275,9 @@ class RegenService:
                    "reason": f"{history_frames} frames of motion context before the held frames"}
         held = {**block, "frames": block["frames"] - history_frames, "start_frame": block["start_frame"] + history_frames,
                 "inRun": block["frames"] - history_frames}
+        if block.get("handover"):
+            held["trim"] = held["frames"] - block["handover"]
+        history.pop("handover", None), history.pop("trim", None)
         return [history, held]
 
     def _speech_at_cut(self, side, held, plan_pins):
@@ -1332,12 +1364,22 @@ class RegenService:
                 fallback[name] = masked_problem
         leave_mode = ("motion" if leave_mode == "motion_masked" else "pinned") if "leave_mode" in fallback else leave_mode
         arrive_mode = "pinned" if "arrive_mode" in fallback else arrive_mode
+        # the prompt (the dialog's, or the clip's for the range it continues), first: whether its first shot is a camera
+        # cut decides the join. A cut keeps every frame of the clip (a hard cut follows anyway); a continuation joins
+        # seamlessly (the clip's last 4 frames, at its file's end, handed to the new run).
+        if fresh:
+            prompt, shots = str(settings.get("prompt") or meta.get("prompt") or ""), []
+        else:
+            a, b = sorted(float(x) for x in (req.get("promptRange") or [0, 0]))
+            prompt_fps = caps["fps"] if not str(meta.get("force_fps") or "").strip().isdigit() else float(meta["force_fps"])
+            prompt, shots = shot_prompt(meta.get("prompt") or settings.get("prompt") or "", prompt_fps, a, b, meta.get("sliding_window_overlap") or 0) if b > a else (meta.get("prompt") or "", [])
+        join_cut = not fresh and starts_with_cut(str(req.get("prompt") or "").strip() or prompt)
         if not fresh:
             if req.get("left") and mode in ("extend", "bridge", "fill", "loop", "replace"):
                 if leave_mode == "motion_masked":
-                    pins.extend(self._motion_masked_pins(req["left"], window, gen_fps))
+                    pins.extend(self._motion_masked_pins(req["left"], window, gen_fps, seamless=not join_cut))
                 else:
-                    pins.append(self._pin(req["left"], "before", window, gen_fps, kind=leave_mode))
+                    pins.append(self._pin(req["left"], "before", window, gen_fps, kind=leave_mode, seamless=not join_cut))
             if req.get("right") and mode in ("prepend", "bridge", "fill", "loop", "replace"):
                 pins.append(self._pin(req["right"], "after", window, gen_fps, kind=arrive_mode))
             if not pins:
@@ -1347,28 +1389,10 @@ class RegenService:
                 if why:
                     p["reason"] = (f"{'motion context only' if p['kind'] == 'motion' else 'pinned inside the run'}: masked isn't available ({why})"
                                    + (f"; {p['reason']}" if p["reason"] else ""))
-                elif p["kind"] in ("masked", "both") and p["grade"] == "latent":
-                    # hand over one latent step inside the held window, where both files decode the same latents
-                    # mid-file (H3's VAE draws a file's first two and last step slightly differently)
-                    n = HANDOVER_BEFORE if p["place"] == "before" else HANDOVER_AFTER
-                    p["handover"] = n
-                    p["cut_frame"] += -n if p["place"] == "before" else n
-                    p["cut"] = p["cut_frame"] / p["fps"]
-                    p["trim"] = p["frames"] - n
-        speech = None
-        held_before = next((p for p in pins if p["place"] == "before" and p["kind"] != "history"), None)
-        if held_before and req.get("left"):
-            def plan_pins(cut_seconds):
-                side = {**req["left"], "cut": cut_seconds}
-                out = self._motion_masked_pins(side, window, gen_fps) if leave_mode == "motion_masked" else [self._pin(side, "before", window, gen_fps, kind=leave_mode)]
-                for p in out:   # the handover inside the held window, as above
-                    if p["kind"] in ("masked", "both") and p["grade"] == "latent" and "leave_mode" not in fallback:
-                        p["cut"] = (p["cut_frame"] - HANDOVER_BEFORE) / p["fps"]
-                return out
-            try:
-                speech = self._speech_at_cut(req["left"], held_before, plan_pins)
-            except Exception as error:
-                print(f"[Video Editor] speech check skipped: {error}")
+                if join_cut and p["place"] == "before" and p["kind"] != "history":
+                    note = "the prompt's first shot is a camera cut: the clip is kept whole"
+                    p["reason"] = f"{p['reason']}; {note}" if p["reason"] else note
+        speech = None   # (the move-the-cut-into-a-pause check is off for now)
         before = sum(p["inRun"] for p in pins if p["place"] == "before")
         after = sum(p["inRun"] for p in pins if p["place"] == "after")
         window_max = int(((model_def or {}).get("sliding_window_defaults") or {}).get("window_max") or 0)
@@ -1393,19 +1417,13 @@ class RegenService:
                     raise ValueError(f"the window ({window} frames) is too short for the pinned frames")
                 step_note += f" Longer than one {window / gen_fps:.1f}s window, so WanGP runs it in sliding windows; the join is in the first."
         sliding = self._window_plan(settings, model_def, lengths["total"])
-        if fresh:
-            prompt, shots = str(settings.get("prompt") or meta.get("prompt") or ""), []
-        else:
-            a, b = sorted(float(x) for x in (req.get("promptRange") or [0, 0]))
-            prompt_fps = caps["fps"] if not str(meta.get("force_fps") or "").strip().isdigit() else float(meta["force_fps"])
-            prompt, shots = shot_prompt(meta.get("prompt") or settings.get("prompt") or "", prompt_fps, a, b, meta.get("sliding_window_overlap") or 0) if b > a else (meta.get("prompt") or "", [])
         info = {"mode": mode, "model": {"type": model_type, "name": self.host.model_name(model_type)}, "capabilities": caps,
                 "fps": gen_fps, "pins": pins, "lengths": {**lengths, "newSeconds": lengths["new"] / gen_fps, "totalSeconds": lengths["total"] / gen_fps,
                                                           "trimHead": sum(p.get("trim", p["inRun"]) for p in pins if p["place"] == "before") / gen_fps,
                                                           "trimTail": sum(p.get("trim", p["inRun"]) for p in pins if p["place"] == "after") / gen_fps,
                                                           "note": step_note},
                 "windows": sliding["count"], "windowFrames": sliding["window"],
-                "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "refmods": refmods, "speech": speech,
+                "originalSeed": meta.get("seed"), "prompt": prompt, "shots": shots, "refmods": refmods, "speech": speech, "joinCut": join_cut,
                 "refs": self._public_refs(settings), "audioInputs": self._public_audio(settings),
                 "available": ok, "reason": reason, "h3": self.host.h3_status() if hasattr(self.host, "h3_status") else {"installed": False}}
         return info, settings, model_def

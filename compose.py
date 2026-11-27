@@ -61,61 +61,54 @@ def motion_window(window, available):
     return max(sizes) if sizes else 0
 
 
-def align_before_pin(manifest, cut, frames):
-    """An extend's pin: the `frames` frames ending at source frame `cut`. Latent grade needs the pin to start on the
-    saved window's grid, so the cut may move earlier. Returns {"start", "cut", "grade", "shift", "reason"}."""
-    exact = {"start": cut - frames, "cut": cut, "grade": "pixel", "shift": 0, "reason": ""}
+def _window_bounds(w):
+    """A saved window's frames as the file shows them: from its first frame the file takes ("from", where the frames
+    before it are the previous window's) to the end of what the file takes. Older manifests: offset .. offset + valid."""
+    o, valid = int(w["offset"]), int(w["valid"])
+    return o, max(o, int(w.get("from", o))), o + valid
+
+
+def _trusted_windows(manifest):
+    """Saved windows whose place in the file is known exactly. Sliding-window runs saved before 3.7 placed their windows
+    by comparing pictures, which WanGP 20's joined files throw off: those are left out (pixel grade instead)."""
     windows = (manifest or {}).get("windows") or []
+    if len(windows) > 1:
+        windows = [w for w in windows if "from" in w or w.get("source") == "latent_carry"]
+    return windows
+
+
+def align_before_pin(manifest, cut, frames):
+    """An extend's pin: the `frames` frames ending at source frame `cut`. The cut never moves (the clip's end stays
+    as it is): latent grade only when those frames happen to sit on a saved window's grid, otherwise pixel grade.
+    Returns {"start", "cut", "grade", "shift", "reason"}."""
+    exact = {"start": cut - frames, "cut": cut, "grade": "pixel", "shift": 0, "reason": ""}
+    windows = _trusted_windows(manifest)
     if not windows:
         exact["reason"] = "no saved latents for this clip (from the editor's add-on or Latent Carry)"
         return exact
-    best = None
+    start = cut - frames
     for w in windows:
-        o, valid = int(w["offset"]), int(w["valid"])
-        end = min(cut, o + valid)
-        if end - o < frames:
-            continue
-        start = o + ((end - frames - o) // GRID) * GRID
-        if start < o:
-            continue
-        shift = cut - (start + frames)
-        if best is None or shift < best["shift"]:
-            best = {"start": start, "cut": start + frames, "grade": "latent", "shift": shift, "reason": "", "source": w.get("source", "editor")}
-    if best is None:
-        exact["reason"] = "the cut is not inside one saved window"
-        return exact
-    if best["shift"] > MAX_GRID_SHIFT:
-        exact["reason"] = f"latent grade would move the cut {best['shift']} frames"
-        return exact
-    return best
+        o, first, end = _window_bounds(w)
+        if start >= first and cut <= end and (start - o) % GRID == 0:
+            return {**exact, "grade": "latent", "source": w.get("source", "editor")}
+    exact["reason"] = "the clip's end isn't on H3's latent grid (kept as it is: pixel grade)"
+    return exact
 
 
 def align_after_pin(manifest, cut, frames):
-    """A prepend's pin: the `frames` frames starting at source frame `cut` (the next clip's in-point). Latent grade may
-    move the cut later. Returns {"start", "cut", "grade", "shift", "reason"}."""
+    """A prepend's pin: the `frames` frames starting at source frame `cut` (the next clip's in-point), which never
+    moves either. Returns {"start", "cut", "grade", "shift", "reason"}."""
     exact = {"start": cut, "cut": cut, "grade": "pixel", "shift": 0, "reason": ""}
-    windows = (manifest or {}).get("windows") or []
+    windows = _trusted_windows(manifest)
     if not windows:
         exact["reason"] = "no saved latents for this clip"
         return exact
-    best = None
     for w in windows:
-        o, valid = int(w["offset"]), int(w["valid"])
-        start = o + math.ceil((cut - o) / GRID) * GRID if cut > o else o   # first grid frame at or after the cut
-        if start + frames > o + valid:
-            continue
-        shift = start - cut
-        if shift < 0:
-            continue
-        if best is None or shift < best["shift"]:
-            best = {"start": start, "cut": start, "grade": "latent", "shift": shift, "reason": "", "source": w.get("source", "editor")}
-    if best is None:
-        exact["reason"] = "the cut is not inside one saved window"
-        return exact
-    if best["shift"] > MAX_GRID_SHIFT:
-        exact["reason"] = f"latent grade would move the cut {best['shift']} frames"
-        return exact
-    return best
+        o, first, end = _window_bounds(w)
+        if cut >= first and cut + frames <= end and (cut - o) % GRID == 0:
+            return {**exact, "grade": "latent", "source": w.get("source", "editor")}
+    exact["reason"] = "the clip's start isn't on H3's latent grid (kept as it is: pixel grade)"
+    return exact
 
 
 # --------------------------------------------------------------------------- seam verdicts
